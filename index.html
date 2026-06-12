@@ -2280,6 +2280,193 @@ act('qa-sub-modal', () => {
   criarTarefaParseada(p, {});
   closeModal(); render();
 });
+/* ════════════════ ETAPA 4 — HÁBITOS (3 tipos, streaks, heatmap, fonte_auto) ════════════════ */
+const regDoDia = (h, data) => T('habito_registros').find(r => r.habito_id === h.id && r.data === (data || hoje()));
+const diaAtivo = (h, data) => (h.dias_ativos && h.dias_ativos.length ? h.dias_ativos : [0,1,2,3,4,5,6]).includes(pDate(data).getDay());
+function diaFeito(h, data) {
+  const r = regDoDia(h, data); if (!r) return false;
+  if (h.tipo === 'quantidade') return Number(r.valor) >= Number(h.meta_quantidade || 1);
+  return Number(r.valor) > 0;
+}
+const habitosAtivos = () => T('habitos').filter(h => h.ativo !== false);
+
+/* streaks (regra 2): diário quebra em dia ativo sem registro (tolerância perdoa 1 a cada 7 dias ativos);
+   semanal conta semanas cumpridas; recorde preservado sempre */
+function streakDiario(h) {
+  const regs = T('habito_registros').filter(r => r.habito_id === h.id);
+  if (!regs.length) return { atual: 0, recorde: 0 };
+  const primeiro = regs.reduce((a, r) => r.data < a ? r.data : a, hoje());
+  // dias ativos do primeiro registro até hoje
+  const dias = [];
+  for (let d = primeiro; d <= hoje(); d = addDias(d, 1)) if (diaAtivo(h, d)) dias.push(d);
+  let recorde = 0, run = 0, desdePerdao = 99;
+  for (const d of dias) {
+    desdePerdao++;
+    if (diaFeito(h, d)) { run++; }
+    else if (d === hoje()) { /* hoje ainda não conta como quebra */ }
+    else if (h.tolerancia_streak && run > 0 && desdePerdao >= 7) { desdePerdao = 0; }
+    else { run = 0; }
+    if (run > recorde) recorde = run;
+  }
+  return { atual: run, recorde };
+}
+function streakSemanal(h) {
+  const regs = T('habito_registros').filter(r => r.habito_id === h.id && Number(r.valor) > 0);
+  if (!regs.length) return { atual: 0, recorde: 0, estaSemana: 0 };
+  const porSemana = {};
+  for (const r of regs) porSemana[inicioSemana(r.data)] = (porSemana[inicioSemana(r.data)] || 0) + 1;
+  const alvo = h.freq_semanal || 1;
+  const semanaAtual = inicioSemana(hoje());
+  const primeiro = regs.reduce((a, r) => r.data < a ? r.data : a, hoje());
+  let recorde = 0, run = 0;
+  for (let s = inicioSemana(primeiro); s <= semanaAtual; s = addDias(s, 7)) {
+    const ok = (porSemana[s] || 0) >= alvo;
+    if (ok) run++;
+    else if (s !== semanaAtual) run = 0; // semana corrente em andamento não quebra
+    if (run > recorde) recorde = run;
+  }
+  return { atual: run, recorde, estaSemana: porSemana[semanaAtual] || 0 };
+}
+function habitoStreak(h) { return h.tipo === 'semanal' ? streakSemanal(h) : streakDiario(h); }
+
+/* marcar / desmarcar (manual) — regra 3: fonte_auto nunca manual */
+function marcarHabito(h, delta, data) {
+  data = data || hoje();
+  if (h.fonte_auto) { toast('Este hábito é automático — registre '+({treino:'um treino 🏋️',corrida:'uma corrida 🏃',leitura:'páginas lidas 📖'}[h.fonte_auto]||'no módulo')+' e ele marca sozinho.', {icone:'🔗'}); return false; }
+  const reg = regDoDia(h, data);
+  if (h.tipo === 'quantidade') {
+    const novo = Math.max(0, (reg ? Number(reg.valor) : 0) + (delta === undefined ? 1 : delta));
+    if (reg) dbPatch('habito_registros', reg.id, { valor: novo });
+    else dbUpsert('habito_registros', { habito_id: h.id, data, valor: novo });
+    if (novo >= Number(h.meta_quantidade || 1)) toast(h.icone + ' ' + esc(h.nome) + ': meta do dia batida! 🔥', {icone:'🎯'});
+  } else {
+    if (reg) dbDelete('habito_registros', reg.id);
+    else { dbUpsert('habito_registros', { habito_id: h.id, data, valor: 1 });
+      const s = habitoStreak(h); if (s.atual >= 2) toast('🔥 ' + s.atual + (h.tipo==='semanal'?' semanas':' dias') + ' seguidos de ' + esc(h.nome) + '!'); }
+  }
+  if (window.checkConquistas) checkConquistas('habito');
+  return true;
+}
+/* integração automática (treino / corrida / leitura) — seção 4 */
+function autoHabito(fonte, valor) {
+  habitosAtivos().filter(h => h.fonte_auto === fonte).forEach(h => {
+    const reg = regDoDia(h);
+    if (h.tipo === 'quantidade') {
+      const novo = (reg ? Number(reg.valor) : 0) + (valor || 1);
+      if (reg) dbPatch('habito_registros', reg.id, { valor: novo });
+      else dbUpsert('habito_registros', { habito_id: h.id, data: hoje(), valor: novo });
+    } else if (!reg) {
+      dbUpsert('habito_registros', { habito_id: h.id, data: hoje(), valor: valor || 1 });
+    }
+  });
+}
+
+/* chips de hábitos (Hoje + página) — 1 toque */
+function habitoChipsHTML() {
+  const hs = habitosAtivos().filter(h => h.tipo === 'semanal' || diaAtivo(h, hoje()));
+  if (!hs.length) return '';
+  return '<div class="row wrap">' + hs.map(h => {
+    const feito = h.tipo === 'semanal' ? !!regDoDia(h) : diaFeito(h, hoje());
+    const reg = regDoDia(h);
+    let extra = '';
+    if (h.tipo === 'quantidade') extra = ' ' + fmtNum(reg ? reg.valor : 0) + '/' + fmtNum(h.meta_quantidade||1);
+    if (h.tipo === 'semanal') { const s = streakSemanal(h); extra = ' ' + s.estaSemana + '/' + (h.freq_semanal||1) + ' sem.'; }
+    return '<span class="chip'+(feito?' done':'')+'" data-act="hab-marcar" data-id="'+h.id+'">'+h.icone+' '+esc(h.nome)+extra+(h.fonte_auto?' 🔗':'')+'</span>';
+  }).join('') + '</div>';
+}
+act('hab-marcar', el => {
+  const h = byId('habitos', el.dataset.id); if (!h) return;
+  if (h.tipo === 'quantidade' && Number(h.meta_quantidade) > 1 && !h.fonte_auto) {
+    const reg = regDoDia(h);
+    modal('<div class="bx-h"><div class="h2">'+h.icone+' '+esc(h.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<p class="muted small" style="margin-top:0">Hoje: <b>'+fmtNum(reg?reg.valor:0)+'</b> / '+fmtNum(h.meta_quantidade)+' '+esc(h.unidade||'')+'</p>'
+      + '<div class="row"><button class="btn big" data-act="hab-qtd" data-id="'+h.id+'" data-d="1">+1</button>'
+      + '<button class="btn big" data-act="hab-qtd" data-id="'+h.id+'" data-d="-1">−1</button></div>'
+      + '<form class="row" style="margin-top:10px" data-sub="hab-qtd-livre" data-id="'+h.id+'">'
+      + '<input class="input" type="number" step="any" id="hab-qtd-inp" placeholder="quantidade…" style="flex:1"><button class="btn primary" type="submit">Somar</button></form>');
+  } else {
+    const antes = regDoDia(h) ? {...regDoDia(h)} : null;
+    if (marcarHabito(h)) render();
+  }
+});
+act('hab-qtd', el => { const h = byId('habitos', el.dataset.id); marcarHabito(h, Number(el.dataset.d)); closeModal(); render(); });
+act('hab-qtd-livre', form => { const h = byId('habitos', form.dataset.id); const v = Number($('#hab-qtd-inp').value);
+  if (v) { marcarHabito(h, v); } closeModal(); render(); });
+
+/* heatmap de um hábito */
+function heatmapHabito(h, nDias) {
+  const porDia = {};
+  T('habito_registros').filter(r => r.habito_id === h.id).forEach(r => porDia[r.data] = Number(r.valor) || 0);
+  const meta = h.tipo === 'quantidade' ? Number(h.meta_quantidade || 1) : 1;
+  return heatmapHTML(porDia, nDias || 91, v => v >= meta ? 4 : v >= meta*0.66 ? 3 : v >= meta*0.33 ? 2 : v > 0 ? 1 : 0);
+}
+
+/* página HÁBITOS */
+reg('habitos', {
+  titulo: 'Hábitos',
+  render: () => {
+    const hs = habitosAtivos();
+    const arquivados = T('habitos').filter(h => h.ativo === false);
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🔁 Hábitos</div><button class="btn primary small" data-act="hab-add">+ Hábito</button></div>';
+    html += '<div class="card"><div class="h3">Hoje</div>' + (habitoChipsHTML() || '<span class="muted small">Nenhum hábito para hoje.</span>') + '</div>';
+    html += hs.map(h => {
+      const s = habitoStreak(h);
+      const tipoLabel = h.tipo === 'diario' ? 'diário' : h.tipo === 'semanal' ? (h.freq_semanal||1)+'×/semana' : fmtNum(h.meta_quantidade||1)+' '+esc(h.unidade||'')+'/dia';
+      const recomeço = s.atual === 0 && s.recorde > 0;
+      return '<div class="card"><div class="card-h"><span style="font-size:22px">'+h.icone+'</span>'
+        + '<div style="flex:1"><div class="h2" style="margin:0">'+esc(h.nome)+(h.fonte_auto?' <span class="badge acc">auto 🔗</span>':'')+'</div>'
+        + '<div class="tiny muted">'+tipoLabel+' · '+(areaDe(h.area_id)?areaDe(h.area_id).nome:'sem área')+(h.tolerancia_streak?' · tolerância ✓':'')+'</div></div>'
+        + '<div class="center"><div style="font-size:17px;font-weight:800">'+(s.atual>0?'<span class="fire">🔥</span> '+s.atual:'—')+'</div><div class="tiny muted">recorde '+s.recorde+'</div></div>'
+        + '<button class="iconbtn" data-act="hab-edit" data-id="'+h.id+'">✏️</button></div>'
+        + (recomeço ? '<div class="banner acc" style="margin:4px 0 10px">🌱 Recomeço faz parte. Seu recorde de <b>'+s.recorde+(h.tipo==='semanal'?' semanas':' dias')+'</b> continua seu.</div>' : '')
+        + heatmapHabito(h) + '</div>';
+    }).join('') || '<div class="card"><div class="empty"><span class="em">🔁</span>Crie seu primeiro hábito — pequeno e fácil de manter.</div></div>';
+    if (arquivados.length) html += '<details class="help"><summary>📦 Arquivados ('+arquivados.length+')</summary><div class="row wrap" style="margin-top:8px">'
+      + arquivados.map(h => '<span class="chip" data-act="hab-edit" data-id="'+h.id+'">'+h.icone+' '+esc(h.nome)+'</span>').join('') + '</div></details>';
+    return html;
+  }
+});
+const habFields = () => [
+  {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Meditar'},
+  {k:'icone', l:'Ícone (emoji)', meia:1, def:'✅'},
+  {k:'area_id', t:'sel', l:'Área', meia:1, opts: optsAreas()},
+  {k:'tipo', t:'sel', l:'Tipo', opts:[{v:'diario',t:'Diário (marcar o dia)'},{v:'semanal',t:'Semanal (X vezes por semana)'},{v:'quantidade',t:'Quantidade por dia (ex.: 8 copos)'}]},
+  {k:'meta_quantidade', t:'num', l:'Meta por dia (se quantidade)', meia:1},
+  {k:'unidade', l:'Unidade', meia:1, ph:'copos, páginas…'},
+  {k:'freq_semanal', t:'num', l:'Vezes por semana (se semanal)', meia:1},
+  {k:'fonte_auto', t:'sel', l:'Marcação automática', meia:1, opts:[{v:'',t:'manual'},{v:'treino',t:'🏋️ ao registrar treino'},{v:'corrida',t:'🏃 ao registrar corrida'},{v:'leitura',t:'📖 ao registrar leitura'}], dica:'hábito automático nunca é marcado à mão'},
+  {k:'tolerancia_streak', t:'chk', l:'Tolerância no streak', dica:'perdoa 1 falha a cada 7 dias ativos'}
+];
+function diasAtivosChips(sel) {
+  return '<div class="field"><label>Dias ativos</label><div class="row wrap" id="hab-dias">'
+    + DIAS_SEM.map((d,i) => '<span class="chip mini'+((sel||[0,1,2,3,4,5,6]).includes(i)?' sel':'')+'" data-act="td-rec-dia" data-d="'+i+'">'+d+'</span>').join('') + '</div></div>';
+}
+act('hab-add', () => editModal({ titulo:'Novo hábito', fields: habFields(), extra: diasAtivosChips(null),
+  onSave: v => { v.dias_ativos = $$('#hab-dias .chip.sel').map(c => Number(c.dataset.d)); if (!v.dias_ativos.length) v.dias_ativos = [0,1,2,3,4,5,6];
+    v.fonte_auto = v.fonte_auto || null; v.ativo = true; dbUpsert('habitos', v); render(); } }));
+act('hab-edit', el => {
+  const h = byId('habitos', el.dataset.id);
+  editModal({ titulo:'Editar hábito', fields: habFields(), vals: h, extra: diasAtivosChips(h.dias_ativos)
+      + '<button type="button" class="btn small'+(h.ativo===false?' ok':'')+'" data-act="hab-arq" data-id="'+h.id+'" style="margin-bottom:10px">'+(h.ativo===false?'▶️ Reativar hábito':'📦 Arquivar hábito (pausa sem perder histórico)')+'</button>',
+    onSave: v => { v.dias_ativos = $$('#hab-dias .chip.sel').map(c => Number(c.dataset.d)); if (!v.dias_ativos.length) v.dias_ativos = [0,1,2,3,4,5,6];
+      v.fonte_auto = v.fonte_auto || null; dbPatch('habitos', h.id, v); render(); },
+    onDelete: () => {
+      const regs = T('habito_registros').filter(r => r.habito_id === h.id);
+      const bkpH = {...h}, bkpR = regs.map(r => ({...r}));
+      regs.forEach(r => dbDelete('habito_registros', r.id));
+      dbDelete('habitos', h.id); render();
+      toast('Hábito e histórico excluídos.', {undo: () => { dbUpsert('habitos', bkpH); bkpR.forEach(r => dbUpsert('habito_registros', r)); render(); }});
+    } });
+});
+act('hab-arq', el => { const h = byId('habitos', el.dataset.id); dbPatch('habitos', h.id, {ativo: h.ativo === false}); closeModal(); render(); });
+
+/* FAB: hábito */
+act('qa-habito', () => {
+  closeModal();
+  modal('<div class="bx-h"><div class="h2">🔁 Marcar hábito</div><button class="btn small" data-act="hab-add-close">+ Novo</button></div>'
+    + (habitoChipsHTML() || '<div class="empty"><span class="em">🔁</span>Nenhum hábito ainda.</div>'));
+});
+act('hab-add-close', () => { closeModal(); Actions['hab-add'](); });
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
