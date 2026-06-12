@@ -2770,6 +2770,126 @@ reg('hoje', {
     });
   }
 });
+/* ════════════════ ETAPA 6 — RITUAL DIÁRIO (planejar / encerrar — opcional, sem punição) ════════════════ */
+const diaRow = data => byId('dias', data || hoje());
+function ritualBotoesHTML() {
+  const d = diaRow() || {};
+  return '<div class="row" style="margin-bottom:14px">'
+    + '<button class="btn '+(d.planejado?'ok':'primary')+'" data-act="ritual-planejar" style="flex:1">'+(d.planejado?'✓ Dia planejado':'▶ Planejar o dia')+'</button>'
+    + '<button class="btn '+(d.encerrado?'ok':'')+'" data-act="ritual-encerrar" style="flex:1">'+(d.encerrado?'✓ Dia encerrado':'◼ Encerrar o dia')+'</button></div>';
+}
+/* ---- Planejar (manhã, ~2 min) ---- */
+act('ritual-planejar', () => {
+  window._ritPasso = tarefasPendentes().some(t => t.vencimento && t.vencimento < hoje()) ? 1 : 2;
+  modal('<div id="rit-box"></div>', { onMount: () => ritDraw(), fixo: true });
+});
+function ritDraw() {
+  const box = $('#rit-box'); if (!box) return;
+  const passo = window._ritPasso;
+  const dots = '<div class="steps-dots">'+[1,2,3].map(i => '<i class="'+(i===passo?'on':'')+'"></i>').join('')+'</div>';
+  if (passo === 1) {
+    const atras = ordenar(tarefasPendentes().filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+    if (!atras.length) { window._ritPasso = 2; ritDraw(); return; }
+    box.innerHTML = '<div class="bx-h"><div class="h2">☀️ 1/3 · Tarefas vencidas</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<p class="muted small" style="margin-top:0">Rollover consciente: decida o destino de cada uma. Abandonar é legítimo.</p>'
+      + '<div class="list">' + atras.map(t => taskItemHTML(t, {rollover:true})).join('') + '</div>'
+      + '<div class="bx-foot"><button class="btn primary" data-act="rit-prox">Continuar →</button></div>' + dots;
+  } else if (passo === 2) {
+    const cap = capacidadeDia();
+    const cls = cap.pct > 1 ? 'err' : cap.pct > 0.8 ? 'warn' : 'ok';
+    const deHoje = ordenar(tarefasPendentes().filter(t => t.vencimento === hoje()), t => t.prioridade||4);
+    const backlog = ordenar(tarefasPendentes().filter(t => !t.vencimento), t => t.prioridade||4).slice(0, 20);
+    const linha = (t, sel) => '<div class="item" data-act="rit-toggle" data-id="'+t.id+'" style="padding:8px 4px">'
+      + '<span class="check p'+(t.prioridade||4)+(sel?' ck':'')+'" style="border-radius:6px"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">'+(t.estimativa_min?'⏳ '+fmtMin(t.estimativa_min):'sem estimativa')+(t.hora?' · ⏰'+fmtHora(t.hora):'')+'</div></div></div>';
+    box.innerHTML = '<div class="bx-h"><div class="h2">☀️ 2/3 · O que cabe no dia?</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<div style="position:sticky;top:-18px;background:var(--card);padding:6px 0;z-index:2"><div class="row" style="margin-bottom:4px"><span class="small bold">Capacidade</span><span class="sp"></span><span class="small '+cls+'">'+fmtMin(cap.min)+' / '+fmtMin(cap.janela)+'</span></div>'
+      + '<div class="bar"><i class="'+cls+'" style="width:'+clamp(cap.pct*100,2,100)+'%"></i></div></div>'
+      + '<div class="sec-head">Para hoje ('+deHoje.length+') — toque para tirar</div><div class="list">'+(deHoje.map(t => linha(t, true)).join('')||'<span class="tiny muted">nada ainda</span>')+'</div>'
+      + '<div class="sec-head">Backlog (sem data) — toque para puxar</div><div class="list">'+(backlog.map(t => linha(t, false)).join('')||'<span class="tiny muted">backlog vazio</span>')+'</div>'
+      + '<div class="bx-foot"><button class="btn primary" data-act="rit-prox">Continuar →</button></div>' + dots;
+  } else {
+    const p1s = tarefasPendentes().filter(t => t.vencimento === hoje() && (t.prioridade||4) === 1);
+    const comBloco = new Set(blocosDoDia(hoje()).map(b => b.tarefa_id).filter(Boolean));
+    const semBloco = p1s.filter(t => !comBloco.has(t.id));
+    box.innerHTML = '<div class="bx-h"><div class="h2">☀️ 3/3 · Blocos para as P1</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + (semBloco.length
+        ? '<p class="muted small" style="margin-top:0">Reservar horário para o mais importante multiplica a chance de acontecer.</p><div class="list">'
+          + semBloco.map(t => { const slot = proximoSlotLivre(Number(t.estimativa_min)||60);
+            return '<div class="item" style="cursor:default"><div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">P1 · '+(t.estimativa_min?fmtMin(t.estimativa_min):'60min')+'</div></div>'
+              + '<button class="btn small primary" data-act="rit-bloco" data-id="'+t.id+'" data-slot="'+slot+'">📅 '+slot.slice(11,16)+'</button></div>'; }).join('') + '</div>'
+        : '<div class="empty"><span class="em">'+(p1s.length?'👏':'🧘')+'</span>'+(p1s.length?'Todas as P1 de hoje já têm bloco na agenda.':'Sem P1 hoje — dia de fluxo.')+'</div>')
+      + '<div class="bx-foot"><button class="btn primary big" data-act="rit-fim">✓ Começar o dia</button></div>' + dots;
+  }
+}
+function proximoSlotLivre(durMin) {
+  const ocup = blocosDoDia(hoje()).map(b => [new Date(b.inicio).getTime(), new Date(b.fim).getTime()]);
+  const agora = new Date();
+  let ini = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), Math.max(H_INI, agora.getHours()), agora.getMinutes() < 30 ? 30 : 0);
+  if (agora.getMinutes() >= 30) ini.setHours(ini.getHours() + 1);
+  if (ini < agora) ini = new Date(agora.getTime() + 10*60000);
+  for (let i = 0; i < 36; i++) {
+    const fim = new Date(ini.getTime() + durMin*60000);
+    if (fim.getHours() >= H_FIM && fim.getMinutes() > 0) break;
+    const livre = !ocup.some(([a, b]) => ini.getTime() < b && fim.getTime() > a);
+    if (livre) return ini.toISOString();
+    ini = new Date(ini.getTime() + 30*60000);
+  }
+  return ini.toISOString();
+}
+act('rit-prox', () => { window._ritPasso++; ritDraw(); });
+act('rit-toggle', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t) return;
+  dbPatch('tarefas', t.id, { vencimento: t.vencimento === hoje() ? null : hoje() });
+  ritDraw();
+});
+act('rit-bloco', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t) return;
+  const ini = el.dataset.slot, dur = Number(t.estimativa_min) || 60;
+  dbUpsert('blocos', { titulo: t.titulo, area_id: t.area_id, projeto_id: t.projeto_id, tarefa_id: t.id,
+    inicio: ini, fim: new Date(new Date(ini).getTime() + dur*60000).toISOString(), foco: false });
+  toast('Bloco criado ✓', {icone:'📅'});
+  ritDraw();
+});
+act('rit-fim', () => {
+  dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
+  closeModal(true); render();
+  toast('Dia planejado. Agora é executar — um passo de cada vez. 💪', {ms:4500});
+});
+/* ---- Encerrar (noite, ~30 s) ---- */
+act('ritual-encerrar', () => {
+  const d = diaRow() || {};
+  const feitas = T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === hoje()).length;
+  const habs = habitosAtivos().filter(h => h.tipo !== 'semanal' && diaAtivo(h, hoje()));
+  const habsOk = habs.filter(h => diaFeito(h, hoje())).length + habitosAtivos().filter(h => h.tipo==='semanal' && regDoDia(h)).length;
+  const minFoco = sum(blocosDoDia(hoje()).filter(b => b.tempo_real_min).map(b => b.tempo_real_min));
+  const escala = (nome, val, emojis) => '<div class="field"><label>'+nome+'</label><div class="row">'
+    + [1,2,3,4,5].map(n => '<button type="button" class="chip'+(val===n?' sel':'')+'" data-rit-esc="'+nome+'" data-v="'+n+'" style="flex:1;justify-content:center">'+emojis[n-1]+'</button>').join('')+'</div></div>';
+  modal('<div class="bx-h"><div class="h2">🌙 Encerrar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="row" style="margin-bottom:12px"><div class="kpi" style="flex:1"><div class="l">tarefas</div><div class="v">'+feitas+'</div></div>'
+    + '<div class="kpi" style="flex:1"><div class="l">hábitos</div><div class="v">'+habsOk+'</div></div>'
+    + '<div class="kpi" style="flex:1"><div class="l">tempo real</div><div class="v" style="font-size:17px">'+fmtMin(minFoco)+'</div></div></div>'
+    + escala('Energia', d.energia, ['🪫','😴','😐','🙂','⚡'])
+    + escala('Humor', d.humor, ['😞','😕','😐','🙂','😄'])
+    + '<div class="field"><label>Nota do dia (opcional)</label><textarea class="textarea" id="rit-nota" rows="2" placeholder="o que vale lembrar de hoje?">'+esc(d.nota||'')+'</textarea></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Depois</button><button class="btn primary" data-act="rit-encerrar-save">✓ Fechar o dia</button></div>',
+    { onMount: ov => {
+        ov._energia = d.energia || null; ov._humor = d.humor || null;
+        ov.addEventListener('click', e => {
+          const b = e.target.closest('[data-rit-esc]'); if (!b) return;
+          const grupo = b.dataset.ritEsc;
+          if (grupo === 'Energia') ov._energia = Number(b.dataset.v); else ov._humor = Number(b.dataset.v);
+          ov.querySelectorAll('[data-rit-esc="'+grupo+'"]').forEach(c => c.classList.toggle('sel', c === b));
+        });
+      } });
+});
+act('rit-encerrar-save', el => {
+  const ov = el.closest('.overlay');
+  dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), energia: ov._energia, humor: ov._humor,
+    nota: $('#rit-nota').value.trim() || null, encerrado: true });
+  closeModal(); render();
+  toast((ov._energia && ov._energia <= 2 ? 'Dia pesado — descansar também é progresso. 🌙' : 'Dia fechado. Até amanhã! 🌙'), {ms:4200});
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
