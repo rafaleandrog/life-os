@@ -3833,6 +3833,248 @@ act('cap-insight', () => {
   toast('💡 Insight salvo — entra na repetição espaçada.');
   $('#cap-bar').style.display = 'none';
 });
+/* ════════════════ ETAPA 11 — AGENDA SEMANAL + TEMPLATES + ROTINAS GUIADAS + RELATÓRIO ════════════════ */
+const PXH_W = 30; // px por hora na grade semanal
+function agendaSemanaHTML(ini) {
+  const horas = H_FIM - H_INI;
+  let head = '<div class="wh"></div>', cols = '';
+  for (let i = 0; i < 7; i++) {
+    const d = addDias(ini, i);
+    head += '<div class="wh'+(d===hoje()?' acc':'')+'" data-act="nav" data-r="agenda/dia/'+d+'" style="cursor:pointer">'+DIAS_SEM[pDate(d).getDay()]+'<br>'+pDate(d).getDate()+'</div>';
+    let evs = '';
+    for (const b of blocosDoDia(d)) {
+      const bi = new Date(b.inicio), bf = new Date(b.fim);
+      const top = Math.max(0, (bi.getHours()-H_INI)*PXH_W + bi.getMinutes()*PXH_W/60);
+      const alt = Math.max(14, (bf-bi)/36e5*PXH_W - 2);
+      const cor = corArea(b.area_id);
+      evs += '<div class="tl-ev" data-act="bloco-edit" data-id="'+b.id+'" style="left:2px;right:2px;top:'+top+'px;height:'+alt+'px;background:'+cor+'22;border-color:'+cor+'66;color:'+cor+';font-size:10px;padding:1px 4px">'+(b.foco?'🎯':'')+esc(b.titulo)+'</div>';
+    }
+    for (const t of tarefasPendentes().filter(t => t.vencimento === d && t.hora)) {
+      const [h, m] = t.hora.split(':').map(Number);
+      if (h < H_INI) continue;
+      evs += '<div class="tl-task" data-act="task-open" data-id="'+t.id+'" style="left:2px;right:2px;top:'+((h-H_INI)*PXH_W+(m||0)*PXH_W/60)+'px;font-size:9.5px;padding:0 4px">⏰'+esc(t.titulo)+'</div>';
+    }
+    let linhas = '';
+    for (let h = 0; h < horas; h++) linhas += '<div data-act="ag-slot" data-data="'+d+'" data-h="'+(H_INI+h)+'" style="height:'+PXH_W+'px;border-bottom:1px dashed rgba(42,46,58,.4);cursor:pointer"></div>';
+    cols += '<div class="weekcol">'+linhas+evs+'</div>';
+  }
+  let eixo = '';
+  for (let h = H_INI; h < H_FIM; h++) eixo += '<div style="height:'+PXH_W+'px;font-size:9.5px;color:var(--txt2);text-align:right;padding-right:6px">'+pad2(h)+'h</div>';
+  return '<div class="card pad0" style="overflow-x:auto"><div class="weekgrid" style="min-width:680px">'+head+'<div>'+eixo+'</div>'+cols+'</div></div>';
+}
+act('ag-slot', el => blocoModal(null, { data: el.dataset.data, inicio: pad2(el.dataset.h)+':00', fim: pad2(Math.min(23, Number(el.dataset.h)+1))+':00' }));
+
+reg('agenda', {
+  titulo: 'Agenda',
+  render: (params) => {
+    const aba = params[0] || 'semana';
+    let html = '<div class="row wrap" style="margin-bottom:10px"><div class="h1" style="flex:1">📅 Agenda</div>'
+      + '<div class="seg"><button class="'+(aba==='semana'?'on':'')+'" data-act="nav" data-r="agenda">Semana</button>'
+      + '<button class="'+(aba==='dia'?'on':'')+'" data-act="nav" data-r="agenda/dia/'+hoje()+'">Dia</button>'
+      + '<button class="'+(aba==='rotinas'?'on':'')+'" data-act="nav" data-r="agenda/rotinas">Rotinas</button>'
+      + '<button class="'+(aba==='relatorio'?'on':'')+'" data-act="nav" data-r="agenda/relatorio">Relatório</button></div></div>';
+    if (aba === 'semana') {
+      const ini = params[1] || inicioSemana(hoje());
+      html += '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="agenda/semana/'+addDias(ini,-7)+'">←</button>'
+        + '<b class="small" style="flex:1;text-align:center">'+fmtDataCurta(ini)+' – '+fmtDataCurta(addDias(ini,6))+'</b>'
+        + '<button class="btn small" data-act="nav" data-r="agenda">hoje</button>'
+        + '<button class="btn small" data-act="nav" data-r="agenda/semana/'+addDias(ini,7)+'">→</button></div>'
+        + agendaSemanaHTML(ini);
+    } else if (aba === 'dia') {
+      const d = params[1] || hoje();
+      html += '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="agenda/dia/'+addDias(d,-1)+'">←</button>'
+        + '<b class="small" style="flex:1;text-align:center">'+ucfirst(fmtData(d))+'</b>'
+        + '<button class="btn small" data-act="nav" data-r="agenda/dia/'+hoje()+'">hoje</button>'
+        + '<button class="btn small" data-act="nav" data-r="agenda/dia/'+addDias(d,1)+'">→</button></div>'
+        + '<div class="row wrap" style="margin-bottom:10px"><button class="btn small primary" data-act="qa-bloco">+ Bloco</button>'
+        + '<button class="btn small" data-act="modelo-salvar-dia" data-d="'+d+'">💾 Salvar dia como modelo</button>'
+        + '<button class="btn small" data-act="modelo-aplicar" data-d="'+d+'">📋 Aplicar modelo</button></div>'
+        + '<div class="card">'+agendaDiaHTML(d)+'</div>';
+    } else if (aba === 'rotinas') {
+      html += rotinasTabHTML();
+    } else {
+      const ini = params[1] || inicioSemana(hoje());
+      html += relatorioTabHTML(ini);
+    }
+    return html;
+  },
+  mount: (params) => {
+    if ((params[0]||'semana') === 'dia') {
+      let x0 = null;
+      const tl = $('.timeline'); if (!tl) return;
+      tl.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, {passive:true});
+      tl.addEventListener('touchend', e => {
+        if (x0 === null) return;
+        const dx = e.changedTouches[0].clientX - x0;
+        const d = params[1] || hoje();
+        if (dx < -60) nav('agenda/dia/'+addDias(d,1));
+        if (dx > 60) nav('agenda/dia/'+addDias(d,-1));
+        x0 = null;
+      }, {passive:true});
+    }
+  }
+});
+
+/* ---- templates de rotina ---- */
+act('modelo-salvar-dia', el => {
+  const d = el.dataset.d;
+  const bs = blocosDoDia(d);
+  if (!bs.length) { toast('Este dia não tem blocos para salvar.'); return; }
+  editModal({ titulo:'Salvar dia como modelo', fields:[{k:'nome', l:'Nome do modelo', req:1, foco:1, ph:'ex.: Dia ideal de trabalho'}],
+    onSave: v => {
+      dbUpsert('rotina_modelos', { nome: v.nome, guiada: false,
+        blocos: ordenar(bs, b => b.inicio).map(b => ({ titulo: b.titulo, inicio: horaDe(b.inicio), dur_min: Math.round(blocoMin(b)), area_id: b.area_id || null })) });
+      toast('Modelo salvo ✓ (aba Rotinas)', {icone:'💾'}); render();
+    } });
+});
+act('modelo-aplicar', el => {
+  const d = el.dataset.d;
+  const ms = T('rotina_modelos');
+  if (!ms.length) { toast('Nenhum modelo salvo ainda.'); return; }
+  modal('<div class="bx-h"><div class="h2">📋 Aplicar modelo em '+fmtData(d)+'</div><button class="iconbtn" data-act="m-close">✕</button></div><div class="col">'
+    + ms.map(m => '<button class="btn big" data-act="modelo-aplicar-ok" data-id="'+m.id+'" data-d="'+d+'" style="justify-content:space-between"><span>'+(m.guiada?'🧭 ':'')+esc(m.nome)+'</span><span class="tiny muted">'+(m.blocos||[]).length+' blocos</span></button>').join('')+'</div>');
+});
+act('modelo-aplicar-ok', el => {
+  const m = byId('rotina_modelos', el.dataset.id); const d = el.dataset.d;
+  const criados = [];
+  for (const it of (m.blocos||[])) {
+    if (!it.inicio) continue;
+    const ini = isoLocal(d, it.inicio);
+    criados.push(dbUpsert('blocos', { titulo: it.titulo, area_id: it.area_id||null,
+      inicio: ini, fim: new Date(new Date(ini).getTime() + (it.dur_min||60)*60000).toISOString(), foco: false, template: m.nome }));
+  }
+  closeModal(); render();
+  toast(criados.length + ' blocos criados a partir de "'+esc(m.nome)+'" ✓', { undo: () => { criados.forEach(b => dbDelete('blocos', b.id)); render(); } });
+});
+function rotinasTabHTML() {
+  const ms = T('rotina_modelos');
+  return '<button class="btn primary" data-act="modelo-novo" style="margin-bottom:14px">+ Novo modelo / rotina guiada</button>'
+    + (ms.map(m => '<div class="card"><div class="card-h"><div class="h2">'+(m.guiada?'🧭 ':'📋 ')+esc(m.nome)+'</div>'
+      + (m.guiada ? '<button class="btn small primary" data-act="rotina-exec" data-id="'+m.id+'">▶ Executar</button>' : '')
+      + '<button class="iconbtn" data-act="modelo-edit" data-id="'+m.id+'">✏️</button></div>'
+      + '<div class="tiny muted">'+(m.blocos||[]).map(b => (b.inicio?b.inicio+' ':'')+esc(b.titulo)+' ('+(b.dur_min||0)+'min)').join(' · ')+'</div></div>').join('')
+    || '<div class="card"><div class="empty"><span class="em">📋</span>Modelos aplicam um dia inteiro de blocos com 1 toque.<br>Rotinas guiadas executam passo a passo com timer.</div></div>');
+}
+function modeloEditor(m) {
+  const blocos = m ? [...(m.blocos||[])] : [{ titulo:'', inicio:'07:00', dur_min:15 }];
+  window._modBlocos = blocos;
+  const linha = (b, i) => '<div class="row" style="margin-bottom:6px" data-mb="'+i+'">'
+    + '<input class="input" value="'+esc(b.titulo||'')+'" data-mb-t placeholder="passo/bloco" style="flex:2">'
+    + '<input class="input" type="time" value="'+esc(b.inicio||'')+'" data-mb-i style="width:96px" title="hora (vazio em rotina guiada)">'
+    + '<input class="input" type="number" value="'+(b.dur_min||15)+'" data-mb-d style="width:70px" title="minutos">'
+    + '<button class="iconbtn" data-act="mod-rm" data-i="'+i+'">✕</button></div>';
+  modal('<div class="bx-h"><div class="h2">'+(m?'Editar':'Novo')+' modelo</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome *</label><input class="input" id="mod-nome" value="'+esc(m?m.nome:'')+'" autofocus></div>'
+    + '<label class="checkline"><input type="checkbox" id="mod-guiada"'+(m&&m.guiada?' checked':'')+'> 🧭 Rotina guiada (executa passo a passo com timer)</label>'
+    + '<div class="field" style="margin-top:8px"><label>Blocos / passos</label><div id="mod-blocos">'+blocos.map(linha).join('')+'</div>'
+    + '<button class="btn small" data-act="mod-add">+ passo</button></div>'
+    + '<div class="bx-foot">'+(m?'<button class="btn danger" data-act="mod-del" data-id="'+m.id+'">Excluir</button><span class="sp"></span>':'')
+    + '<button class="btn primary" data-act="mod-save" data-id="'+(m?m.id:'')+'">Salvar</button></div>', { wide:true });
+}
+act('modelo-novo', () => modeloEditor(null));
+act('modelo-edit', el => modeloEditor(byId('rotina_modelos', el.dataset.id)));
+act('mod-add', () => { const div = document.createElement('div');
+  $('#mod-blocos').insertAdjacentHTML('beforeend', '<div class="row" style="margin-bottom:6px"><input class="input" data-mb-t placeholder="passo/bloco" style="flex:2"><input class="input" type="time" data-mb-i style="width:96px"><input class="input" type="number" value="15" data-mb-d style="width:70px"><button class="iconbtn" data-act="mod-rm-el">✕</button></div>'); });
+act('mod-rm', el => el.closest('.row').remove());
+act('mod-rm-el', el => el.closest('.row').remove());
+act('mod-save', el => {
+  const nome = $('#mod-nome').value.trim(); if (!nome) { toast('Dê um nome.'); return; }
+  const blocos = [...$('#mod-blocos').querySelectorAll('.row')].map(r => ({
+    titulo: r.querySelector('[data-mb-t]').value.trim(), inicio: r.querySelector('[data-mb-i]').value || null,
+    dur_min: Number(r.querySelector('[data-mb-d]').value) || 15
+  })).filter(b => b.titulo);
+  if (!blocos.length) { toast('Adicione pelo menos um passo.'); return; }
+  dbUpsert('rotina_modelos', { id: el.dataset.id || undefined, nome, guiada: $('#mod-guiada').checked, blocos });
+  closeModal(); render();
+});
+act('mod-del', el => { const m = {...byId('rotina_modelos', el.dataset.id)}; dbDelete('rotina_modelos', el.dataset.id); closeModal(); render();
+  toast('Modelo excluído.', {undo: () => { dbUpsert('rotina_modelos', m); render(); }}); });
+
+/* ---- rotina guiada (execução passo a passo) ---- */
+act('rotina-exec', el => {
+  const m = byId('rotina_modelos', el.dataset.id); if (!m || !(m.blocos||[]).length) return;
+  window._rotina = { modelo: m, passo: 0, inicioPasso: Date.now(), feitos: [] };
+  const f = document.createElement('div'); f.className = 'focus-full'; f.id = 'rotinafull';
+  document.body.appendChild(f);
+  desenharRotina();
+});
+function desenharRotina() {
+  const f = $('#rotinafull'); const r = window._rotina;
+  if (!f || !r) { if (f) f.remove(); return; }
+  const passo = r.modelo.blocos[r.passo];
+  const alvo = (passo.dur_min || 15) * 60;
+  const el = (Date.now() - r.inicioPasso) / 1000;
+  f.innerHTML = '<div class="muted small">🧭 '+esc(r.modelo.nome)+' · passo '+(r.passo+1)+'/'+r.modelo.blocos.length+'</div>'
+    + '<div class="h1" style="font-size:26px;text-align:center">'+esc(passo.titulo)+'</div>'
+    + '<div class="ringwrap">'+svgAnel(Math.min(1, el/alvo), {r:96, sw:10, cor: el>=alvo?'var(--ok)':'var(--acc)'})
+    + '<div class="mid"><div class="tm" style="font-size:34px">'+fmtDur(Math.max(0, alvo-el))+'</div><div class="tiny muted">'+(el>=alvo?'tempo cumprido ✓':'restante')+'</div></div></div>'
+    + '<div class="row"><button class="btn" data-act="rotina-pular">Pular</button>'
+    + '<button class="btn primary big" data-act="rotina-feito">✓ Feito, próximo</button>'
+    + '<button class="btn ghost" data-act="rotina-sair">Encerrar</button></div>';
+}
+setInterval(() => { if ($('#rotinafull')) desenharRotina(); }, 1000);
+function rotinaAvancar(registrar) {
+  const r = window._rotina; if (!r) return;
+  const passo = r.modelo.blocos[r.passo];
+  const min = Math.max(1, Math.round((Date.now() - r.inicioPasso) / 60000));
+  if (registrar) {
+    const fim = new Date(), ini = new Date(fim.getTime() - min*60000);
+    r.feitos.push(dbUpsert('blocos', { titulo: passo.titulo, area_id: passo.area_id||null,
+      inicio: ini.toISOString(), fim: fim.toISOString(), tempo_real_min: min, foco: false, template: r.modelo.nome }));
+  }
+  r.passo++;
+  if (r.passo >= r.modelo.blocos.length) {
+    const n = r.feitos.length;
+    window._rotina = null; const f = $('#rotinafull'); if (f) f.remove();
+    toast('🧭 Rotina concluída! '+n+' de '+r.modelo.blocos.length+' passos registrados.', {ms:5000});
+    render();
+  } else { r.inicioPasso = Date.now(); desenharRotina(); }
+}
+act('rotina-feito', () => rotinaAvancar(true));
+act('rotina-pular', () => rotinaAvancar(false));
+act('rotina-sair', () => confirmBox('Encerrar a rotina agora? Os passos já feitos ficam registrados.', () => {
+  window._rotina = null; const f = $('#rotinafull'); if (f) f.remove(); render();
+}));
+
+/* ---- relatório de tempo (planejado × realizado + foco) ---- */
+function horasPorArea(ini, fim) {
+  const out = {};
+  for (const b of T('blocos')) {
+    const d = dISO(new Date(b.inicio));
+    if (d < ini || d > fim) continue;
+    const k = b.area_id || 'sem';
+    out[k] = out[k] || { plan: 0, real: 0, foco: 0 };
+    out[k].plan += blocoMin(b);
+    out[k].real += Number(b.tempo_real_min) || 0;
+    if (b.foco) out[k].foco += Number(b.tempo_real_min) || 0;
+  }
+  return out;
+}
+function relatorioTabHTML(ini) {
+  const fim = addDias(ini, 6);
+  const porArea = horasPorArea(ini, fim);
+  const blocosSemana = T('blocos').filter(b => { const d = dISO(new Date(b.inicio)); return d >= ini && d <= fim; });
+  const focoSessoes = blocosSemana.filter(b => b.foco && b.tempo_real_min);
+  const focoMin = sum(focoSessoes.map(b => b.tempo_real_min));
+  const linhas = Object.entries(porArea).map(([k, v]) => {
+    const a = k === 'sem' ? { nome:'— sem área', cor:'#9AA0B0', icone:'▫️' } : (areaDe(k) || { nome:'?', cor:'#9AA0B0', icone:'▫️' });
+    return { a, ...v };
+  }).sort((x, y) => y.plan - x.plan);
+  return '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="agenda/relatorio/'+addDias(ini,-7)+'">←</button>'
+    + '<b class="small" style="flex:1;text-align:center">'+fmtDataCurta(ini)+' – '+fmtDataCurta(fim)+'</b>'
+    + '<button class="btn small" data-act="nav" data-r="agenda/relatorio/'+addDias(ini,7)+'">→</button></div>'
+    + '<div class="grid3">'
+    + '<div class="kpi"><div class="l">planejado</div><div class="v">'+fmtMin(sum(linhas.map(l=>l.plan)))+'</div></div>'
+    + '<div class="kpi"><div class="l">realizado (timer)</div><div class="v">'+fmtMin(sum(linhas.map(l=>l.real)))+'</div></div>'
+    + '<div class="kpi"><div class="l">🎯 foco</div><div class="v">'+fmtMin(focoMin)+'</div><div class="d muted tiny">'+focoSessoes.length+' sessões</div></div></div>'
+    + '<div class="card"><div class="h2">Planejado × realizado por área</div><table class="tbl"><tr><th>Área</th><th class="num">Planejado</th><th class="num">Realizado</th><th class="num">%</th></tr>'
+    + (linhas.map(l => '<tr><td><span class="areachip" style="background:'+l.a.cor+'22;color:'+l.a.cor+'">'+l.a.icone+' '+esc(l.a.nome)+'</span></td>'
+      + '<td class="num">'+fmtMin(l.plan)+'</td><td class="num">'+fmtMin(l.real)+'</td>'
+      + '<td class="num '+(l.plan&&l.real/l.plan>=0.7?'ok':'muted')+'">'+(l.plan?Math.round(l.real/l.plan*100)+'%':'—')+'</td></tr>').join('')
+      || '<tr><td colspan="4" class="muted center">sem blocos nesta semana</td></tr>') + '</table></div>'
+    + '<div class="card"><div class="h2">🥧 Distribuição do tempo planejado</div>'
+    + svgPizza(linhas.map(l => ({ label: l.a.nome, valor: Math.round(l.plan), cor: l.a.cor })), { fmt: v => fmtMin(v) }) + '</div>';
+}
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
