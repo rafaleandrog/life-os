@@ -2890,6 +2890,217 @@ act('rit-encerrar-save', el => {
   closeModal(); render();
   toast((ov._energia && ov._energia <= 2 ? 'Dia pesado — descansar também é progresso. 🌙' : 'Dia fechado. Até amanhã! 🌙'), {ms:4200});
 });
+/* ════════════════ ETAPA 7 — MUSCULAÇÃO (registro pós-treino, sem timer de descanso) ════════════════ */
+const GRUPOS_MUSC = ['Peito','Costas','Pernas','Ombros','Bíceps','Tríceps','Core','Glúteos','Panturrilha','Outro'];
+const repsPadrao = () => Math.max(1, Number(getCfg('reps_padrao', 10)));
+const epley = (carga, reps) => carga * (1 + reps / 30); // exibido sempre como ESTIMATIVA (regra 8)
+const exsDaPlanilha = pid => ordenar(T('treino_exercicios').filter(e => e.planilha_id === pid), e => e.ordem||0);
+const regsDaSessao = sid => T('treino_registros').filter(r => r.sessao_id === sid);
+function ultimaSessao(planilhaId) {
+  return ordenar(T('treino_sessoes').filter(s => s.planilha_id === planilhaId), s => s.data + (s.criado_em||''), true)[0] || null;
+}
+function maxCargaHistorica(exNome, ateSessaoId) {
+  let max = 0;
+  for (const r of T('treino_registros')) {
+    if (r.exercicio_nome !== exNome || r.sessao_id === ateSessaoId) continue;
+    if (Number(r.carga_max) > max) max = Number(r.carga_max);
+  }
+  return max;
+}
+
+/* ---- registro do treino do dia (~1 min) ---- */
+act('qa-treino', () => {
+  closeModal();
+  const pls = ordenar(T('treino_planilhas').filter(p => p.ativo !== false), p => p.ordem||0);
+  if (!pls.length) { toast('Crie uma planilha primeiro (página Treino).', {icone:'🏋️'}); nav('treino'); return; }
+  modal('<div class="bx-h"><div class="h2">🏋️ Qual treino você fez?</div><button class="iconbtn" data-act="m-close">✕</button></div><div class="col">'
+    + pls.map(p => { const ult = ultimaSessao(p.id);
+      return '<button class="btn big" data-act="treino-form" data-id="'+p.id+'" style="justify-content:space-between">'
+        + '<span>'+esc(p.nome)+'</span><span class="tiny muted">'+(ult ? 'último: '+fmtData(ult.data) : 'nunca feito')+'</span></button>'; }).join('')
+    + '</div>');
+});
+act('treino-form', el => {
+  const p = byId('treino_planilhas', el.dataset.id); if (!p) return;
+  const exs = exsDaPlanilha(p.id);
+  const ult = ultimaSessao(p.id);
+  const ultRegs = ult ? regsDaSessao(ult.id) : [];
+  const refDe = ex => ultRegs.find(r => r.exercicio_id === ex.id) || ultRegs.find(r => r.exercicio_nome === ex.nome);
+  closeModal();
+  modal('<div class="bx-h"><div class="h2">🏋️ '+esc(p.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + (ult ? '<p class="tiny muted" style="margin-top:0">Valores da última sessão ('+fmtData(ult.data)+') já preenchidos — ajuste só o que mudou.</p>' : '')
+    + '<div class="frow"><div class="field"><label>Data</label><input type="date" class="input" id="tr-data" value="'+hoje()+'"></div></div>'
+    + exs.map(ex => { const ref = refDe(ex);
+      return '<div style="border-top:1px solid var(--border);padding:9px 0" data-ex="'+ex.id+'" data-nome="'+esc(ex.nome)+'">'
+        + '<div class="row" style="margin-bottom:6px"><b class="small">'+esc(ex.nome)+'</b><span class="tiny muted">'+esc(ex.grupo_muscular||'')+' · alvo '+(ex.series_alvo||3)+'×</span>'
+        + (ex.observacao ? '<span class="tiny muted" title="'+esc(ex.observacao)+'">ℹ️</span>' : '') + '</div>'
+        + '<div class="row"><input class="input" type="number" step="any" inputmode="decimal" data-carga placeholder="carga (kg)" value="'+(ref && ref.carga_max != null ? ref.carga_max : '')+'" style="flex:1">'
+        + '<input class="input" type="number" inputmode="numeric" data-series placeholder="séries" value="'+(ref && ref.series_feitas != null ? ref.series_feitas : (ex.series_alvo||3))+'" style="width:84px">'
+        + '<input class="input" data-obs placeholder="obs" value="" style="flex:1"></div></div>'; }).join('')
+    + (exs.length ? '' : '<div class="empty">Esta planilha não tem exercícios — edite-a na página Treino.</div>')
+    + '<div class="field" style="margin-top:10px"><label>Nota da sessão</label><input class="input" id="tr-nota" placeholder="como foi?"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button>'
+    + '<button class="btn primary big" data-act="treino-salvar" data-pl="'+p.id+'">✓ Salvar treino</button></div>', { wide:true });
+});
+act('treino-salvar', el => {
+  const ov = el.closest('.overlay');
+  const data = ov.querySelector('#tr-data').value || hoje();
+  const linhas = [...ov.querySelectorAll('[data-ex]')].map(div => ({
+    exercicio_id: div.dataset.ex, exercicio_nome: div.dataset.nome,
+    carga_max: div.querySelector('[data-carga]').value === '' ? null : Number(div.querySelector('[data-carga]').value),
+    series_feitas: div.querySelector('[data-series]').value === '' ? null : Number(div.querySelector('[data-series]').value),
+    observacao: div.querySelector('[data-obs]').value.trim() || null
+  })).filter(l => l.carga_max != null || l.series_feitas != null);
+  if (!linhas.length) { toast('Preencha pelo menos um exercício.', {icone:'🏋️'}); return; }
+  const sessao = dbUpsert('treino_sessoes', { planilha_id: el.dataset.pl, data, nota: ov.querySelector('#tr-nota').value.trim() || null });
+  const prs = [];
+  for (const l of linhas) {
+    if (l.carga_max != null && l.carga_max > 0 && l.carga_max > maxCargaHistorica(l.exercicio_nome, sessao.id)) prs.push(l.exercicio_nome + ' ' + fmtNum(l.carga_max,1) + 'kg');
+    dbUpsert('treino_registros', { sessao_id: sessao.id, ...l });
+  }
+  autoHabito('treino', 1);
+  closeModal(true);
+  toast('Treino registrado ✓ ('+linhas.length+' exercícios)', {icone:'🏋️', undo: () => {
+    regsDaSessao(sessao.id).forEach(r => dbDelete('treino_registros', r.id));
+    dbDelete('treino_sessoes', sessao.id); render();
+  }});
+  if (prs.length) setTimeout(() => toast('🏆 PR! ' + prs.join(' · '), {ms:6000}), 700);
+  if (window.checkConquistas) checkConquistas('treino');
+  render();
+});
+
+/* ---- página TREINO ---- */
+reg('treino', {
+  titulo: 'Treino',
+  render: (params) => {
+    const sessoes = ordenar(T('treino_sessoes'), s => s.data + (s.criado_em||''), true);
+    const exNomes = [...new Set(T('treino_registros').filter(r => r.carga_max != null).map(r => r.exercicio_nome))].sort();
+    const exSel = params[0] === 'ex' ? decodeURIComponent(params[1]) : (window._trEx || exNomes[0] || '');
+    window._trEx = exSel;
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🏋️ Treino</div>'
+      + '<button class="btn primary" data-act="qa-treino">+ Registrar treino</button></div>';
+    // planilhas
+    html += '<div class="grid2">' + ordenar(T('treino_planilhas').filter(p => p.ativo !== false), p => p.ordem||0).map(p => {
+      const exs = exsDaPlanilha(p.id); const ult = ultimaSessao(p.id);
+      const n = T('treino_sessoes').filter(s => s.planilha_id === p.id).length;
+      return '<div class="card"><div class="card-h"><div class="h2">'+esc(p.nome)+'</div><button class="iconbtn" data-act="planilha-edit" data-id="'+p.id+'">✏️</button></div>'
+        + '<div class="tiny muted" style="margin-bottom:8px">'+exs.length+' exercícios · '+n+' sessões · '+(ult?'último '+fmtData(ult.data):'nunca feito')+'</div>'
+        + '<div class="tiny muted" style="margin-bottom:10px">'+exs.slice(0,5).map(e => esc(e.nome)).join(' · ')+(exs.length>5?' …':'')+'</div>'
+        + '<button class="btn small primary" data-act="treino-form" data-id="'+p.id+'">Registrar este treino</button></div>';
+    }).join('') + '</div>'
+    + '<button class="btn small" data-act="planilha-add" style="margin-bottom:14px">+ Nova planilha</button>';
+    // análise por exercício
+    if (exNomes.length) {
+      const regs = T('treino_registros').filter(r => r.exercicio_nome === exSel && r.carga_max != null)
+        .map(r => ({ ...r, data: (byId('treino_sessoes', r.sessao_id)||{}).data })).filter(r => r.data);
+      const serie = ordenar(regs, r => r.data).map(r => ({ x: fmtDataCurta(r.data), y: Number(r.carga_max) }));
+      const max = Math.max(...regs.map(r => Number(r.carga_max)), 0);
+      const ult = serie.length ? serie[serie.length-1].y : 0;
+      const reps = repsPadrao();
+      html += '<div class="card"><div class="card-h"><div class="h2">📈 Evolução de carga</div>'
+        + '<select class="select" style="max-width:230px" data-chg="treino-ex-sel">'+exNomes.map(n => '<option'+(n===exSel?' selected':'')+'>'+esc(n)+'</option>').join('')+'</select></div>'
+        + svgLinha(serie, { fmt: v => fmtNum(v,1)+'kg' })
+        + '<div class="row wrap" style="margin-top:10px">'
+        + '<span class="badge acc">carga atual '+fmtNum(ult,1)+'kg</span>'
+        + '<span class="badge warn">🏆 recorde '+fmtNum(max,1)+'kg</span>'
+        + '<span class="badge">1RM estimado (Epley, '+reps+' reps): <b>'+fmtNum(epley(ult, reps),1)+'kg</b></span>'
+        + '</div><div class="tiny muted" style="margin-top:6px">1RM é estimativa de referência, nunca prescrição. Ajuste as repetições padrão em Config.</div></div>';
+    }
+    // volume por sessão
+    const ultimas = sessoes.slice(0, 12).reverse();
+    if (ultimas.length) {
+      const reps = repsPadrao();
+      const vol = ultimas.map(s => ({ x: fmtDataCurta(s.data), y: Math.round(sum(regsDaSessao(s.id).map(r => (Number(r.carga_max)||0) * (Number(r.series_feitas)||0) * reps)) / 1000) }));
+      html += '<div class="card"><div class="h2">🔢 Volume aproximado por sessão <span class="tiny muted">(t = carga×séries×'+reps+' reps)</span></div>'
+        + svgBarras(vol, { fmt: v => v+'t' }) + '</div>';
+    }
+    // frequência
+    const porDia = {}; sessoes.forEach(s => porDia[s.data] = (porDia[s.data]||0) + 1);
+    const nSem = T('treino_sessoes').filter(s => s.data >= inicioSemana(hoje())).length;
+    html += '<div class="card"><div class="card-h"><div class="h2">📅 Frequência</div><span class="badge ok">'+nSem+' nesta semana</span><span class="badge">'+sessoes.length+' no total</span></div>'
+      + heatmapHTML(porDia, 119, v => v ? 4 : 0) + '</div>';
+    // histórico
+    html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Histórico</div><div class="list" style="padding:0 10px 8px">'
+      + (sessoes.slice(0, 30).map(s => { const pl = byId('treino_planilhas', s.planilha_id);
+        return '<div class="item" data-act="sessao-abrir" data-id="'+s.id+'"><span>🏋️</span><div class="grow"><div class="ttl">'+esc(pl?pl.nome:'Treino')+'</div>'
+          + '<div class="sub">'+fmtData(s.data)+' · '+regsDaSessao(s.id).length+' exercícios'+(s.nota?' · '+esc(s.nota):'')+'</div></div></div>'; }).join('')
+      || '<div class="empty"><span class="em">🏋️</span>Nenhum treino ainda. Registrar leva ~1 minuto.</div>') + '</div></div>';
+    return html;
+  }
+});
+act('treino-ex-sel', el => { window._trEx = el.value; render(); });
+act('sessao-abrir', el => {
+  const s = byId('treino_sessoes', el.dataset.id); if (!s) return;
+  const pl = byId('treino_planilhas', s.planilha_id);
+  const regs = regsDaSessao(s.id);
+  modal('<div class="bx-h"><div class="h2">🏋️ '+esc(pl?pl.nome:'Treino')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="muted small" style="margin-top:0">'+fmtData(s.data)+(s.nota?' · '+esc(s.nota):'')+'</p>'
+    + '<table class="tbl"><tr><th>Exercício</th><th class="num">Carga</th><th class="num">Séries</th></tr>'
+    + regs.map(r => '<tr><td>'+esc(r.exercicio_nome)+(r.observacao?'<div class="tiny muted">'+esc(r.observacao)+'</div>':'')+'</td>'
+      + '<td class="num">'+(r.carga_max!=null?fmtNum(r.carga_max,1)+'kg':'—')+'</td><td class="num">'+(r.series_feitas??'—')+'</td></tr>').join('')+'</table>'
+    + '<div class="bx-foot"><button class="btn danger" data-act="sessao-del" data-id="'+s.id+'">Excluir sessão</button><span class="sp"></span><button class="btn" data-act="m-close">Fechar</button></div>');
+});
+act('sessao-del', el => {
+  const s = byId('treino_sessoes', el.dataset.id);
+  confirmBox('Excluir esta sessão e seus registros?', () => {
+    const bkpS = {...s}, bkpR = regsDaSessao(s.id).map(r => ({...r}));
+    bkpR.forEach(r => dbDelete('treino_registros', r.id));
+    dbDelete('treino_sessoes', s.id);
+    closeModal(true); render();
+    toast('Sessão excluída.', {undo: () => { dbUpsert('treino_sessoes', bkpS); bkpR.forEach(r => dbUpsert('treino_registros', r)); render(); }});
+  }, {perigo:1, sim:'Excluir'});
+});
+
+/* ---- editor de planilha ---- */
+act('planilha-add', () => editModal({ titulo:'Nova planilha', fields:[{k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Treino C — Pernas'}],
+  onSave: v => { const p = dbUpsert('treino_planilhas', { nome: v.nome, ordem: T('treino_planilhas').length, ativo: true }); render(); Actions['planilha-edit']({dataset:{id:p.id}}); } }));
+act('planilha-edit', el => {
+  const p = byId('treino_planilhas', el.dataset.id); if (!p) return;
+  const exs = exsDaPlanilha(p.id);
+  modal('<div class="bx-h"><div class="h2">✏️ '+esc(p.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome</label><input class="input" id="pl-nome" value="'+esc(p.nome)+'"></div>'
+    + '<div class="field"><label>Exercícios (em ordem)</label><div class="list">'
+    + exs.map((ex, i) => '<div class="item" style="cursor:default"><div class="grow"><div class="ttl">'+esc(ex.nome)+'</div>'
+      + '<div class="sub">'+esc(ex.grupo_muscular||'')+' · '+(ex.series_alvo||3)+'× '+(ex.observacao?' · '+esc(ex.observacao):'')+'</div></div>'
+      + '<button class="iconbtn" data-act="ex-move" data-id="'+ex.id+'" data-d="-1"'+(i===0?' disabled':'')+'>↑</button>'
+      + '<button class="iconbtn" data-act="ex-move" data-id="'+ex.id+'" data-d="1"'+(i===exs.length-1?' disabled':'')+'>↓</button>'
+      + '<button class="iconbtn" data-act="ex-edit" data-id="'+ex.id+'">✏️</button></div>').join('')
+    + (exs.length ? '' : '<span class="muted tiny">nenhum exercício</span>') + '</div></div>'
+    + '<button class="btn small" data-act="ex-add" data-pl="'+p.id+'">+ Exercício</button>'
+    + '<div class="bx-foot"><button class="btn danger" data-act="planilha-del" data-id="'+p.id+'">Excluir</button><span class="sp"></span>'
+    + '<button class="btn primary" data-act="planilha-save" data-id="'+p.id+'">Salvar</button></div>', { wide:true });
+});
+act('planilha-save', el => { dbPatch('treino_planilhas', el.dataset.id, { nome: $('#pl-nome').value.trim() || 'Planilha' }); closeModal(); render(); });
+act('planilha-del', el => {
+  const p = byId('treino_planilhas', el.dataset.id);
+  confirmBox('Excluir a planilha "'+esc(p.nome)+'"? O histórico de sessões é preservado (nomes de exercícios ficam gravados nos registros).', () => {
+    exsDaPlanilha(p.id).forEach(ex => dbDelete('treino_exercicios', ex.id));
+    dbDelete('treino_planilhas', p.id);
+    closeModal(true); render();
+  }, {perigo:1, sim:'Excluir'});
+});
+const exFields = [
+  {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Supino reto'},
+  {k:'grupo_muscular', t:'sel', l:'Grupo muscular', meia:1, opts: GRUPOS_MUSC},
+  {k:'series_alvo', t:'num', l:'Séries-alvo', meia:1, def:3},
+  {k:'observacao', l:'Observação técnica', ph:'ex.: pegada fechada, 2s na descida'}
+];
+act('ex-add', el => { const pid = el.dataset.pl;
+  editModal({ titulo:'Novo exercício', fields: exFields,
+    onSave: v => { dbUpsert('treino_exercicios', { planilha_id: pid, ...v, ordem: exsDaPlanilha(pid).length }); closeModal(true); render(); Actions['planilha-edit']({dataset:{id:pid}}); } }); });
+act('ex-edit', el => {
+  const ex = byId('treino_exercicios', el.dataset.id);
+  editModal({ titulo:'Exercício', fields: exFields, vals: ex,
+    onSave: v => { dbPatch('treino_exercicios', ex.id, v); closeModal(true); render(); Actions['planilha-edit']({dataset:{id:ex.planilha_id}}); },
+    onDelete: () => { dbDelete('treino_exercicios', ex.id); closeModal(true); render(); Actions['planilha-edit']({dataset:{id:ex.planilha_id}}); } });
+});
+act('ex-move', el => {
+  const ex = byId('treino_exercicios', el.dataset.id); const d = Number(el.dataset.d);
+  const irmaos = exsDaPlanilha(ex.planilha_id);
+  const i = irmaos.findIndex(x => x.id === ex.id), j = i + d;
+  if (j < 0 || j >= irmaos.length) return;
+  dbPatch('treino_exercicios', irmaos[i].id, {ordem: j}); dbPatch('treino_exercicios', irmaos[j].id, {ordem: i});
+  closeModal(true); Actions['planilha-edit']({dataset:{id:ex.planilha_id}});
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
