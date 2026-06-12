@@ -2467,6 +2467,309 @@ act('qa-habito', () => {
     + (habitoChipsHTML() || '<div class="empty"><span class="em">🔁</span>Nenhum hábito ainda.</div>'));
 });
 act('hab-add-close', () => { closeModal(); Actions['hab-add'](); });
+/* ════════════════ ETAPA 5 — TELA HOJE v1 (tarefas + hábitos + agenda + timer + capacidade) ════════════════ */
+const HojeExtras = { alertas: [], cartoes: [] }; // módulos posteriores se penduram aqui
+
+/* ---- blocos: helpers ---- */
+const blocoMin = b => Math.max(0, (new Date(b.fim) - new Date(b.inicio)) / 60000);
+const blocosDoDia = data => T('blocos').filter(b => dISO(new Date(b.inicio)) === data);
+function isoLocal(data, hora) { const d = pDate(data); const [h, m] = String(hora||'00:00').split(':').map(Number); d.setHours(h, m||0, 0, 0); return d.toISOString(); }
+const horaDe = iso => { const d = new Date(iso); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+
+/* ---- capacidade do dia (regra 14 — nunca bloqueia) ---- */
+function capacidadeDia(data) {
+  data = data || hoje();
+  const janela = Math.max(1, Number(getCfg('janela_util', 8))) * 60;
+  const bs = blocosDoDia(data);
+  const comBloco = new Set(bs.map(b => b.tarefa_id).filter(Boolean));
+  let min = 0;
+  for (const t of tarefasPendentes().filter(t => t.vencimento === data)) if (!comBloco.has(t.id)) min += Number(t.estimativa_min) || 0;
+  for (const b of bs) min += blocoMin(b);
+  return { min, janela, pct: min / janela };
+}
+function capacidadeHTML(data) {
+  const c = capacidadeDia(data);
+  const cls = c.pct > 1 ? 'err' : c.pct > 0.8 ? 'warn' : 'ok';
+  return '<div class="card" style="padding:12px 16px"><div class="row" style="margin-bottom:6px">'
+    + '<span class="small bold">Capacidade do dia</span><span class="sp"></span>'
+    + '<span class="small '+cls+'">'+fmtMin(c.min)+' de '+fmtMin(c.janela)+(c.pct>1?' — acima do realista ⚠️':'')+'</span></div>'
+    + '<div class="bar thick"><i class="'+cls+'" style="width:'+clamp(c.pct*100,2,100)+'%"></i></div>'
+    + (c.pct > 1 ? '<div class="tiny warn" style="margin-top:6px">Planejar demais é o caminho do abandono — considere reagendar algo.</div>' : '')
+    + '</div>';
+}
+
+/* ---- agenda do dia (05h–24h) ---- */
+const H_INI = 5, H_FIM = 24, PXH = 52;
+function agendaDiaHTML(data) {
+  data = data || hoje();
+  let horas = '';
+  for (let h = H_INI; h < H_FIM; h++) horas += '<div class="tl-hour" data-act="bloco-novo-hora" data-data="'+data+'" data-h="'+h+'"><span class="hh">'+pad2(h)+'h</span></div>';
+  let evs = '';
+  for (const b of blocosDoDia(data)) {
+    const ini = new Date(b.inicio), fim = new Date(b.fim);
+    const top = (ini.getHours() - H_INI) * PXH + ini.getMinutes() * PXH / 60;
+    const alt = Math.max(20, (fim - ini) / 36e5 * PXH - 2);
+    const cor = corArea(b.area_id);
+    evs += '<div class="tl-ev" data-act="bloco-edit" data-id="'+b.id+'" style="top:'+top+'px;height:'+alt+'px;background:'+cor+'1f;border-color:'+cor+'66;color:'+cor+'">'
+      + (b.foco?'🎯 ':'')+esc(b.titulo)+'<div class="t">'+horaDe(b.inicio)+'–'+horaDe(b.fim)+(b.tempo_real_min?' · real '+fmtMin(b.tempo_real_min):'')+'</div></div>';
+  }
+  for (const t of tarefasPendentes().filter(t => t.vencimento === data && t.hora)) {
+    const [h, m] = t.hora.split(':').map(Number);
+    if (h < H_INI) continue;
+    const top = (h - H_INI) * PXH + (m||0) * PXH / 60;
+    evs += '<div class="tl-task" style="top:'+top+'px" title="tarefa com hora">'
+      + '<span data-act="task-open" data-id="'+t.id+'" style="flex:1">⏰ '+fmtHora(t.hora)+' · '+esc(t.titulo)+'</span>'
+      + '<button class="iconbtn" data-act="task-to-bloco" data-id="'+t.id+'" title="virar bloco com duração">⤵</button></div>';
+  }
+  let agora = '';
+  if (data === hoje()) {
+    const n = new Date();
+    if (n.getHours() >= H_INI) agora = '<div class="tl-now" style="top:'+((n.getHours()-H_INI)*PXH + n.getMinutes()*PXH/60)+'px"></div>';
+  }
+  return '<div class="tl-wrap"><div class="timeline" data-agenda-dia="'+data+'">'+horas+evs+agora+'</div></div>';
+}
+act('bloco-novo-hora', (el, e) => {
+  if (e.target.closest('.tl-ev,.tl-task')) return;
+  blocoModal(null, { data: el.dataset.data, inicio: pad2(el.dataset.h)+':00', fim: pad2(Math.min(23, Number(el.dataset.h)+1))+':00' });
+});
+act('task-to-bloco', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t || !t.hora) return;
+  const dur = Number(t.estimativa_min) || 60;
+  const ini = isoLocal(t.vencimento, t.hora);
+  const b = dbUpsert('blocos', { titulo: t.titulo, area_id: t.area_id, projeto_id: t.projeto_id, tarefa_id: t.id,
+    inicio: ini, fim: new Date(new Date(ini).getTime() + dur*60000).toISOString(), foco: false });
+  toast('Bloco criado na agenda ✓', {icone:'📅', undo: () => { dbDelete('blocos', b.id); render(); }});
+  render();
+});
+function blocoModal(b, defs) {
+  const v = b ? { titulo:b.titulo, area_id:b.area_id||'', tarefa_id:b.tarefa_id||'', data: dISO(new Date(b.inicio)), inicio: horaDe(b.inicio), fim: horaDe(b.fim), foco: !!b.foco }
+              : { data: hoje(), inicio:'09:00', fim:'10:00', ...(defs||{}) };
+  const fields = [
+    {k:'titulo', l:'Título', req:1, foco:1, ph:'ex.: Deep work — projeto X'},
+    {k:'area_id', t:'sel', l:'Área', opts: optsAreas()},
+    {k:'tarefa_id', t:'sel', l:'Tarefa vinculada', opts: [{v:'',t:'— nenhuma —'}].concat(tarefasPendentes().slice(0,80).map(t => ({v:t.id, t:t.titulo})))},
+    {k:'data', t:'date', l:'Data', meia:1},
+    {k:'inicio', t:'time', l:'Início', meia:1},
+    {k:'fim', t:'time', l:'Fim', meia:1},
+    {k:'foco', t:'chk', l:'Bloco de foco 🎯'}
+  ];
+  editModal({ titulo: b ? 'Editar bloco' : 'Novo bloco', fields, vals: v,
+    onSave: nv => {
+      if (!nv.inicio || !nv.fim) { toast('Defina início e fim.'); return; }
+      const row = { id: b ? b.id : undefined, titulo: nv.titulo, area_id: nv.area_id||null, projeto_id: b ? b.projeto_id : null,
+        tarefa_id: nv.tarefa_id||null, inicio: isoLocal(nv.data, nv.inicio), fim: isoLocal(nv.data, nv.fim >= nv.inicio ? nv.fim : nv.inicio),
+        tempo_real_min: b ? b.tempo_real_min : null, foco: !!nv.foco, template: b ? b.template : null };
+      dbUpsert('blocos', row); render();
+    },
+    onDelete: b ? () => { const bkp = {...b}; dbDelete('blocos', b.id); render();
+      toast('Bloco excluído.', {undo: () => { dbUpsert('blocos', bkp); render(); }}); } : null });
+}
+act('bloco-edit', el => blocoModal(byId('blocos', el.dataset.id)));
+act('qa-bloco', () => { closeModal(); blocoModal(null); });
+
+/* ---- TIMER persistente (livre / pomodoro / foco — regra 7) ---- */
+const TIMER_LS = 'lifeos.timer';
+let TIMER = null;
+try { TIMER = JSON.parse(localStorage.getItem(TIMER_LS) || 'null'); } catch(_) {}
+const timerSalvar = () => { if (TIMER) localStorage.setItem(TIMER_LS, JSON.stringify(TIMER)); else localStorage.removeItem(TIMER_LS); };
+function beep() {
+  try { const ctx = new (window.AudioContext||window.webkitAudioContext)(); const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.value = .07; o.start();
+    setTimeout(() => { o.stop(); ctx.close(); }, 300);
+  } catch(_) {}
+  if (navigator.vibrate) navigator.vibrate(180);
+}
+function timerIniciar(o) {
+  const cfgF = Number(getCfg('pomo_foco',25)), cfgP = Number(getCfg('pomo_pausa',5));
+  TIMER = { modo: o.modo||'livre', inicio: Date.now(), inicioFase: Date.now(), fase:'foco', acumFoco: 0,
+    rotulo: o.rotulo || (o.modo==='pomo'?'Pomodoro':o.modo==='foco'?'Foco':'Tempo livre'),
+    tarefa_id: o.tarefa_id||null, area_id: o.area_id||null, alvoFoco: cfgF, alvoPausa: cfgP, alvoMin: o.alvoMin||null };
+  timerSalvar(); renderTimerPill();
+  if (o.modo === 'foco') abrirFoco();
+}
+function timerMinTrabalhados() {
+  if (!TIMER) return 0;
+  if (TIMER.modo === 'pomo') return (TIMER.acumFoco||0) + (TIMER.fase==='foco' ? (Date.now()-TIMER.inicioFase)/60000 : 0);
+  return (Date.now() - TIMER.inicio) / 60000;
+}
+function textoTimer() {
+  if (!TIMER) return '';
+  if (TIMER.modo === 'pomo') {
+    const alvo = (TIMER.fase==='foco' ? TIMER.alvoFoco : TIMER.alvoPausa) * 60;
+    const resta = Math.max(0, alvo - (Date.now()-TIMER.inicioFase)/1000);
+    return (TIMER.fase==='foco'?'':'☕ ') + fmtDur(resta);
+  }
+  return fmtDur((Date.now() - TIMER.inicio)/1000);
+}
+function timerParar(salvar) {
+  if (!TIMER) return;
+  const t = TIMER, min = Math.round(timerMinTrabalhados());
+  TIMER = null; timerSalvar(); renderTimerPill();
+  fecharFoco();
+  if (salvar && min >= 1) {
+    const fim = new Date(), ini = new Date(fim.getTime() - min*60000);
+    const tarefa = t.tarefa_id ? byId('tarefas', t.tarefa_id) : null;
+    dbUpsert('blocos', { titulo: t.rotulo, area_id: t.area_id || (tarefa ? tarefa.area_id : null),
+      projeto_id: tarefa ? tarefa.projeto_id : null, tarefa_id: t.tarefa_id,
+      inicio: ini.toISOString(), fim: fim.toISOString(), tempo_real_min: min, foco: t.modo === 'foco' });
+    toast('⏱️ ' + fmtMin(min) + ' registrados' + (t.modo==='foco' ? ' em foco 🎯' : '') + '.');
+    if (tarefa && !tarefa.concluida) {
+      modal('<div class="bx-h"><div class="h2">Bloco encerrado</div></div>'
+        + '<p>Concluir a tarefa <b>'+esc(tarefa.titulo)+'</b>?</p>'
+        + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Ainda não</button>'
+        + '<button class="btn primary" data-act="timer-concluir-tarefa" data-id="'+tarefa.id+'">✓ Concluir</button></div>');
+    }
+  } else if (!salvar) toast('Timer descartado.');
+  render();
+}
+act('timer-concluir-tarefa', el => { closeModal(); concluirTarefa(el.dataset.id); });
+function renderTimerPill() {
+  const el = $('#timerpill'); if (!el) return;
+  if (!TIMER) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'block';
+  el.innerHTML = '<div class="pill" data-act="timer-abrir"><span>'+(TIMER.modo==='pomo'?'🍅':TIMER.modo==='foco'?'🎯':'⏱️')+'</span>'
+    + '<b id="tp-tempo">'+textoTimer()+'</b><span class="lbl">'+esc(TIMER.rotulo)+'</span></div>';
+}
+act('timer-abrir', () => {
+  if (!TIMER) return;
+  modal('<div class="bx-h"><div class="h2">'+(TIMER.modo==='pomo'?'🍅 Pomodoro':TIMER.modo==='foco'?'🎯 Foco':'⏱️ Timer')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="center" style="margin:8px 0 16px"><div style="font-size:42px;font-weight:800;font-variant-numeric:tabular-nums" id="tm-big">'+textoTimer()+'</div>'
+    + '<div class="muted small">'+esc(TIMER.rotulo)+(TIMER.modo==='pomo'?' · ciclo de '+TIMER.alvoFoco+'/'+TIMER.alvoPausa+' min':'')+'</div></div>'
+    + '<div class="col">'
+    + '<button class="btn primary big" data-act="timer-stop-salvar">✓ Parar e salvar ('+fmtMin(timerMinTrabalhados())+')</button>'
+    + (TIMER.modo!=='pomo' ? '<button class="btn big" data-act="timer-tela-cheia">🎯 Tela cheia</button>' : '')
+    + '<button class="btn ghost big" data-act="timer-descartar">🗑 Descartar</button></div>');
+});
+act('timer-stop-salvar', () => { closeModal(); timerParar(true); });
+act('timer-descartar', () => { closeModal(); timerParar(false); });
+act('timer-tela-cheia', () => { closeModal(); abrirFoco(); });
+act('timer-start', el => {
+  const sel = $('#tm-tarefa');
+  const tid = sel && sel.value || null;
+  const tarefa = tid ? byId('tarefas', tid) : null;
+  timerIniciar({ modo: el.dataset.m, tarefa_id: tid, rotulo: tarefa ? tarefa.titulo : undefined, area_id: tarefa ? tarefa.area_id : null });
+  render();
+});
+
+/* foco em tela cheia (atrito positivo para sair) */
+function abrirFoco() {
+  fecharFoco();
+  const f = document.createElement('div');
+  f.className = 'focus-full'; f.id = 'focofull';
+  document.body.appendChild(f);
+  desenharFoco();
+}
+function fecharFoco() { const f = $('#focofull'); if (f) f.remove(); }
+function desenharFoco() {
+  const f = $('#focofull'); if (!f || !TIMER) { fecharFoco(); return; }
+  const alvo = (TIMER.alvoMin || (TIMER.modo==='pomo' ? (TIMER.fase==='foco'?TIMER.alvoFoco:TIMER.alvoPausa) : 50)) * 60;
+  const el = TIMER.modo==='pomo' ? (Date.now()-TIMER.inicioFase)/1000 : (Date.now()-TIMER.inicio)/1000;
+  f.innerHTML = '<div class="muted small">'+(TIMER.fase==='pausa'?'☕ pausa':'🎯 em foco')+'</div>'
+    + '<div class="ringwrap">'+svgAnel(Math.min(1, el/alvo), {r:108, sw:11, cor: TIMER.fase==='pausa'?'var(--ok)':'var(--acc)'})
+    + '<div class="mid"><div class="tm">'+textoTimer()+'</div><div class="muted small" style="max-width:200px">'+esc(TIMER.rotulo)+'</div></div></div>'
+    + '<div class="row"><button class="btn" data-act="foco-sair">Sair</button><button class="btn primary" data-act="timer-stop-salvar">✓ Concluir bloco</button></div>';
+}
+act('foco-sair', () => {
+  modal('<div class="bx-h"><div class="h2">Sair do foco?</div></div><p class="muted small" style="margin-top:0">Sem punição — mas que tal mais 5 minutos?</p>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Continuar focado</button>'
+    + '<button class="btn" data-act="foco-minimizar">Minimizar (timer segue)</button>'
+    + '<button class="btn primary" data-act="timer-stop-salvar">Parar e salvar</button></div>');
+});
+act('foco-minimizar', () => { closeModal(); fecharFoco(); });
+setInterval(() => {
+  if (!TIMER) return;
+  const tp = $('#tp-tempo'); if (tp) tp.textContent = textoTimer();
+  const big = $('#tm-big'); if (big) big.textContent = textoTimer();
+  if ($('#focofull')) desenharFoco();
+  if (TIMER.modo === 'pomo') {
+    const alvo = (TIMER.fase==='foco' ? TIMER.alvoFoco : TIMER.alvoPausa) * 60;
+    if ((Date.now() - TIMER.inicioFase)/1000 >= alvo) {
+      beep();
+      if (TIMER.fase === 'foco') { TIMER.acumFoco = (TIMER.acumFoco||0) + TIMER.alvoFoco; TIMER.fase = 'pausa'; toast('🍅 Ciclo completo! Pausa de '+TIMER.alvoPausa+' min ☕'); }
+      else { TIMER.fase = 'foco'; toast('🍅 De volta ao foco!'); }
+      TIMER.inicioFase = Date.now(); timerSalvar(); renderTimerPill();
+    }
+  }
+}, 1000);
+
+/* ---- TELA HOJE ---- */
+function timerCardHTML() {
+  if (TIMER) {
+    return '<div class="card"><div class="row"><span style="font-size:20px">'+(TIMER.modo==='pomo'?'🍅':TIMER.modo==='foco'?'🎯':'⏱️')+'</span>'
+      + '<div class="grow"><b id="tm-big">'+textoTimer()+'</b><div class="tiny muted">'+esc(TIMER.rotulo)+'</div></div>'
+      + '<button class="btn small primary" data-act="timer-stop-salvar">✓ Parar</button>'
+      + '<button class="btn small" data-act="timer-tela-cheia">🎯</button></div></div>';
+  }
+  const tarefasHoje = tarefasPendentes().filter(t => t.vencimento && t.vencimento <= hoje());
+  return '<div class="card"><div class="row wrap">'
+    + '<select class="select" id="tm-tarefa" style="flex:1;min-width:150px"><option value="">⏱️ Timer — vincular tarefa (opcional)</option>'
+    + tarefasHoje.map(t => '<option value="'+t.id+'">'+esc(t.titulo)+'</option>').join('') + '</select>'
+    + '<button class="btn" data-act="timer-start" data-m="livre">▶ Livre</button>'
+    + '<button class="btn" data-act="timer-start" data-m="pomo">🍅 Pomodoro</button>'
+    + '<button class="btn" data-act="timer-start" data-m="foco">🎯 Foco</button></div></div>';
+}
+reg('hoje', {
+  titulo: 'Hoje',
+  render: () => {
+    const h = new Date().getHours();
+    const nome = getCfg('nome','');
+    const saud = (h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite') + (nome ? ', ' + esc(nome) : '') + '!';
+    const pend = tarefasPendentes();
+    const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+    const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
+    const habPend = habitosAtivos().filter(hb => (hb.tipo === 'semanal' ? !regDoDia(hb) : (diaAtivo(hb, hoje()) && !diaFeito(hb, hoje())))).length;
+    const cap = capacidadeDia();
+    let html = '<div class="h1">'+saud+'</div>'
+      + '<p class="muted small" style="margin:-2px 0 12px">'+ucfirst(fmtData(hoje(),{semHoje:1}))+' · '
+      + deHoje.length+' tarefa'+(deHoje.length===1?'':'s')+(atrasadas.length?' <span class="err">(+'+atrasadas.length+' atrasadas)</span>':'')
+      + ' · '+habPend+' hábito'+(habPend===1?'':'s')+' pendente'+(habPend===1?'':'s')+' · '+fmtMin(cap.min)+' planejadas</p>';
+    for (const fn of HojeExtras.alertas) { try { html += fn() || ''; } catch(e) {} }
+    if (window.ritualBotoesHTML) html += ritualBotoesHTML();
+    html += capacidadeHTML();
+    if (window.insightDoDiaHTML) { try { html += insightDoDiaHTML() || ''; } catch(e) {} }
+    html += '<div class="row wrap" style="margin-bottom:14px">'
+      + '<button class="btn" data-act="qa-treino">🏋️ Treino de hoje</button>'
+      + '<button class="btn" data-act="qa-corrida">🏃 Corrida</button>'
+      + '<button class="btn" data-act="qa-leitura">📖 Leitura</button>'
+      + '<button class="btn" data-act="qa-gasto">💸 Gasto</button></div>';
+    html += '<div class="grid2"><div>'
+      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ tarefa para hoje… (ex.: ligar médico 15h p2)'})+'</div>';
+    if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas — decida o destino</span></div><div class="list" style="padding:0 10px 8px">'
+      + atrasadas.slice(0, 6).map(t => taskItemHTML(t, {rollover:true})).join('')
+      + (atrasadas.length > 6 ? '<div class="tiny muted center" style="padding:6px">+'+(atrasadas.length-6)+' na visão Tarefas</div>' : '') + '</div></div>';
+    html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">✅ Tarefas de hoje</div><div class="list hoje-tarefas" style="padding:0 10px 8px">'
+      + (deHoje.map(t => taskItemHTML(t, {drag:true})).join('') || '<div class="empty" style="padding:18px"><span class="em">🌤️</span>Dia limpo. Adicione acima ou planeje com o ritual.</div>') + '</div></div>'
+      + '<div class="card"><div class="h3">🔁 Hábitos de hoje</div>'+(habitoChipsHTML() || '<span class="muted small">Nenhum hábito ativo.</span>')+'</div>'
+      + timerCardHTML();
+    for (const fn of HojeExtras.cartoes) { try { html += fn() || ''; } catch(e) {} }
+    html += '</div><div><div class="card"><div class="card-h"><div class="h2">📅 Agenda do dia</div><button class="btn small" data-act="qa-bloco">+ Bloco</button></div>'
+      + agendaDiaHTML() + '</div></div></div>';
+    return html;
+  },
+  mount: () => {
+    if (window._qaRefoco) { window._qaRefoco = false; const i = $('#qa-inp'); if (i) i.focus(); }
+    // arrastar tarefa → agenda (time-blocking)
+    $$('.hoje-tarefas .task[draggable]').forEach(el => {
+      el.addEventListener('dragstart', () => { _dragTaskId = el.dataset.tid; el.classList.add('dragging'); });
+      el.addEventListener('dragend', () => el.classList.remove('dragging'));
+    });
+    $$('.tl-hour').forEach(hr => {
+      hr.addEventListener('dragover', e => { e.preventDefault(); hr.classList.add('drag-over'); });
+      hr.addEventListener('dragleave', () => hr.classList.remove('drag-over'));
+      hr.addEventListener('drop', e => {
+        e.preventDefault(); hr.classList.remove('drag-over');
+        const t = byId('tarefas', _dragTaskId); if (!t) return;
+        const dur = Number(t.estimativa_min) || 60;
+        const ini = isoLocal(hr.dataset.data, pad2(hr.dataset.h)+':00');
+        dbUpsert('blocos', { titulo: t.titulo, area_id: t.area_id, projeto_id: t.projeto_id, tarefa_id: t.id,
+          inicio: ini, fim: new Date(new Date(ini).getTime()+dur*60000).toISOString(), foco:false });
+        _dragTaskId = null;
+        toast('Bloco criado para "'+esc(t.titulo)+'" ✓', {icone:'📅'});
+        render();
+      });
+    });
+  }
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
