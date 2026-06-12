@@ -632,7 +632,7 @@ window.addEventListener('hashchange', render);
 const MENU = [
   ['hoje','☀️','Hoje'], ['tarefas','✅','Tarefas'], ['habitos','🔁','Hábitos'], ['agenda','📅','Agenda'],
   ['treino','🏋️','Treino'], ['corrida','🏃','Corrida'], ['leitura','📖','Leitura'], ['escrita','✍️','Escrita'],
-  ['metas','🎯','Metas'], ['financas','💰','Finanças'], ['dashboard','📊','Dashboard'], ['config','⚙️','Config']
+  ['metas','🎯','Metas'], ['financas','💰','Finanças'], ['dashboard','📊','Dashboard'], ['revisao','🧭','Revisão'], ['retro','🌅','Retro'], ['config','⚙️','Config']
 ];
 function renderNav(atual) {
   const base = atual.split('/')[0];
@@ -4798,6 +4798,245 @@ act('rev-abrir', el => {
     + ((resp.prioridades||[]).length ? '<div class="field"><label>Prioridades</label><div class="row wrap">'+resp.prioridades.map(p => '<span class="chip mini">'+esc(p)+'</span>').join('')+'</div></div>' : ''),
     { wide:true });
 });
+/* ============ ETAPA 16: Dashboard Geral + Conquistas ============ */
+reg('dashboard', {
+  icon:'🏠', label:'Dashboard',
+  render() {
+    const hoje = dataHoje();
+    const ano = hoje.slice(0,4);
+    const mesAtual = hoje.slice(0,7);
+    // Tarefas hoje
+    const tarefasHoje = T('tarefas').filter(t => !t.concluida && !t.abandonada && t.vencimento === hoje).length;
+    const concluidas7 = (() => {
+      const d7 = addDias(hoje,-6);
+      return T('tarefas').filter(t => t.concluida && t.concluido_em >= d7).length;
+    })();
+    // Hábitos hoje
+    const habsAtivos = T('habitos').filter(h => h.ativo !== false);
+    const marcadosHoje = habsAtivos.filter(h => (T('habito_logs').some(l => l.habito_id === h.id && l.data === hoje))).length;
+    const habPct = habsAtivos.length ? Math.round(marcadosHoje / habsAtivos.length * 100) : 0;
+    // Corrida semana
+    const ini7 = addDias(hoje,-6);
+    const kmSemana = T('corridas').filter(c => c.data >= ini7).reduce((s,c) => s + (c.distancia_km||0), 0);
+    // Treinos semana
+    const treinosSemana = T('treinos').filter(t => t.data >= ini7).length;
+    // Finanças mês
+    const saldo = lacDoMes ? lacDoMes(mesAtual) : 0;
+    // Patrimônio
+    const pat = patrimonioTotal ? patrimonioTotal() : 0;
+    // Metas ativas
+    const metasAtivas = T('metas').filter(m => m.ativo !== false && !m.arquivada);
+    const metasOk = metasAtivas.filter(m => {
+      const p = metaProgresso ? metaProgresso(m) : null;
+      return p && p.pct >= 100;
+    }).length;
+    // Escrita semana
+    const palavrasSemana = T('escrita_logs').filter(l => l.data >= ini7).reduce((s,l) => s+(l.palavras||0),0);
+    // Energia média 7 dias
+    const fechamentos7 = T('fechamentos').filter(f => f.data >= ini7);
+    const energiaMedia = fechamentos7.length ? (fechamentos7.reduce((s,f)=>s+(f.energia||0),0)/fechamentos7.length).toFixed(1) : '–';
+    // Heatmap de hábitos (últimos 84 dias = 12 semanas)
+    const hmHtml = typeof heatmapHabito !== 'undefined' && habsAtivos.length
+      ? ('<div class="field"><label>Heatmap hábitos (12 semanas)</label>'+heatmapHabito(habsAtivos, 84)+'</div>') : '';
+
+    // Streak de hábitos (melhor streak)
+    const melhorStreak = habsAtivos.reduce((mx, h) => {
+      const s = typeof streakDiario !== 'undefined' ? streakDiario(h) : 0;
+      return s > mx ? s : mx;
+    }, 0);
+
+    // Gráfico patrimônio
+    const serieP = typeof serieMensalPatrimonio !== 'undefined' ? serieMensalPatrimonio(12) : [];
+    const patChart = serieP.length > 1 ? svgLinha(serieP.map(p=>p.valor), serieP.map(p=>p.mes.slice(5)), { color:'#7C5CFC', h:80 }) : '';
+
+    // Conquistas
+    checkConquistas('dashboard');
+
+    // Gráfico tarefas 7 dias
+    const taskBars = (() => {
+      const vals = [], labs = [];
+      for (let i=6;i>=0;i--) { const d=addDias(hoje,-i); vals.push(T('tarefas').filter(t=>t.concluida&&t.concluido_em===d).length); labs.push(d.slice(8)); }
+      return svgBarras(vals, labs, { color:'#7C5CFC', h:64 });
+    })();
+
+    return '<div class="h1" style="margin-bottom:16px">🏠 Dashboard</div>'
+      + '<div class="grid2">'
+      + statCard('📋','Tarefas hoje',tarefasHoje,'pendentes')
+      + statCard('✅','Concluídas (7d)',concluidas7,'tarefas')
+      + statCard('🔥','Hábitos hoje',habPct+'%','do dia')
+      + statCard('⚡','Energia média',energiaMedia,'/5')
+      + statCard('🏃','Km semana',fmtNum(kmSemana,1),'km')
+      + statCard('🏋️','Treinos semana',treinosSemana,'sessões')
+      + statCard('✍️','Palavras semana',fmtNum(palavrasSemana),'palavras')
+      + statCard('🎯','Metas concluídas',metasOk+'/'+metasAtivas.length,'metas')
+      + '</div>'
+      + (taskBars ? '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Tarefas concluídas — 7 dias</label>'+taskBars+'</div>' : '')
+      + (patChart ? '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Patrimônio — 12 meses</label>'+patChart+'</div>' : '')
+      + hmHtml
+      + '<div style="margin-top:16px"><div class="row" style="margin-bottom:8px"><div class="h2" style="flex:1">🏆 Conquistas</div>'
+      + '<button class="btn small" data-act="nav" data-r="conquistas">Ver todas →</button></div>'
+      + conquistasResumoHTML()
+      + '</div>';
+  }
+});
+
+function statCard(icon, titulo, valor, sub) {
+  return '<div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px">'
+    + '<div style="font-size:24px;line-height:1">'+icon+'</div>'
+    + '<div><div class="small muted">'+titulo+'</div>'
+    + '<div style="font-size:22px;font-weight:700;line-height:1.2">'+valor+'</div>'
+    + '<div class="small muted">'+sub+'</div></div></div>';
+}
+
+/* Conquistas */
+const CONQUISTAS_DEF = [
+  { id:'primeira_tarefa', icon:'✅', nome:'Primeira tarefa!', desc:'Conclua sua primeira tarefa.', check: () => T('tarefas').some(t=>t.concluida) },
+  { id:'streak7', icon:'🔥', nome:'Em chamas', desc:'7 dias seguidos com pelo menos 1 hábito marcado.', check: () => {
+    const h = T('habitos').find(h=>h.ativo!==false);
+    return h ? (typeof streakDiario!=='undefined' ? streakDiario(h) : 0) >= 7 : false;
+  }},
+  { id:'100tarefas', icon:'💯', nome:'Centenário', desc:'100 tarefas concluídas.', check: () => T('tarefas').filter(t=>t.concluida).length >= 100 },
+  { id:'primeiroTreino', icon:'🏋️', nome:'Primeiro treino', desc:'Registre seu primeiro treino.', check: () => T('treinos').length > 0 },
+  { id:'50km', icon:'🏃', nome:'50 km!', desc:'Acumule 50 km rodados.', check: () => T('corridas').reduce((s,c)=>s+(c.distancia_km||0),0) >= 50 },
+  { id:'primeiroLivro', icon:'📚', nome:'Primeiro livro', desc:'Conclua sua primeira leitura.', check: () => T('livros').some(l=>l.status==='concluido') },
+  { id:'1000palavras', icon:'✍️', nome:'Escritor', desc:'Escreva 1.000 palavras.', check: () => T('escrita_logs').reduce((s,l)=>s+(l.palavras||0),0) >= 1000 },
+  { id:'primeiraRevisao', icon:'🧭', nome:'Revisor', desc:'Conclua sua primeira revisão semanal.', check: () => T('revisoes').some(r=>r.tipo==='semanal') },
+  { id:'primeiraMeta', icon:'🎯', nome:'Visionário', desc:'Cadastre sua primeira meta.', check: () => T('metas').length > 0 },
+  { id:'patrimonio100k', icon:'💰', nome:'Centena', desc:'Patrimônio acima de R$ 100.000.', check: () => (typeof patrimonioTotal!=='undefined'?patrimonioTotal():0) >= 100000 },
+  { id:'streak30', icon:'🌟', nome:'Mês sólido', desc:'30 dias seguidos com hábitos marcados.', check: () => {
+    const h = T('habitos').find(h=>h.ativo!==false);
+    return h ? (typeof streakDiario!=='undefined'?streakDiario(h):0) >= 30 : false;
+  }},
+  { id:'revisao4', icon:'🔭', nome:'Disciplinado', desc:'4 revisões semanais concluídas.', check: () => T('revisoes').filter(r=>r.tipo==='semanal').length >= 4 },
+  { id:'10treinos', icon:'💪', nome:'Consistente', desc:'10 treinos registrados.', check: () => T('treinos').length >= 10 },
+  { id:'3metas', icon:'🏆', nome:'Ambicioso', desc:'3 metas ativas ao mesmo tempo.', check: () => T('metas').filter(m=>m.ativo!==false&&!m.arquivada).length >= 3 },
+  { id:'primeiroFoco', icon:'🎯', nome:'Foco total', desc:'Complete uma sessão de foco.', check: () => T('agenda_blocos').some(b=>b.tipo==='foco'&&b.realizado) },
+];
+
+function checkConquistas(trigger) {
+  const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
+  let changed = false;
+  CONQUISTAS_DEF.forEach(c => {
+    if (!desbloqueadas[c.id]) {
+      try { if (c.check()) { desbloqueadas[c.id] = dataHoje(); changed = true; toast('🏆 '+c.nome+' desbloqueada!', {ms:4000}); } } catch(_) {}
+    }
+  });
+  if (changed) localStorage.setItem('lcos_conquistas', JSON.stringify(desbloqueadas));
+}
+window.checkConquistas = checkConquistas;
+
+function conquistasResumoHTML() {
+  const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
+  const total = CONQUISTAS_DEF.length;
+  const ok = CONQUISTAS_DEF.filter(c=>desbloqueadas[c.id]).length;
+  return '<div class="row wrap" style="gap:6px;margin-bottom:6px">'
+    + CONQUISTAS_DEF.slice(0,8).map(c => {
+      const on = !!desbloqueadas[c.id];
+      return '<div title="'+esc(c.nome)+': '+esc(c.desc)+'" style="font-size:24px;opacity:'+(on?'1':'0.25')+'">'+c.icon+'</div>';
+    }).join('')
+    + '</div><div class="small muted">'+ok+' / '+total+' desbloqueadas</div>';
+}
+
+reg('conquistas', {
+  icon:'🏆', label:'Conquistas', hidden: true,
+  render() {
+    const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
+    checkConquistas('conquistas');
+    return '<div class="row" style="margin-bottom:16px"><div class="h1" style="flex:1">🏆 Conquistas</div>'
+      + '<button class="btn small" data-act="nav" data-r="dashboard">← Dashboard</button></div>'
+      + '<div class="list">' + CONQUISTAS_DEF.map(c => {
+        const on = !!desbloqueadas[c.id];
+        return '<div class="item" style="opacity:'+(on?'1':'0.45')+'">'
+          + '<span style="font-size:28px">'+c.icon+'</span>'
+          + '<div class="grow"><div class="ttl">'+esc(c.nome)+(on?' <span class="chip mini ok">desbloqueada</span>':'')+'</div>'
+          + '<div class="sub">'+esc(c.desc)+(on?' · '+fmtDataCurta(desbloqueadas[c.id]):'')+'</div></div></div>';
+      }).join('') + '</div>';
+  }
+});
+
+/* ============ ETAPA 17: Retrospectiva Anual ============ */
+reg('retro', {
+  icon:'🌅', label:'Retrospectiva', hidden: true,
+  render() {
+    const hoje = dataHoje();
+    const anoAtual = parseInt(hoje.slice(0,4));
+    const anos = [...new Set([
+      ...T('tarefas').map(t=>t.criado_em&&t.criado_em.slice(0,4)).filter(Boolean),
+      ...T('treinos').map(t=>t.data&&t.data.slice(0,4)).filter(Boolean),
+      String(anoAtual)
+    ])].sort((a,b)=>b-a);
+    const ano = window._retroAno || String(anoAtual);
+    window._retroAno = ano;
+
+    const ini = ano+'-01-01', fim = ano+'-12-31';
+    const tarefasConcluidas = T('tarefas').filter(t=>t.concluida&&(t.concluido_em||'').slice(0,4)===ano).length;
+    const habitosDias = (() => {
+      const logs = T('habito_logs').filter(l=>l.data>=ini&&l.data<=fim);
+      return [...new Set(logs.map(l=>l.data))].length;
+    })();
+    const kmTotal = T('corridas').filter(c=>c.data>=ini&&c.data<=fim).reduce((s,c)=>s+(c.distancia_km||0),0);
+    const treinosTotal = T('treinos').filter(t=>t.data>=ini&&t.data<=fim).length;
+    const livrosConcluidos = T('livros').filter(l=>l.status==='concluido'&&(l.concluido_em||'').slice(0,4)===ano).length;
+    const palavrasTotal = T('escrita_logs').filter(l=>(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.palavras||0),0);
+    const revisoesSemana = T('revisoes').filter(r=>r.tipo==='semanal'&&(r.periodo_fim||'').slice(0,4)===ano).length;
+    const metasConcluidas = T('metas').filter(m=>(m.concluida_em||'').slice(0,4)===ano).length;
+    const receitaAno = T('lancamentos').filter(l=>l.tipo==='receita'&&(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.valor||0),0);
+    const despesaAno = T('lancamentos').filter(l=>l.tipo==='despesa'&&(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.valor||0),0);
+    const patrimonioFim = typeof patrimonioTotal!=='undefined' ? patrimonioTotal() : 0;
+
+    const mesLbls = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+    const kmPorMes = Array(12).fill(0);
+    T('corridas').filter(c=>c.data>=ini&&c.data<=fim).forEach(c=>{const m=parseInt(c.data.slice(5,7))-1;kmPorMes[m]+=(c.distancia_km||0);});
+    const kmChart = svgBarras(kmPorMes, mesLbls, {color:'#3EAF8B',h:72});
+
+    return '<div class="row" style="margin-bottom:12px"><div class="h1" style="flex:1">🌅 Retrospectiva '+ano+'</div>'
+      + '<select class="inp" style="width:100px" data-act="retro-ano">'
+      + anos.map(a=>'<option value="'+a+'"'+(a===ano?' selected':'')+'>'+a+'</option>').join('')+'</select></div>'
+      + '<div class="grid2">'
+      + statCard('✅','Tarefas concluídas',tarefasConcluidas,'tarefas')
+      + statCard('🔥','Dias com hábitos',habitosDias,'dias ativos')
+      + statCard('🏃','Distância total',fmtNum(kmTotal,1),'km rodados')
+      + statCard('🏋️','Treinos',treinosTotal,'sessões')
+      + statCard('📚','Livros concluídos',livrosConcluidos,'livros')
+      + statCard('✍️','Palavras escritas',fmtNum(palavrasTotal),'palavras')
+      + statCard('🧭','Revisões semanais',revisoesSemana,'revisões')
+      + statCard('🎯','Metas alcançadas',metasConcluidas,'metas')
+      + '</div>'
+      + '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Km por mês</label>'+kmChart+'</div>'
+      + '<div class="grid2" style="margin-top:4px">'
+      + statCard('💰','Receita',fmtBRL(receitaAno),'no ano')
+      + statCard('💳','Despesa',fmtBRL(despesaAno),'no ano')
+      + statCard('📈','Saldo do ano',fmtBRL(receitaAno-despesaAno),'resultado')
+      + statCard('🏦','Patrimônio atual',fmtBRL(patrimonioFim),'total')
+      + '</div>'
+      + '<div style="margin-top:16px;display:flex;gap:8px">'
+      + '<button class="btn primary" data-act="retro-compartilhar">📤 Exportar resumo</button>'
+      + '</div>';
+  }
+});
+act('retro-ano', el => { window._retroAno = el.value; render(); });
+act('retro-compartilhar', () => {
+  const ano = window._retroAno || dataHoje().slice(0,4);
+  const ini = ano+'-01-01', fim = ano+'-12-31';
+  const tarefas = T('tarefas').filter(t=>t.concluida&&(t.concluido_em||'').slice(0,4)===ano).length;
+  const km = T('corridas').filter(c=>c.data>=ini&&c.data<=fim).reduce((s,c)=>s+(c.distancia_km||0),0);
+  const treinos = T('treinos').filter(t=>t.data>=ini&&t.data<=fim).length;
+  const livros = T('livros').filter(l=>l.status==='concluido'&&(l.concluido_em||'').slice(0,4)===ano).length;
+  const palavras = T('escrita_logs').filter(l=>(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.palavras||0),0);
+  const texto = '🌅 Meu ano '+ano+' no Life OS\n\n'
+    + '✅ '+tarefas+' tarefas concluídas\n'
+    + '🏃 '+fmtNum(km,1)+' km rodados\n'
+    + '🏋️ '+treinos+' treinos\n'
+    + '📚 '+livros+' livros\n'
+    + '✍️ '+fmtNum(palavras)+' palavras escritas\n';
+  if (navigator.share) {
+    navigator.share({ title: 'Life OS '+ano, text: texto }).catch(()=>{});
+  } else {
+    navigator.clipboard.writeText(texto).then(()=>toast('📋 Resumo copiado!')).catch(()=>toast('Abra o console para ver o resumo'));
+    console.log(texto);
+  }
+});
+
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
