@@ -1622,6 +1622,664 @@ BootHooks.push(() => {
     }
   });
 });
+/* ════════════════ ETAPA 3 — TAREFAS (Todoist completo) ════════════════ */
+function addCSS(css) { const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s); }
+addCSS('.tar-grid{display:grid;grid-template-columns:235px 1fr;gap:18px;align-items:start}'
+ + '@media(max-width:899px){.tar-grid{grid-template-columns:1fr}.tar-aside{display:none}}'
+ + '.tar-aside .navit{padding:7px 10px;font-size:13.5px}'
+ + '.tar-vistas{display:none}@media(max-width:899px){.tar-vistas{display:flex;gap:7px;overflow-x:auto;padding:2px 0 10px;-webkit-overflow-scrolling:touch}}'
+ + '.sec-head{display:flex;align-items:center;gap:8px;padding:10px 4px 4px;font-weight:700;font-size:13px;color:var(--txt2)}'
+ + '.day-head{font-weight:700;font-size:13px;color:var(--txt2);padding:12px 4px 2px;text-transform:capitalize}');
+
+/* ---- Parser de linguagem natural pt-BR (regra 19) ---- */
+const DOW_NOMES = { domingo:0, segunda:1, terca:2, 'terça':2, quarta:3, quinta:4, sexta:5, sabado:6, 'sábado':6 };
+function proxDow(dow, aPartir) { // inclui o próprio dia
+  let d = aPartir || hoje();
+  for (let i = 0; i < 8; i++) { if (pDate(d).getDay() === dow) return d; d = addDias(d, 1); }
+  return d;
+}
+function parseNL(txt) {
+  let s = ' ' + String(txt || '') + ' ';
+  const toks = [];
+  const eat = (re, fn) => { const m = s.match(re); if (m) { s = s.replace(re, ' '); fn(m); } return !!m; };
+  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoNovo:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
+  // #projeto
+  eat(/#([\p{L}\d_-]+)/u, m => {
+    const nome = m[1];
+    const p = T('projetos').find(x => norm(x.nome).startsWith(norm(nome)));
+    if (p) { out.projeto_id = p.id; toks.push({tipo:'proj', label:'# '+p.nome, raw:m[0]}); }
+    else { out.projetoNovo = nome; toks.push({tipo:'proj', label:'# '+nome+' (novo)', raw:m[0]}); }
+  });
+  // @etiquetas (várias)
+  for (let g = 0; g < 5; g++) {
+    if (!eat(/@([\p{L}\d_-]+)/u, m => {
+      const nome = m[1].toLowerCase();
+      const e = T('etiquetas').find(x => norm(x.nome) === norm(nome));
+      if (e) { out.etiquetas.push(e.nome); toks.push({tipo:'tag', label:'@ '+e.nome, raw:m[0]}); }
+      else { out.etiquetasNovas.push(nome); out.etiquetas.push(nome); toks.push({tipo:'tag', label:'@ '+nome+' (nova)', raw:m[0]}); }
+    })) break;
+  }
+  // prioridade
+  eat(/\bp([1-4])\b/i, m => { out.prioridade = Number(m[1]); toks.push({tipo:'pri', label:'P'+m[1], raw:m[0]}); });
+  // recorrências (antes das datas)
+  const dowAlt = '(?:segunda|ter[cç]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)?';
+  eat(/\btodo dia (\d{1,2})\b/i, m => { out.recorrencia = {tipo:'mensal', dia:Number(m[1])}; toks.push({tipo:'rec', label:'🔁 todo dia '+m[1], raw:m[0]}); });
+  if (!out.recorrencia) eat(/\ba cada (\d{1,3}) dias?\b/i, m => { out.recorrencia = {tipo:'intervalo', intervalo:Number(m[1])}; toks.push({tipo:'rec', label:'🔁 a cada '+m[1]+' dias', raw:m[0]}); });
+  if (!out.recorrencia) eat(/\b(todo dia|todos os dias|diariamente)\b/i, () => { out.recorrencia = {tipo:'diaria'}; toks.push({tipo:'rec', label:'🔁 todo dia', raw:''}); });
+  if (!out.recorrencia) eat(new RegExp('\\btodas?\\s+(?:as\\s+)?((?:'+dowAlt+'(?:\\s*(?:,|e)\\s*)?)+)','iu'), m => recSemanal(m));
+  if (!out.recorrencia) eat(new RegExp('\\btodos?\\s+(?:os\\s+)?((?:'+dowAlt+'(?:\\s*(?:,|e)\\s*)?)+)','iu'), m => recSemanal(m));
+  function recSemanal(m) {
+    const dias = [...m[1].matchAll(new RegExp(dowAlt,'giu'))].map(x => DOW_NOMES[norm(x[0]).replace('-feira','')]).filter(d => d !== undefined);
+    if (dias.length) { out.recorrencia = {tipo:'semanal', dias:[...new Set(dias)].sort()}; toks.push({tipo:'rec', label:'🔁 '+dias.map(d => DIAS_SEM[d]).join(', '), raw:m[0]}); }
+  }
+  if (!out.recorrencia) eat(/\b(todo m[eê]s|mensalmente)\b/i, () => { out.recorrencia = {tipo:'mensal'}; toks.push({tipo:'rec', label:'🔁 todo mês', raw:''}); });
+  if (!out.recorrencia) eat(/\b(toda semana|semanalmente)\b/i, () => { out.recorrencia = {tipo:'semanal'}; toks.push({tipo:'rec', label:'🔁 toda semana', raw:''}); });
+  // datas
+  const setData = (iso, label, raw) => { out.vencimento = iso; toks.push({tipo:'data', label:'📅 '+label, raw}); };
+  eat(/\bdepois de amanh[ãa]\b/i, m => setData(addDias(hoje(),2), 'depois de amanhã', m[0])) ||
+  eat(/\bamanh[ãa]\b/i, m => setData(addDias(hoje(),1), 'amanhã', m[0])) ||
+  eat(/\bhoje\b/i, m => setData(hoje(), 'hoje', m[0])) ||
+  eat(/\bpr[óo]xima semana\b/i, m => setData(addDias(inicioSemana(hoje()),7), 'próx. semana', m[0])) ||
+  eat(/\bem (\d{1,3}) dias?\b/i, m => setData(addDias(hoje(), Number(m[1])), 'em '+m[1]+' dias', m[0])) ||
+  eat(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/, m => {
+    let y = m[3] ? (m[3].length === 2 ? 2000+Number(m[3]) : Number(m[3])) : new Date().getFullYear();
+    let iso = y + '-' + pad2(m[2]) + '-' + pad2(m[1]);
+    if (!m[3] && iso < hoje()) iso = (y+1) + iso.slice(4);
+    setData(iso, fmtDataCurta(iso) + (m[3]?'/'+y:''), m[0]);
+  }) ||
+  eat(/\bdia (\d{1,2})\b/i, m => {
+    const dia = Number(m[1]); const d = new Date(); let iso = d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(dia);
+    if (iso < hoje()) { const d2 = new Date(d.getFullYear(), d.getMonth()+1, dia); iso = dISO(d2); }
+    setData(iso, 'dia '+dia, m[0]);
+  }) ||
+  eat(new RegExp('\\b(?:pr[óo]xima\\s+)?('+dowAlt+')\\b','iu'), m => {
+    const dow = DOW_NOMES[norm(m[1]).replace('-feira','')];
+    if (dow !== undefined) setData(proxDow(dow), DIAS_SEM_FULL[dow], m[0]);
+  });
+  // hora
+  const setHora = (h, mi, raw) => { h = Number(h); mi = Number(mi||0);
+    if (h >= 0 && h <= 23 && mi <= 59) { out.hora = pad2(h)+':'+pad2(mi); toks.push({tipo:'hora', label:'⏰ '+pad2(h)+':'+pad2(mi), raw}); } };
+  eat(/\b(\d{1,2}):(\d{2})\b/, m => setHora(m[1], m[2], m[0])) ||
+  eat(/\b(\d{1,2})h(\d{2})?\b/i, m => setHora(m[1], m[2], m[0])) ||
+  eat(/\b[àa]s (\d{1,2})\b/i, m => setHora(m[1], 0, m[0]));
+  // completa recorrência sem data explícita
+  if (out.recorrencia && !out.vencimento) {
+    const r = out.recorrencia;
+    if (r.tipo === 'diaria' || r.tipo === 'intervalo') out.vencimento = hoje();
+    else if (r.tipo === 'semanal' && r.dias) out.vencimento = proxDow(r.dias[0]);
+    else if (r.tipo === 'semanal') { r.dias = [pDate(hoje()).getDay()]; out.vencimento = hoje(); }
+    else if (r.tipo === 'mensal') {
+      const dia = r.dia || pDate(hoje()).getDate(); r.dia = dia;
+      out.vencimento = hoje().slice(0,8) + pad2(Math.min(dia,28));
+      if (out.vencimento < hoje()) out.vencimento = proximaData(r, hoje());
+    }
+  }
+  if (out.recorrencia && out.recorrencia.tipo === 'mensal' && !out.recorrencia.dia) out.recorrencia.dia = pDate(out.vencimento || hoje()).getDate();
+  if (out.recorrencia && out.recorrencia.tipo === 'semanal' && !out.recorrencia.dias) out.recorrencia.dias = [pDate(out.vencimento || hoje()).getDay()];
+  out.titulo = s.replace(/\s+/g,' ').trim();
+  return out;
+}
+function proximaData(rec, apos) { // regra 1
+  const base = apos || hoje();
+  if (!rec) return null;
+  if (rec.tipo === 'diaria') return addDias(base, 1);
+  if (rec.tipo === 'intervalo') return addDias(base, Math.max(1, rec.intervalo||1));
+  if (rec.tipo === 'semanal') {
+    const dias = (rec.dias && rec.dias.length ? rec.dias : [pDate(base).getDay()]).sort();
+    let d = addDias(base, 1);
+    for (let i = 0; i < 8; i++) { if (dias.includes(pDate(d).getDay())) return d; d = addDias(d, 1); }
+    return d;
+  }
+  if (rec.tipo === 'mensal') {
+    const dt = pDate(base); const dia = rec.dia || dt.getDate();
+    const prox = new Date(dt.getFullYear(), dt.getMonth()+1, 1);
+    const ultimo = new Date(prox.getFullYear(), prox.getMonth()+1, 0).getDate();
+    prox.setDate(Math.min(dia, ultimo));
+    return dISO(prox);
+  }
+  return null;
+}
+const recLabel = r => !r ? '' : r.tipo === 'diaria' ? 'todo dia' : r.tipo === 'intervalo' ? 'a cada '+r.intervalo+'d'
+  : r.tipo === 'semanal' ? (r.dias||[]).map(d => DIAS_SEM[d]).join(',') : 'todo dia '+(r.dia||1);
+
+/* ---- Quick add (registro ≤ 5s) ---- */
+function quickAddHTML(ctx) {
+  window._qaCtx = ctx || {};
+  return '<div class="qa-box"><form data-sub="qa-sub">'
+    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h #casa @contas p2')+'">'
+    + '</form><div class="qa-tokens" id="qa-toks"></div></div>';
+}
+act('qa-parse', el => {
+  const p = parseNL(el.value);
+  const cls = {data:'dt', hora:'hr', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
+  $('#qa-toks').innerHTML = p.tokens.map((t,i) =>
+    '<span class="tok '+cls[t.tipo]+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
+});
+act('qa-tok-rm', el => { const inp = $('#qa-inp'); inp.value = inp.value.replace(el.dataset.raw, ' ').replace(/\s+/g,' '); Actions['qa-parse'](inp); inp.focus(); });
+act('qa-sub', () => {
+  const inp = $('#qa-inp'); const p = parseNL(inp.value);
+  if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
+  criarTarefaParseada(p, window._qaCtx || {});
+  window._qaRefoco = true;
+  render();
+});
+function criarTarefaParseada(p, ctx) {
+  if (p.projetoNovo) { const np = dbUpsert('projetos', {nome: ucfirst(p.projetoNovo), status:'ativo', area_id: ctx.area_id||null}); p.projeto_id = np.id; toast('Projeto "'+esc(np.nome)+'" criado.', {icone:'📁'}); }
+  for (const en of p.etiquetasNovas) dbUpsert('etiquetas', {nome: en, cor:'#9AA0B0'});
+  const projeto_id = p.projeto_id || ctx.projeto_id || null;
+  const proj = byId('projetos', projeto_id);
+  const t = dbUpsert('tarefas', {
+    titulo: p.titulo, descricao: null,
+    area_id: ctx.area_id || (proj ? proj.area_id : null),
+    projeto_id, secao_id: p.projeto_id ? null : (ctx.secao_id || null),
+    vencimento: p.vencimento || ctx.def_venc || null,
+    hora: p.hora, prioridade: p.prioridade, estimativa_min: null,
+    recorrencia: p.recorrencia, subtarefas: [], etiquetas: p.etiquetas,
+    comentarios: [], links: [], ordem: Date.now() % 100000, origem: ctx.origem || null,
+    abandonada: false, concluida: false, concluida_em: null
+  });
+  toast('Tarefa criada ✓', {icone:'✅', undo: () => { dbDelete('tarefas', t.id); render(); }});
+  return t;
+}
+
+/* ---- item de tarefa ---- */
+const etiquetaCor = nome => (T('etiquetas').find(e => e.nome === nome) || {}).cor || '#9AA0B0';
+function vencHTML(t) {
+  if (!t.vencimento) return '';
+  const atras = !t.concluida && t.vencimento < hoje();
+  return '<span class="'+(atras?'err':t.vencimento===hoje()?'ok':'')+'">📅 '+fmtData(t.vencimento)+(t.hora?' ⏰'+fmtHora(t.hora):'')+'</span>';
+}
+function taskItemHTML(t, o={}) {
+  const proj = byId('projetos', t.projeto_id);
+  const sub = [
+    vencHTML(t),
+    t.recorrencia ? '<span class="acc">🔁 '+esc(recLabel(t.recorrencia))+'</span>' : '',
+    (!o.semProjeto && proj) ? '<span>📁 '+esc(proj.nome)+'</span>' : '',
+    (t.etiquetas||[]).map(e => '<span class="tag" style="background:'+etiquetaCor(e)+'22;color:'+etiquetaCor(e)+'">@'+esc(e)+'</span>').join(''),
+    (t.subtarefas||[]).length ? '<span>☑ '+(t.subtarefas.filter(s=>s.feito).length)+'/'+t.subtarefas.length+'</span>' : '',
+    (t.comentarios||[]).length ? '<span>💬 '+t.comentarios.length+'</span>' : '',
+    (t.links||[]).length ? '<span>🔗 '+t.links.length+'</span>' : '',
+    t.estimativa_min ? '<span>⏳ '+fmtMin(t.estimativa_min)+'</span>' : ''
+  ].filter(Boolean).join(' ');
+  return '<div class="item task'+(t.concluida?' done':'')+'" data-tid="'+t.id+'" '+(o.drag?'draggable="true"':'')+'>'
+    + '<button class="check p'+(t.prioridade||4)+(t.concluida?' ck':'')+'" data-act="task-toggle" data-id="'+t.id+'"></button>'
+    + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+'</div>'
+    + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
+    + (o.rollover ? '<button class="btn small" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
+    + '</div>';
+}
+const tarefasPendentes = () => T('tarefas').filter(t => !t.concluida && !t.abandonada);
+
+/* ---- concluir / recorrência (regra 1) ---- */
+act('task-toggle', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t) return;
+  if (!t.concluida) {
+    el.classList.add('ck','pop');
+    setTimeout(() => concluirTarefa(t.id), 200);
+  } else {
+    dbPatch('tarefas', t.id, {concluida:false, concluida_em:null});
+    render();
+  }
+});
+function concluirTarefa(id) {
+  const t = byId('tarefas', id); if (!t || t.concluida) return;
+  dbPatch('tarefas', id, {concluida:true, concluida_em: nowISO()});
+  let prox = null;
+  if (t.recorrencia) {
+    prox = dbUpsert('tarefas', {...t, id: undefined, criado_em: undefined,
+      concluida:false, concluida_em:null, vencimento: proximaData(t.recorrencia, t.vencimento || hoje()),
+      subtarefas: (t.subtarefas||[]).map(s => ({...s, feito:false}))});
+  }
+  if (window.aoConcluirTarefa) aoConcluirTarefa(t);
+  toast(t.recorrencia ? 'Feita! Próxima: '+fmtData(prox.vencimento)+' 🔁' : 'Tarefa concluída ✓', {
+    icone:'🎉',
+    undo: () => { dbPatch('tarefas', id, {concluida:false, concluida_em:null}); if (prox) dbDelete('tarefas', prox.id); render(); }
+  });
+  if (window.checkConquistas) checkConquistas('tarefa');
+  render();
+}
+
+/* ---- rollover consciente (regras 13 / 3.2) ---- */
+act('rollover-menu', el => abrirRollover(el.dataset.id));
+function abrirRollover(id, aoDecidir) {
+  const t = byId('tarefas', id); if (!t) return;
+  modal('<div class="bx-h"><div class="h2">Tarefa vencida</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p style="margin:0 0 4px;font-weight:700">'+esc(t.titulo)+'</p>'
+    + '<p class="muted small" style="margin:0 0 14px">venceu '+fmtData(t.vencimento)+'. O que fazer com ela? (decidir é o que importa — abandonar também vale)</p>'
+    + '<div class="col">'
+    + '<button class="btn big" data-rv="hoje">☀️ Fazer hoje</button>'
+    + '<div class="row"><input type="date" class="input" id="rv-data" value="'+addDias(hoje(),1)+'" style="flex:1"><button class="btn" data-rv="reagendar">📅 Reagendar</button></div>'
+    + '<button class="btn big" data-rv="inbox">📥 Caixa de entrada (sem data)</button>'
+    + '<button class="btn big" data-rv="abandonar">🕊️ Abandonar (sai da lista, fica no histórico)</button>'
+    + '</div>',
+    { onMount: ov => ov.addEventListener('click', e => {
+        const b = e.target.closest('[data-rv]'); if (!b) return;
+        const acao = b.dataset.rv;
+        if (acao === 'hoje') dbPatch('tarefas', id, {vencimento: hoje()});
+        if (acao === 'reagendar') dbPatch('tarefas', id, {vencimento: ov.querySelector('#rv-data').value || addDias(hoje(),1)});
+        if (acao === 'inbox') dbPatch('tarefas', id, {vencimento:null, projeto_id:null, secao_id:null});
+        if (acao === 'abandonar') { dbPatch('tarefas', id, {abandonada:true});
+          toast('Abandonar também é decidir. 🕊️', {undo: () => { dbPatch('tarefas', id, {abandonada:false}); render(); }}); }
+        closeModal();
+        if (aoDecidir) aoDecidir(); else render();
+      }) });
+}
+
+/* ---- detalhe da tarefa ---- */
+act('task-open', el => abrirTarefa(el.dataset.id));
+function abrirTarefa(id) {
+  const t = byId('tarefas', id); if (!t) return;
+  const recT = (t.recorrencia||{}).tipo || '';
+  const html = '<div class="bx-h"><span class="check p'+(t.prioridade||4)+(t.concluida?' ck':'')+'" data-act="task-toggle" data-id="'+t.id+'"></span>'
+    + '<div class="h2" style="flex:1">Tarefa</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><input class="input" id="td-titulo" value="'+esc(t.titulo)+'" style="font-weight:700;font-size:16px"></div>'
+    + '<div class="field"><textarea class="textarea" id="td-desc" rows="2" placeholder="Descrição…">'+esc(t.descricao||'')+'</textarea></div>'
+    + '<div class="frow"><div class="field"><label>Projeto</label><select class="select" id="td-proj" data-chg="td-proj-chg">'
+    + optsProjetos().map(o => '<option value="'+o.v+'"'+(o.v===(t.projeto_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('') + '</select></div>'
+    + '<div class="field"><label>Seção</label><select class="select" id="td-sec">'+secaoOpts(t.projeto_id, t.secao_id)+'</select></div></div>'
+    + '<div class="frow"><div class="field"><label>Área</label><select class="select" id="td-area">'
+    + optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(t.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('') + '</select></div>'
+    + '<div class="field"><label>Prioridade</label><select class="select" id="td-pri">'
+    + [1,2,3,4].map(p => '<option value="'+p+'"'+(p===(t.prioridade||4)?' selected':'')+'>P'+p+(p===1?' — máxima':p===4?' — normal':'')+'</option>').join('') + '</select></div></div>'
+    + '<div class="frow"><div class="field"><label>Vencimento</label><input type="date" class="input" id="td-venc" value="'+(t.vencimento||'')+'"></div>'
+    + '<div class="field"><label>Hora (entra na agenda)</label><input type="time" class="input" id="td-hora" value="'+(fmtHora(t.hora)||'')+'"></div></div>'
+    + '<div class="frow"><div class="field"><label>Estimativa (min)</label><input type="number" class="input" id="td-est" value="'+(t.estimativa_min||'')+'"></div>'
+    + '<div class="field"><label>Recorrência</label><select class="select" id="td-rec">'
+    + [['','sem repetição'],['diaria','todo dia'],['semanal','semanal'],['mensal','mensal'],['intervalo','a cada N dias']]
+      .map(([v,l]) => '<option value="'+v+'"'+(v===recT?' selected':'')+'>'+l+'</option>').join('') + '</select></div></div>'
+    + '<div id="td-rec-extra">'+recExtraHTML(t.recorrencia)+'</div>'
+    + '<div class="field"><label>Etiquetas</label><div class="row wrap" id="td-tags">'
+    + T('etiquetas').map(e => '<span class="chip mini'+((t.etiquetas||[]).includes(e.nome)?' sel':'')+'" data-act="td-tag" data-n="'+esc(e.nome)+'" style="color:'+(e.cor||'inherit')+'">@'+esc(e.nome)+'</span>').join('')
+    + '<span class="chip mini" data-act="etq-add">+ nova</span></div></div>'
+    + '<div class="field"><label>Subtarefas</label><div id="td-subs">'+subtarefasHTML(t)+'</div>'
+    + '<form data-sub="td-sub-add" class="row"><input class="input" id="td-sub-inp" placeholder="+ subtarefa"><button class="btn small" type="submit">Add</button></form></div>'
+    + '<div class="field"><label>Links / anexos</label><div id="td-links">'+linksHTML(t)+'</div>'
+    + '<form data-sub="td-link-add" class="frow"><input class="input" id="td-link-t" placeholder="título"><input class="input" id="td-link-u" placeholder="https://…"><button class="btn small" type="submit">Add</button></form></div>'
+    + '<div class="field"><label>Comentários</label><div id="td-coms">'+comentariosHTML(t)+'</div>'
+    + '<form data-sub="td-com-add" class="row"><input class="input" id="td-com-inp" placeholder="+ comentário"><button class="btn small" type="submit">Add</button></form></div>'
+    + '<div class="bx-foot"><button class="btn danger" data-act="td-del">Excluir</button>'
+    + (!t.concluida && !t.abandonada ? '<button class="btn ghost" data-act="td-abandonar">🕊️ Abandonar</button>' : '')
+    + (t.abandonada ? '<button class="btn ghost" data-act="td-retomar">Retomar</button>' : '')
+    + '<span class="sp"></span><button class="btn primary" data-act="td-save">Salvar</button></div>';
+  modal(html, { wide:true });
+  window._tdId = id;
+}
+function secaoOpts(projId, secId) {
+  const secs = ordenar(T('secoes').filter(s => s.projeto_id === projId), s => s.ordem||0);
+  return '<option value="">— sem seção —</option>' + secs.map(s => '<option value="'+s.id+'"'+(s.id===secId?' selected':'')+'>'+esc(s.nome)+'</option>').join('');
+}
+function recExtraHTML(rec) {
+  if (!rec) return '';
+  if (rec.tipo === 'semanal') return '<div class="row wrap" style="margin:-4px 0 12px">'
+    + DIAS_SEM.map((d,i) => '<span class="chip mini'+((rec.dias||[]).includes(i)?' sel':'')+'" data-act="td-rec-dia" data-d="'+i+'">'+d+'</span>').join('') + '</div>';
+  if (rec.tipo === 'intervalo') return '<div class="field"><label>A cada quantos dias</label><input type="number" class="input" id="td-rec-int" value="'+(rec.intervalo||2)+'"></div>';
+  if (rec.tipo === 'mensal') return '<div class="field"><label>Dia do mês</label><input type="number" class="input" id="td-rec-dia-mes" min="1" max="31" value="'+(rec.dia||1)+'"></div>';
+  return '';
+}
+act('td-proj-chg', el => { $('#td-sec').innerHTML = secaoOpts(el.value || null, null); });
+act('td-rec', () => {});
+document.addEventListener('change', e => {
+  if (e.target.id === 'td-rec') {
+    const tipo = e.target.value;
+    const rec = tipo ? {tipo, dias: tipo==='semanal'?[pDate(hoje()).getDay()]:undefined, intervalo: tipo==='intervalo'?2:undefined, dia: tipo==='mensal'?pDate(hoje()).getDate():undefined} : null;
+    $('#td-rec-extra').innerHTML = recExtraHTML(rec);
+  }
+});
+act('td-rec-dia', el => el.classList.toggle('sel'));
+act('td-tag', el => el.classList.toggle('sel'));
+function subtarefasHTML(t) {
+  return (t.subtarefas||[]).map((s,i) => '<div class="subtask-line"><button class="check p4'+(s.feito?' ck':'')+'" data-act="td-sub-tg" data-i="'+i+'" style="width:17px;height:17px"></button>'
+    + '<span style="flex:1;'+(s.feito?'text-decoration:line-through;color:var(--txt2)':'')+'">'+esc(s.texto)+'</span>'
+    + '<button class="iconbtn" data-act="td-sub-rm" data-i="'+i+'">✕</button></div>').join('') || '<span class="muted tiny">nenhuma</span>';
+}
+function linksHTML(t) {
+  return (t.links||[]).map((l,i) => '<div class="subtask-line">🔗 <a href="'+esc(l.url)+'" target="_blank" rel="noopener" style="flex:1">'+esc(l.titulo||l.url)+'</a>'
+    + '<button class="iconbtn" data-act="td-link-rm" data-i="'+i+'">✕</button></div>').join('') || '<span class="muted tiny">nenhum</span>';
+}
+function comentariosHTML(t) {
+  return (t.comentarios||[]).map((c,i) => '<div class="subtask-line" style="align-items:flex-start"><div style="flex:1"><div class="tiny muted">'+fmtData((c.criado_em||'').slice(0,10))+' '+(c.criado_em||'').slice(11,16)+'</div>'+esc(c.texto)+'</div>'
+    + '<button class="iconbtn" data-act="td-com-rm" data-i="'+i+'">✕</button></div>').join('') || '<span class="muted tiny">nenhum</span>';
+}
+const tdT = () => byId('tarefas', window._tdId);
+act('td-sub-add', () => { const t = tdT(); const v = $('#td-sub-inp').value.trim(); if (!v) return;
+  dbPatch('tarefas', t.id, {subtarefas:[...(t.subtarefas||[]), {texto:v, feito:false}]}); $('#td-subs').innerHTML = subtarefasHTML(tdT()); $('#td-sub-inp').value=''; });
+act('td-sub-tg', el => { const t = tdT(); const subs = [...t.subtarefas]; subs[el.dataset.i].feito = !subs[el.dataset.i].feito;
+  dbPatch('tarefas', t.id, {subtarefas:subs}); $('#td-subs').innerHTML = subtarefasHTML(tdT()); });
+act('td-sub-rm', el => { const t = tdT(); const subs = [...t.subtarefas]; subs.splice(el.dataset.i,1);
+  dbPatch('tarefas', t.id, {subtarefas:subs}); $('#td-subs').innerHTML = subtarefasHTML(tdT()); });
+act('td-link-add', () => { const t = tdT(); const u = $('#td-link-u').value.trim(); if (!u) return;
+  dbPatch('tarefas', t.id, {links:[...(t.links||[]), {titulo: $('#td-link-t').value.trim()||u, url:u}]});
+  $('#td-links').innerHTML = linksHTML(tdT()); $('#td-link-t').value=''; $('#td-link-u').value=''; });
+act('td-link-rm', el => { const t = tdT(); const ls = [...t.links]; ls.splice(el.dataset.i,1); dbPatch('tarefas', t.id, {links:ls}); $('#td-links').innerHTML = linksHTML(tdT()); });
+act('td-com-add', () => { const t = tdT(); const v = $('#td-com-inp').value.trim(); if (!v) return;
+  dbPatch('tarefas', t.id, {comentarios:[...(t.comentarios||[]), {texto:v, criado_em: nowISO()}]});
+  $('#td-coms').innerHTML = comentariosHTML(tdT()); $('#td-com-inp').value=''; });
+act('td-com-rm', el => { const t = tdT(); const cs = [...t.comentarios]; cs.splice(el.dataset.i,1); dbPatch('tarefas', t.id, {comentarios:cs}); $('#td-coms').innerHTML = comentariosHTML(tdT()); });
+act('td-abandonar', () => { const t = tdT(); dbPatch('tarefas', t.id, {abandonada:true}); closeModal(); render();
+  toast('Abandonar também é decidir. 🕊️', {undo: () => { dbPatch('tarefas', t.id, {abandonada:false}); render(); }}); });
+act('td-retomar', () => { const t = tdT(); dbPatch('tarefas', t.id, {abandonada:false}); closeModal(); render(); });
+act('td-del', () => { const t = {...tdT()};
+  confirmBox('Excluir a tarefa "'+esc(t.titulo)+'"?', () => { dbDelete('tarefas', t.id); closeModal(); render();
+    toast('Tarefa excluída.', {undo: () => { dbUpsert('tarefas', t); render(); }}); }, {perigo:1, sim:'Excluir'}); });
+act('td-save', () => {
+  const t = tdT(); if (!t) return;
+  const tipo = $('#td-rec') ? $('#td-rec').value : '';
+  let rec = null;
+  if (tipo === 'diaria') rec = {tipo:'diaria'};
+  if (tipo === 'semanal') rec = {tipo:'semanal', dias: $$('#td-rec-extra .chip.sel').map(c => Number(c.dataset.d))};
+  if (tipo === 'intervalo') rec = {tipo:'intervalo', intervalo: Number(($('#td-rec-int')||{}).value)||2};
+  if (tipo === 'mensal') rec = {tipo:'mensal', dia: Number(($('#td-rec-dia-mes')||{}).value)||1};
+  if (rec && rec.tipo === 'semanal' && !rec.dias.length) rec.dias = [pDate(hoje()).getDay()];
+  dbPatch('tarefas', t.id, {
+    titulo: $('#td-titulo').value.trim() || t.titulo,
+    descricao: $('#td-desc').value.trim() || null,
+    projeto_id: $('#td-proj').value || null,
+    secao_id: $('#td-sec').value || null,
+    area_id: $('#td-area').value || null,
+    prioridade: Number($('#td-pri').value) || 4,
+    vencimento: $('#td-venc').value || null,
+    hora: $('#td-hora').value || null,
+    estimativa_min: Number($('#td-est').value) || null,
+    recorrencia: rec,
+    etiquetas: $$('#td-tags .chip.sel').map(c => c.dataset.n)
+  });
+  closeModal(); render(); toast('Salvo ✓');
+});
+
+/* ---- página TAREFAS ---- */
+reg('tarefas', {
+  titulo: 'Tarefas',
+  render: (params) => {
+    const vista = params[0] ? params.join('/') : 'v/hoje';
+    return '<div class="tar-grid"><aside class="tar-aside card" style="position:sticky;top:14px">'+tarAsideHTML(vista)+'</aside>'
+      + '<div>'+tarVistasMobileHTML(vista)+'<div id="tar-conteudo">'+tarConteudoHTML(vista)+'</div></div></div>';
+  },
+  mount: () => {
+    if (window._qaRefoco) { window._qaRefoco = false; const i = $('#qa-inp'); if (i) i.focus(); }
+    bindTaskDnD();
+  }
+});
+function tarAsideHTML(vista) {
+  const pend = tarefasPendentes();
+  const nHoje = pend.filter(t => t.vencimento && t.vencimento <= hoje()).length;
+  const nInbox = pend.filter(t => !t.projeto_id).length;
+  const li = (rota, em, nome, n) => '<button class="navit'+(vista===rota?' on':'')+'" data-act="nav" data-r="tarefas/'+rota+'"><span class="em">'+em+'</span><span style="flex:1">'+nome+'</span>'+(n?'<span class="badge">'+n+'</span>':'')+'</button>';
+  let html = li('v/hoje','☀️','Hoje',nHoje) + li('v/semana','📆','Próximos 7 dias','') + li('v/inbox','📥','Caixa de entrada',nInbox) + li('v/feitas','✔️','Concluídas','');
+  const filtros = ordenar(T('filtros'), f => f.ordem||0);
+  html += '<div class="sec-head">Filtros <span class="sp"></span><button class="iconbtn" data-act="filtro-add" title="novo filtro">＋</button></div>';
+  html += filtros.map(f => li('filtro/'+f.id,'🔍',esc(f.nome),'')).join('') || '<span class="tiny muted" style="padding:0 12px">crie filtros salvos</span>';
+  html += '<div class="sec-head">Projetos <span class="sp"></span><button class="iconbtn" data-act="proj-add" title="novo projeto">＋</button></div>';
+  const areasOrd = ordenar(T('areas'), a => a.ordem||0);
+  for (const a of [...areasOrd, null]) {
+    const projs = T('projetos').filter(p => (a ? p.area_id === a.id : !p.area_id) && p.status !== 'arquivado');
+    if (!projs.length) continue;
+    if (a) html += '<div class="tiny" style="padding:6px 12px 0;color:'+a.cor+';font-weight:700">'+a.icone+' '+esc(a.nome).toUpperCase()+'</div>';
+    html += projs.map(p => li('projeto/'+p.id,'📁',esc(p.nome), pend.filter(t=>t.projeto_id===p.id).length)).join('');
+  }
+  const tagsUsadas = ordenar(T('etiquetas'), e => e.nome);
+  if (tagsUsadas.length) {
+    html += '<div class="sec-head">Etiquetas</div>' + tagsUsadas.map(e => li('etiqueta/'+encodeURIComponent(e.nome),'🏷️','@'+esc(e.nome), '')).join('');
+  }
+  return html;
+}
+function tarVistasMobileHTML(vista) {
+  const chip = (rota, l) => '<span class="chip'+(vista===rota?' sel':'')+'" data-act="nav" data-r="tarefas/'+rota+'">'+l+'</span>';
+  return '<div class="tar-vistas">'+chip('v/hoje','☀️ Hoje')+chip('v/semana','📆 7 dias')+chip('v/inbox','📥 Inbox')
+    + '<span class="chip" data-act="tar-projetos-sheet">📁 Projetos</span><span class="chip" data-act="tar-mais-sheet">⋯</span>'+chip('v/feitas','✔️ Feitas')+'</div>';
+}
+act('tar-projetos-sheet', () => {
+  modal('<div class="bx-h"><div class="h2">Projetos</div><button class="btn small" data-act="proj-add">+ Novo</button></div><div class="list">'
+    + T('projetos').filter(p => p.status !== 'arquivado').map(p => '<div class="item" data-act="nav-close" data-r="tarefas/projeto/'+p.id+'"><span>📁</span><div class="grow"><div class="ttl">'+esc(p.nome)+'</div><div class="sub">'+(areaDe(p.area_id)?areaChipHTML(p.area_id):'')+'</div></div></div>').join('')
+    + '</div>');
+});
+act('tar-mais-sheet', () => {
+  modal('<div class="bx-h"><div class="h2">Etiquetas e filtros</div><button class="btn small" data-act="filtro-add">+ Filtro</button></div>'
+    + '<div class="h3">Filtros</div><div class="row wrap">'+ (T('filtros').map(f => '<span class="chip" data-act="nav-close" data-r="tarefas/filtro/'+f.id+'">🔍 '+esc(f.nome)+'</span>').join('') || '<span class="muted small">nenhum</span>') +'</div><hr class="sep">'
+    + '<div class="h3">Etiquetas</div><div class="row wrap">'+ (T('etiquetas').map(e => '<span class="chip" data-act="nav-close" data-r="tarefas/etiqueta/'+encodeURIComponent(e.nome)+'">@'+esc(e.nome)+'</span>').join('') || '<span class="muted small">nenhuma</span>') +'</div>');
+});
+function tarConteudoHTML(vista) {
+  const [tipo, arg] = vista.split('/');
+  if (tipo === 'v' && arg === 'hoje') return vistaHojeHTML();
+  if (tipo === 'v' && arg === 'semana') return vistaSemanaHTML();
+  if (tipo === 'v' && arg === 'inbox') return vistaInboxHTML();
+  if (tipo === 'v' && arg === 'feitas') return vistaFeitasHTML();
+  if (tipo === 'projeto') return vistaProjetoHTML(arg);
+  if (tipo === 'etiqueta') return vistaEtiquetaHTML(decodeURIComponent(arg));
+  if (tipo === 'filtro') return vistaFiltroHTML(arg);
+  return vistaHojeHTML();
+}
+const ordTarefa = t => (t.hora ? '1'+t.hora : '2') + (t.prioridade||4) + (t.vencimento||'9999');
+function vistaHojeHTML() {
+  const pend = tarefasPendentes();
+  const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+  const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
+  const feitasHoje = T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === hoje());
+  let html = '<div class="h1">☀️ Hoje <span class="muted" style="font-weight:400;font-size:14px">'+fmtData(hoje(),{semHoje:1})+'</span></div>';
+  html += '<div class="card">'+quickAddHTML({def_venc: hoje()})+'</div>';
+  if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px"><span class="err">⏰ Atrasadas ('+atrasadas.length+')</span></div><div class="list" style="padding:0 10px 8px">'
+    + atrasadas.map(t => taskItemHTML(t, {rollover:true})).join('') + '</div></div>';
+  html += '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (deHoje.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🌤️</span>Nada para hoje. Adicione acima ou puxe do backlog.</div>') + '</div></div>';
+  if (feitasHoje.length) html += '<details class="help"><summary>✔️ Concluídas hoje ('+feitasHoje.length+')</summary><div class="list">'+feitasHoje.map(t => taskItemHTML(t)).join('')+'</div></details>';
+  return html;
+}
+function vistaSemanaHTML() {
+  let html = '<div class="h1">📆 Próximos 7 dias</div><div class="card">'+quickAddHTML({})+'</div><div class="card pad0" style="padding:4px 12px 10px">';
+  const pend = tarefasPendentes();
+  const atrasadas = pend.filter(t => t.vencimento && t.vencimento < hoje());
+  if (atrasadas.length) html += '<div class="day-head err">⏰ atrasadas</div><div class="list">'+ordenar(atrasadas, t=>t.vencimento).map(t => taskItemHTML(t, {rollover:true})).join('')+'</div>';
+  for (let i = 0; i < 7; i++) {
+    const d = addDias(hoje(), i);
+    const ts = ordenar(pend.filter(t => t.vencimento === d), ordTarefa);
+    html += '<div class="day-head">'+fmtData(d)+'</div>';
+    html += ts.length ? '<div class="list">'+ts.map(t => taskItemHTML(t)).join('')+'</div>' : '<div class="tiny muted" style="padding:2px 6px 6px">—</div>';
+  }
+  return html + '</div>';
+}
+function vistaInboxHTML() {
+  const ts = ordenar(tarefasPendentes().filter(t => !t.projeto_id), t => -(new Date(t.criado_em||0)).getTime());
+  return '<div class="h1">📥 Caixa de entrada</div><div class="card">'+quickAddHTML({})+'</div>'
+    + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (ts.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">📭</span>Inbox zerada. Que paz.</div>') + '</div></div>';
+}
+function vistaFeitasHTML() {
+  const feitas = ordenar(T('tarefas').filter(t => t.concluida), t => t.concluida_em||'', true).slice(0, 120);
+  const aband = T('tarefas').filter(t => t.abandonada && !t.concluida);
+  let html = '<div class="h1">✔️ Concluídas</div><div class="card pad0" style="padding:4px 12px 10px">';
+  let dia = null;
+  for (const t of feitas) {
+    const d = (t.concluida_em||'').slice(0,10);
+    if (d !== dia) { dia = d; html += '<div class="day-head">'+fmtData(d)+'</div>'; }
+    html += taskItemHTML(t);
+  }
+  if (!feitas.length) html += '<div class="empty"><span class="em">🏁</span>Nenhuma concluída ainda.</div>';
+  html += '</div>';
+  if (aband.length) html += '<details class="help"><summary>🕊️ Abandonadas ('+aband.length+') — decisões legítimas, não falhas</summary><div class="list">'+aband.map(t => taskItemHTML(t)).join('')+'</div></details>';
+  return html;
+}
+function vistaProjetoHTML(pid) {
+  const p = byId('projetos', pid);
+  if (!p) return '<div class="empty">Projeto não encontrado.</div>';
+  const todas = T('tarefas').filter(t => t.projeto_id === pid && !t.abandonada);
+  const feitas = todas.filter(t => t.concluida).length;
+  const pct = todas.length ? Math.round(feitas/todas.length*100) : 0;
+  const secs = ordenar(T('secoes').filter(s => s.projeto_id === pid), s => s.ordem||0);
+  let html = '<div class="row" style="margin-bottom:6px"><div class="h1" style="flex:1">📁 '+esc(p.nome)+'</div>'
+    + '<button class="btn small" data-act="proj-edit" data-id="'+pid+'">✏️</button>'
+    + '<button class="btn small" data-act="sec-add" data-id="'+pid+'">+ Seção</button></div>'
+    + '<div class="row" style="margin-bottom:10px">'+areaChipHTML(p.area_id)
+    + '<span class="badge'+(p.status==='ativo'?' ok':'')+'">'+esc(p.status||'ativo')+'</span>'
+    + (p.prazo?'<span class="badge">até '+fmtData(p.prazo)+'</span>':'')
+    + '<div class="bar" style="flex:1;max-width:200px"><i style="width:'+pct+'%"></i></div><span class="tiny muted">'+pct+'%</span></div>'
+    + '<div class="card">'+quickAddHTML({projeto_id:pid, area_id:p.area_id, ph:'+ tarefa neste projeto…'})+'</div>';
+  const grupos = [{id:null, nome:null}, ...secs];
+  for (const g of grupos) {
+    const ts = ordenar(todas.filter(t => !t.concluida && (g.id ? t.secao_id === g.id : !t.secao_id)), t => t.ordem||0);
+    if (g.id) {
+      html += '<div class="sec-head collap" data-act="sec-collap"><span class="arr">▼</span> '+esc(g.nome)+' <span class="badge">'+ts.length+'</span><span class="sp"></span>'
+        + '<button class="iconbtn" data-act="sec-edit" data-id="'+g.id+'">✏️</button></div>';
+    } else if (ts.length) html += '<div class="sec-head">— sem seção</div>';
+    html += '<div class="card pad0 sec-body" data-sec="'+(g.id||'')+'" data-proj="'+pid+'"><div class="list" style="padding:2px 10px;min-height:14px">'
+      + ts.map(t => taskItemHTML(t, {semProjeto:true, drag:true})).join('') + '</div></div>';
+  }
+  const conc = todas.filter(t => t.concluida);
+  if (conc.length) html += '<details class="help"><summary>✔️ Concluídas ('+conc.length+')</summary><div class="list">'+conc.slice(0,40).map(t => taskItemHTML(t,{semProjeto:true})).join('')+'</div></details>';
+  return html;
+}
+act('sec-collap', el => { el.classList.toggle('closed'); const body = el.nextElementSibling; if (body) body.style.display = el.classList.contains('closed') ? 'none' : ''; });
+function vistaEtiquetaHTML(nome) {
+  const ts = ordenar(tarefasPendentes().filter(t => (t.etiquetas||[]).includes(nome)), ordTarefa);
+  return '<div class="h1">🏷️ @'+esc(nome)+'</div><div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (ts.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🏷️</span>Nenhuma tarefa com esta etiqueta.</div>') + '</div></div>';
+}
+/* ---- filtros salvos ---- */
+function avaliarFiltro(c, t) {
+  if (!c) return false;
+  if (!c.incluir_concluidas && (t.concluida || t.abandonada)) return false;
+  if (c.prioridades && c.prioridades.length && !c.prioridades.includes(t.prioridade||4)) return false;
+  if (c.areas && c.areas.length && !c.areas.includes(t.area_id)) return false;
+  if (c.projetos && c.projetos.length && !c.projetos.includes(t.projeto_id)) return false;
+  if (c.etiquetas && c.etiquetas.length && !c.etiquetas.some(e => (t.etiquetas||[]).includes(e))) return false;
+  if (c.venc === 'hoje' && t.vencimento !== hoje()) return false;
+  if (c.venc === 'semana' && !(t.vencimento && t.vencimento <= fimSemana(hoje()))) return false;
+  if (c.venc === 'atrasadas' && !(t.vencimento && t.vencimento < hoje() && !t.concluida)) return false;
+  if (c.venc === 'sem_data' && t.vencimento) return false;
+  return true;
+}
+function vistaFiltroHTML(fid) {
+  const f = byId('filtros', fid);
+  if (!f) return '<div class="empty">Filtro não encontrado.</div>';
+  const ts = ordenar(T('tarefas').filter(t => avaliarFiltro(f.criterios, t)), ordTarefa);
+  return '<div class="row" style="margin-bottom:8px"><div class="h1" style="flex:1">🔍 '+esc(f.nome)+'</div>'
+    + '<button class="btn small" data-act="filtro-edit" data-id="'+fid+'">✏️ Editar</button></div>'
+    + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (ts.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🔍</span>Nada bate com este filtro.</div>') + '</div></div>';
+}
+function filtroModal(f) {
+  const c = (f && f.criterios) || {};
+  const chips = (lista, sels, attr) => lista.map(([v,l]) => '<span class="chip mini'+((sels||[]).includes(v)?' sel':'')+'" data-fl="'+attr+'" data-v="'+esc(v)+'">'+l+'</span>').join('');
+  modal('<div class="bx-h"><div class="h2">'+(f?'Editar':'Novo')+' filtro</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome *</label><input class="input" id="fl-nome" value="'+esc(f?f.nome:'')+'" placeholder="ex.: Urgente do trabalho esta semana" autofocus></div>'
+    + '<div class="field"><label>Prioridades</label><div class="row wrap">'+chips([[1,'P1'],[2,'P2'],[3,'P3'],[4,'P4']], c.prioridades, 'pri')+'</div></div>'
+    + '<div class="field"><label>Áreas</label><div class="row wrap">'+chips(T('areas').map(a=>[a.id, a.icone+' '+esc(a.nome)]), c.areas, 'area')+'</div></div>'
+    + '<div class="field"><label>Projetos</label><div class="row wrap">'+chips(T('projetos').filter(p=>p.status!=='arquivado').map(p=>[p.id, esc(p.nome)]), c.projetos, 'proj')+'</div></div>'
+    + '<div class="field"><label>Etiquetas</label><div class="row wrap">'+chips(T('etiquetas').map(e=>[e.nome, '@'+esc(e.nome)]), c.etiquetas, 'tag')+'</div></div>'
+    + '<div class="field"><label>Vencimento</label><select class="select" id="fl-venc">'
+    + [['','qualquer'],['hoje','hoje'],['semana','até o fim da semana'],['atrasadas','atrasadas'],['sem_data','sem data']]
+      .map(([v,l]) => '<option value="'+v+'"'+(v===(c.venc||'')?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<label class="checkline"><input type="checkbox" id="fl-conc"'+(c.incluir_concluidas?' checked':'')+'> incluir concluídas</label>'
+    + '<div class="bx-foot">'+(f?'<button class="btn danger" data-act="filtro-del" data-id="'+f.id+'">Excluir</button><span class="sp"></span>':'')
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="filtro-save" data-id="'+(f?f.id:'')+'">Salvar</button></div>',
+    { onMount: ov => ov.addEventListener('click', e => { const ch = e.target.closest('[data-fl]'); if (ch) ch.classList.toggle('sel'); }) });
+}
+act('filtro-add', () => filtroModal(null));
+act('filtro-edit', el => filtroModal(byId('filtros', el.dataset.id)));
+act('filtro-save', el => {
+  const nome = $('#fl-nome').value.trim(); if (!nome) { toast('Dê um nome ao filtro.'); return; }
+  const pega = attr => $$('.chip.sel[data-fl="'+attr+'"]').map(c => attr==='pri' ? Number(c.dataset.v) : c.dataset.v);
+  const criterios = { prioridades: pega('pri'), areas: pega('area'), projetos: pega('proj'), etiquetas: pega('tag'),
+    venc: $('#fl-venc').value || null, incluir_concluidas: $('#fl-conc').checked };
+  const f = dbUpsert('filtros', { id: el.dataset.id || undefined, nome, criterios, ordem: T('filtros').length });
+  closeModal(); nav('tarefas/filtro/'+f.id);
+});
+act('filtro-del', el => { const f = {...byId('filtros', el.dataset.id)}; dbDelete('filtros', el.dataset.id); closeModal(); nav('tarefas');
+  toast('Filtro excluído.', {undo: () => { dbUpsert('filtros', f); render(); }}); });
+
+/* ---- projetos / seções CRUD ---- */
+const projFields = [
+  {k:'nome', l:'Nome', req:1, foco:1},
+  {k:'area_id', t:'sel', l:'Área', opts: () => optsAreas()},
+  {k:'status', t:'sel', l:'Status', meia:1, opts:[['ativo','ativo'],['pausado','pausado'],['concluido','concluído'],['arquivado','arquivado']].map(([v,t])=>({v,t}))},
+  {k:'prazo', t:'date', l:'Prazo', meia:1}
+];
+const resolveOpts = fields => fields.map(f => ({...f, opts: typeof f.opts === 'function' ? f.opts() : f.opts}));
+act('proj-add', () => { closeModal(); editModal({ titulo:'Novo projeto', fields: resolveOpts(projFields),
+  onSave: v => { const p = dbUpsert('projetos', v); nav('tarefas/projeto/'+p.id); } }); });
+act('proj-edit', el => {
+  const p = byId('projetos', el.dataset.id);
+  editModal({ titulo:'Editar projeto', fields: resolveOpts(projFields), vals: p,
+    onSave: v => { dbPatch('projetos', p.id, v); render(); },
+    onDelete: () => {
+      const secs = T('secoes').filter(s => s.projeto_id === p.id);
+      T('tarefas').filter(t => t.projeto_id === p.id).forEach(t => dbPatch('tarefas', t.id, {projeto_id:null, secao_id:null}));
+      secs.forEach(s => dbDelete('secoes', s.id));
+      dbDelete('projetos', p.id);
+      nav('tarefas');
+      toast('Projeto excluído. As tarefas foram para a caixa de entrada.');
+    } });
+});
+act('sec-add', el => {
+  const pid = el.dataset.id;
+  editModal({ titulo:'Nova seção', fields:[{k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Backlog / Fazendo / Feito'}],
+    onSave: v => { dbUpsert('secoes', {projeto_id: pid, nome: v.nome, ordem: T('secoes').filter(s=>s.projeto_id===pid).length}); render(); } });
+});
+act('sec-edit', el => {
+  const s = byId('secoes', el.dataset.id);
+  const irmas = ordenar(T('secoes').filter(x => x.projeto_id === s.projeto_id), x => x.ordem||0);
+  const idx = irmas.findIndex(x => x.id === s.id);
+  editModal({ titulo:'Seção', fields:[{k:'nome', l:'Nome', req:1, foco:1}], vals: s,
+    extra: '<div class="row" style="margin-bottom:10px"><button type="button" class="btn small" data-act="sec-move" data-id="'+s.id+'" data-d="-1"'+(idx<=0?' disabled':'')+'>↑ subir</button>'
+      + '<button type="button" class="btn small" data-act="sec-move" data-id="'+s.id+'" data-d="1"'+(idx>=irmas.length-1?' disabled':'')+'>↓ descer</button></div>',
+    onSave: v => { dbPatch('secoes', s.id, v); render(); },
+    onDelete: () => { T('tarefas').filter(t => t.secao_id === s.id).forEach(t => dbPatch('tarefas', t.id, {secao_id:null}));
+      dbDelete('secoes', s.id); render(); toast('Seção excluída (tarefas mantidas no projeto).'); } });
+});
+act('sec-move', el => {
+  const s = byId('secoes', el.dataset.id); const d = Number(el.dataset.d);
+  const irmas = ordenar(T('secoes').filter(x => x.projeto_id === s.projeto_id), x => x.ordem||0);
+  const i = irmas.findIndex(x => x.id === s.id), j = i + d;
+  if (j < 0 || j >= irmas.length) return;
+  dbPatch('secoes', irmas[i].id, {ordem:j}); dbPatch('secoes', irmas[j].id, {ordem:i});
+  closeModal(); render();
+});
+
+/* ---- drag & drop (desktop) ---- */
+let _dragTaskId = null;
+function bindTaskDnD() {
+  $$('.task[draggable]').forEach(el => {
+    el.addEventListener('dragstart', () => { _dragTaskId = el.dataset.tid; el.classList.add('dragging'); });
+    el.addEventListener('dragend', () => { el.classList.remove('dragging'); $$('.drag-over').forEach(x => x.classList.remove('drag-over')); });
+    el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drag-over'); });
+    el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
+    el.addEventListener('drop', e => { e.preventDefault(); soltarTarefa(el.dataset.tid, el.closest('.sec-body')); });
+  });
+  $$('.sec-body').forEach(sec => {
+    sec.addEventListener('dragover', e => { e.preventDefault(); sec.classList.add('drag-over'); });
+    sec.addEventListener('dragleave', () => sec.classList.remove('drag-over'));
+    sec.addEventListener('drop', e => { e.preventDefault(); if (e.target.closest('.task')) return; soltarTarefa(null, sec); });
+  });
+}
+function soltarTarefa(antesDeId, secBody) {
+  if (!_dragTaskId || !secBody) return;
+  const secId = secBody.dataset.sec || null;
+  const projId = secBody.dataset.proj;
+  const ids = $$('.sec-body[data-sec="'+(secId||'')+'"] .task').map(el => el.dataset.tid).filter(i => i !== _dragTaskId);
+  const pos = antesDeId ? ids.indexOf(antesDeId) : ids.length;
+  ids.splice(pos < 0 ? ids.length : pos, 0, _dragTaskId);
+  ids.forEach((tid, i) => { const t = byId('tarefas', tid); if (!t) return;
+    const patch = {ordem: i*10};
+    if (tid === _dragTaskId) { patch.secao_id = secId; patch.projeto_id = projId; }
+    dbPatch('tarefas', tid, patch);
+  });
+  _dragTaskId = null;
+  render();
+}
+
+/* ---- FAB: nova tarefa ---- */
+act('qa-tarefa', () => {
+  closeModal();
+  modal('<div class="bx-h"><div class="h2">✅ Nova tarefa</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + quickAddHTML({ph:'ex.: Reunião sexta 14:30 #trabalho @urgente p1'})
+    + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>toda segunda 7h</kbd> <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
+    + '<div class="bx-foot"><button class="btn primary" data-act="qa-sub-modal">Criar tarefa</button></div>',
+    { onMount: ov => setTimeout(() => { const i = ov.querySelector('#qa-inp'); if (i) i.focus(); }, 80) });
+});
+act('qa-sub-modal', () => {
+  const inp = $('#qa-inp'); const p = parseNL(inp.value);
+  if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
+  criarTarefaParseada(p, {});
+  closeModal(); render();
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
