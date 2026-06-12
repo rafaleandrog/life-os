@@ -1,0 +1,32 @@
+{
+  "name": "Life OS",
+  "short_name": "Life OS",
+  "description": "Sistema único de interface geral da vida: tarefas, rotina, hábitos, tempo, metas, finanças, investimentos, treino, leitura e escrita.",
+  "lang": "pt-BR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0E0F13",
+  "theme_color": "#0E0F13",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='115'%20fill='%237C5CFC'/%3E%3Cpath%20d='M296%2060%20156%20304h92l-32%20148%20140-244h-92z'%20fill='%23ffffff'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='115'%20fill='%237C5CFC'/%3E%3Cpath%20d='M296%2060%20156%20304h92l-32%20148%20140-244h-92z'%20fill='%23ffffff'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20fill='%237C5CFC'/%3E%3Cpath%20d='M296%20100%20186%20292h72l-26%20120%20112-196h-74z'%20fill='%23ffffff'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
