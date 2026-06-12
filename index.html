@@ -4075,6 +4075,177 @@ function relatorioTabHTML(ini) {
     + '<div class="card"><div class="h2">🥧 Distribuição do tempo planejado</div>'
     + svgPizza(linhas.map(l => ({ label: l.a.nome, valor: Math.round(l.plan), cor: l.a.cor })), { fmt: v => fmtMin(v) }) + '</div>';
 }
+/* ════════════════ ETAPA 12 — METAS (vínculos automáticos + visão anual) ════════════════ */
+const VINCULOS_META = [
+  ['', '✋ manual'], ['habito', '🔁 hábito'], ['categoria_financeira', '💰 categoria financeira'],
+  ['corrida_km', '🏃 km de corrida'], ['livros', '📚 livros concluídos'],
+  ['treino_sessoes', '🏋️ sessões de treino'], ['peso', '⚖️ peso corporal'], ['patrimonio', '📈 patrimônio']
+];
+function janelaMeta(m) {
+  if (m.ano) return [m.ano + '-01-01', m.ano + '-12-31'];
+  const ini = (m.criado_em || nowISO()).slice(0, 10);
+  return [ini, m.prazo || '9999-12-31'];
+}
+function metaProgresso(m) { // regra 4: sempre recalculável do histórico
+  const [ini, fim] = janelaMeta(m);
+  const dentro = d => d >= ini && d <= fim;
+  let atual = 0;
+  switch (m.vinculo_tipo) {
+    case 'habito':
+      atual = sum(T('habito_registros').filter(r => r.habito_id === m.vinculo_id && dentro(r.data)).map(r => r.valor)) * (Number(m.fator_conversao) || 1); break;
+    case 'categoria_financeira':
+      atual = sum(T('lancamentos_financeiros').filter(l => l.categoria_id === m.vinculo_id && l.pago && dentro(l.data)).map(l => l.valor)); break;
+    case 'corrida_km':
+      atual = sum(T('corridas').filter(c => dentro(c.data)).map(c => c.distancia_km)); break;
+    case 'livros':
+      atual = T('livros').filter(l => l.status === 'concluido' && l.fim && dentro(l.fim)).length; break;
+    case 'treino_sessoes':
+      atual = T('treino_sessoes').filter(s => dentro(s.data)).length; break;
+    case 'peso': {
+      const regs = ordenar(T('corpo_registros').filter(r => r.peso_kg != null), r => r.data);
+      atual = regs.length ? Number(regs[regs.length - 1].peso_kg) : 0; break;
+    }
+    case 'patrimonio':
+      atual = window.patrimonioTotal ? patrimonioTotal() : 0; break;
+    default:
+      atual = (Number(m.valor_atual) || 0) + sum(T('meta_registros').filter(r => r.meta_id === m.id).map(r => r.valor));
+  }
+  const alvo = Number(m.valor_alvo) || 1;
+  const reduzir = m.direcao === 'reduzir';
+  const atingida = reduzir ? (atual > 0 && atual <= alvo) : atual >= alvo;
+  const pct = reduzir ? (atual > 0 ? clamp(alvo / atual, 0, 1) : 0) : clamp(atual / alvo, 0, 1);
+  // ritmo necessário
+  const fimReal = m.prazo || (m.ano ? m.ano + '-12-31' : null);
+  let ritmo = null, semanasRestantes = null;
+  if (fimReal && fimReal >= hoje() && !reduzir && !atingida) {
+    semanasRestantes = Math.max(1, Math.ceil(diffDias(hoje(), fimReal) / 7));
+    ritmo = (alvo - atual) / semanasRestantes;
+  }
+  // status (heurística linear)
+  let status = 'andamento';
+  if (m.concluida || atingida) status = 'batida';
+  else if (fimReal && fimReal < hoje()) status = 'vencida';
+  else if (fimReal && !reduzir) {
+    const [i2] = janelaMeta(m);
+    const total = Math.max(1, diffDias(i2, fimReal));
+    const decorrido = clamp(diffDias(i2, hoje()) / total, 0, 1);
+    if (pct < decorrido * 0.7) status = 'risco';
+  }
+  return { atual, alvo, pct, atingida, ritmo, semanasRestantes, status, reduzir };
+}
+function metaCardHTML(m) {
+  const p = metaProgresso(m);
+  const cor = p.status === 'batida' ? 'var(--ok)' : p.status === 'risco' ? 'var(--warn)' : p.status === 'vencida' ? 'var(--err)' : 'var(--acc)';
+  const stBadge = { batida:'<span class="badge ok">🎉 batida</span>', risco:'<span class="badge warn">em risco</span>',
+    vencida:'<span class="badge err">prazo vencido</span>', andamento:'<span class="badge acc">no caminho</span>' }[p.status];
+  const vinculo = VINCULOS_META.find(v => v[0] === (m.vinculo_tipo || ''));
+  return '<div class="card"><div class="card-h"><div class="h2" style="font-size:15px">'+esc(m.nome)+'</div>'+stBadge
+    + '<button class="iconbtn" data-act="meta-edit" data-id="'+m.id+'">✏️</button></div>'
+    + '<div class="row" style="margin-bottom:6px"><div class="bar thick" style="flex:1"><i style="width:'+Math.round(p.pct*100)+'%;background:'+cor+'"></i></div>'
+    + '<b class="small">'+Math.round(p.pct*100)+'%</b></div>'
+    + '<div class="row wrap tiny muted">'
+    + '<span><b style="color:var(--txt)">'+fmtNum(p.atual, 1)+'</b> / '+fmtNum(p.alvo, 1)+' '+esc(m.unidade||'')+(p.reduzir?' (reduzir)':'')+'</span>'
+    + (vinculo && vinculo[0] ? '<span>· '+vinculo[1]+'</span>' : '')
+    + (m.prazo ? '<span>· até '+fmtData(m.prazo)+'</span>' : m.ano ? '<span>· '+m.ano+'</span>' : '')
+    + (p.ritmo != null && p.ritmo > 0 ? '<span>· precisa de <b style="color:var(--warn)">'+fmtNum(p.ritmo, 1)+' '+esc(m.unidade||'')+'/sem</b></span>' : '')
+    + (areaDe(m.area_id) ? '<span>· '+areaChipHTML(m.area_id)+'</span>' : '') + '</div>'
+    + (!m.vinculo_tipo ? '<button class="btn small" data-act="meta-reg" data-id="'+m.id+'" style="margin-top:8px">+ Registrar progresso</button>' : '')
+    + '</div>';
+}
+reg('metas', {
+  titulo: 'Metas',
+  render: (params) => {
+    const aba = params[0] === 'ano' ? 'ano' : 'ativas';
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🎯 Metas</div>'
+      + '<div class="seg"><button class="'+(aba==='ativas'?'on':'')+'" data-act="nav" data-r="metas">Ativas</button>'
+      + '<button class="'+(aba==='ano'?'on':'')+'" data-act="nav" data-r="metas/ano">Visão anual</button></div>'
+      + '<button class="btn primary small" data-act="meta-add">+ Meta</button></div>';
+    if (aba === 'ativas') {
+      const ativas = T('metas').filter(m => !m.concluida);
+      const concluidas = T('metas').filter(m => m.concluida);
+      html += ativas.map(metaCardHTML).join('') || '<div class="card"><div class="empty"><span class="em">🎯</span>Metas viram progresso visível — crie a primeira.</div></div>';
+      if (concluidas.length) html += '<details class="help"><summary>🏁 Concluídas ('+concluidas.length+')</summary>'+concluidas.map(metaCardHTML).join('')+'</details>';
+    } else {
+      const ano = Number(params[1]) || new Date().getFullYear();
+      const doAno = T('metas').filter(m => (m.ano || (m.prazo ? anoDe(m.prazo) : null)) === ano);
+      const batidas = doAno.filter(m => metaProgresso(m).atingida || m.concluida).length;
+      html += '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="metas/ano/'+(ano-1)+'">←</button>'
+        + '<b style="flex:1;text-align:center">'+ano+'</b><button class="btn small" data-act="nav" data-r="metas/ano/'+(ano+1)+'">→</button></div>'
+        + '<div class="grid3"><div class="kpi"><div class="l">metas do ano</div><div class="v">'+doAno.length+'</div></div>'
+        + '<div class="kpi"><div class="l">batidas</div><div class="v ok">'+batidas+'</div></div>'
+        + '<div class="kpi"><div class="l">taxa</div><div class="v">'+(doAno.length?Math.round(batidas/doAno.length*100):0)+'%</div></div></div>'
+        + doAno.map(metaCardHTML).join('')
+        + '<button class="btn" data-act="nav" data-r="retrospectiva" style="margin-top:6px">🎉 Ver retrospectiva do ano</button>';
+    }
+    return html;
+  }
+});
+function metaModal(m) {
+  const vals = m || { direcao:'aumentar', ano: new Date().getFullYear(), fator_conversao: 1 };
+  const vincOpts = tipo => tipo === 'habito' ? habitosAtivos().map(h => ({v:h.id, t:h.icone+' '+h.nome}))
+    : tipo === 'categoria_financeira' ? T('categorias_financeiras').map(c => ({v:c.id, t:c.nome})) : [];
+  modal('<div class="bx-h"><div class="h2">'+(m?'Editar':'Nova')+' meta</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome *</label><input class="input" id="mt-nome" value="'+esc(vals.nome||'')+'" autofocus placeholder="ex.: Correr 300 km no ano"></div>'
+    + '<div class="frow"><div class="field"><label>Alvo *</label><input class="input" type="number" step="any" id="mt-alvo" value="'+(vals.valor_alvo??'')+'"></div>'
+    + '<div class="field"><label>Unidade</label><input class="input" id="mt-uni" value="'+esc(vals.unidade||'')+'" placeholder="km, livros, R$…"></div></div>'
+    + '<div class="frow"><div class="field"><label>Vínculo automático</label><select class="select" id="mt-vinc" data-chg="mt-vinc-chg">'
+    + VINCULOS_META.map(([v,l]) => '<option value="'+v+'"'+(v===(vals.vinculo_tipo||'')?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<div class="field"><label>Direção</label><select class="select" id="mt-dir">'
+    + [['aumentar','⬆️ aumentar'],['reduzir','⬇️ reduzir']].map(([v,l]) => '<option value="'+v+'"'+(v===vals.direcao?' selected':'')+'>'+l+'</option>').join('')+'</select></div></div>'
+    + '<div class="field" id="mt-vinc-id-box" style="'+(vincOpts(vals.vinculo_tipo).length?'':'display:none')+'"><label>Qual?</label><select class="select" id="mt-vinc-id">'
+    + vincOpts(vals.vinculo_tipo).map(o => '<option value="'+o.v+'"'+(o.v===vals.vinculo_id?' selected':'')+'>'+esc(o.t)+'</option>').join('')+'</select></div>'
+    + '<div class="frow"><div class="field"><label>Ano (opcional)</label><input class="input" type="number" id="mt-ano" value="'+(vals.ano||'')+'"></div>'
+    + '<div class="field"><label>Prazo (opcional)</label><input class="input" type="date" id="mt-prazo" value="'+(vals.prazo||'')+'"></div></div>'
+    + '<div class="frow"><div class="field"><label>Área</label><select class="select" id="mt-area">'
+    + optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(vals.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('')+'</select></div>'
+    + '<div class="field"><label>Fator de conversão</label><input class="input" type="number" step="any" id="mt-fator" value="'+(vals.fator_conversao??1)+'"></div></div>'
+    + (m ? '<label class="checkline"><input type="checkbox" id="mt-conc"'+(m.concluida?' checked':'')+'> marcar como concluída</label>' : '')
+    + '<div class="bx-foot">'+(m?'<button class="btn danger" data-act="meta-del" data-id="'+m.id+'">Excluir</button><span class="sp"></span>':'')
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="meta-save" data-id="'+(m?m.id:'')+'">Salvar</button></div>');
+}
+act('mt-vinc-chg', el => {
+  const tipo = el.value;
+  const box = $('#mt-vinc-id-box'), sel = $('#mt-vinc-id');
+  const opts = tipo === 'habito' ? habitosAtivos().map(h => ({v:h.id, t:h.icone+' '+h.nome}))
+    : tipo === 'categoria_financeira' ? T('categorias_financeiras').map(c => ({v:c.id, t:c.nome})) : [];
+  if (opts.length) { box.style.display = ''; sel.innerHTML = opts.map(o => '<option value="'+o.v+'">'+esc(o.t)+'</option>').join(''); }
+  else box.style.display = 'none';
+  if (tipo === 'peso') $('#mt-dir').value = 'reduzir';
+});
+act('meta-add', () => metaModal(null));
+act('meta-edit', el => metaModal(byId('metas', el.dataset.id)));
+act('meta-save', el => {
+  const nome = $('#mt-nome').value.trim(), alvo = Number($('#mt-alvo').value);
+  if (!nome || !(alvo > 0)) { toast('Preencha nome e alvo.'); return; }
+  const tipo = $('#mt-vinc').value || null;
+  dbUpsert('metas', { id: el.dataset.id || undefined, nome, valor_alvo: alvo, unidade: $('#mt-uni').value.trim() || null,
+    vinculo_tipo: tipo, vinculo_id: ($('#mt-vinc-id-box').style.display === 'none' ? null : $('#mt-vinc-id').value || null),
+    direcao: $('#mt-dir').value, ano: Number($('#mt-ano').value) || null, prazo: $('#mt-prazo').value || null,
+    area_id: $('#mt-area').value || null, fator_conversao: Number($('#mt-fator').value) || 1,
+    valor_atual: el.dataset.id ? byId('metas', el.dataset.id).valor_atual : 0,
+    concluida: $('#mt-conc') ? $('#mt-conc').checked : false });
+  closeModal(); render();
+});
+act('meta-del', el => { const m = {...byId('metas', el.dataset.id)};
+  T('meta_registros').filter(r => r.meta_id === m.id).forEach(r => dbDelete('meta_registros', r.id));
+  dbDelete('metas', el.dataset.id); closeModal(); render();
+  toast('Meta excluída.', {undo: () => { dbUpsert('metas', m); render(); }}); });
+act('meta-reg', el => {
+  const m = byId('metas', el.dataset.id);
+  modal('<div class="bx-h"><div class="h2">'+esc(m.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="frow"><div class="field"><label>Quanto somar</label><input class="input" type="number" step="any" id="mr-val" autofocus></div>'
+    + '<div class="field"><label>Data</label><input class="input" type="date" id="mr-data" value="'+hoje()+'"></div></div>'
+    + '<div class="field"><label>Nota</label><input class="input" id="mr-nota"></div>'
+    + '<div class="bx-foot"><button class="btn primary" data-act="meta-reg-save" data-id="'+m.id+'">✓ Registrar</button></div>');
+});
+act('meta-reg-save', el => {
+  const v = Number($('#mr-val').value);
+  if (!v) { toast('Informe o valor.'); return; }
+  dbUpsert('meta_registros', { meta_id: el.dataset.id, data: $('#mr-data').value || hoje(), valor: v, nota: $('#mr-nota').value.trim() || null });
+  closeModal(); render();
+  const m = byId('metas', el.dataset.id), p = metaProgresso(m);
+  toast(p.atingida ? '🎉 Meta "'+esc(m.nome)+'" batida!' : 'Progresso registrado ✓ ('+Math.round(p.pct*100)+'%)');
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
