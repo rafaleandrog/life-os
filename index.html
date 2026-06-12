@@ -3278,6 +3278,314 @@ function corpoTabHTML() {
 }
 act('corpo-del', el => { const r = {...byId('corpo_registros', el.dataset.id)}; dbDelete('corpo_registros', el.dataset.id); render();
   toast('Registro excluído.', {undo: () => { dbUpsert('corpo_registros', r); render(); }}); });
+/* ════════════════ ETAPA 9 — LEITURA + REPETIÇÃO ESPAÇADA + INSIGHT DO DIA ════════════════ */
+const INTERVALOS_SRS = [1, 3, 7, 21, 60, 120];
+const STATUS_LIVRO = [['quero_ler','📚 quero ler'],['lendo','📖 lendo'],['concluido','✅ concluído'],['abandonado','🕊️ abandonado']];
+const notasDe = (campo, id) => T('leitura_notas').filter(n => n[campo] === id);
+const fonteDaNota = n => n.livro_id ? (byId('livros', n.livro_id)||{}).titulo : n.artigo_id ? (byId('artigos', n.artigo_id)||{}).titulo : null;
+
+/* ---- fila de repetição espaçada (regra 15) ---- */
+function filaInsights() {
+  return ordenar(T('leitura_notas').filter(n => n.tipo === 'insight' && !n.arquivada && (n.proxima_revisao || hoje()) <= hoje()),
+    n => n.proxima_revisao || '').slice(0, 3);
+}
+function insightDoDiaHTML() {
+  const fila = filaInsights();
+  if (!fila.length) return '';
+  const n = fila[0];
+  const fonte = fonteDaNota(n);
+  return '<div class="card" style="border-color:rgba(124,92,252,.45)"><div class="card-h"><div class="h2">💡 Insight do Dia</div>'
+    + (fila.length > 1 ? '<span class="badge acc">'+fila.length+' na fila</span>' : '') + '</div>'
+    + '<div class="prose" style="font-size:15px;margin-bottom:10px">'+mdRender(n.conteudo)+'</div>'
+    + (fonte ? '<div class="tiny muted" style="margin-bottom:10px">— '+esc(fonte)+(n.pagina?', p. '+n.pagina:'')+'</div>' : '')
+    + '<div class="row wrap"><button class="btn small primary" data-act="srs-lembrei" data-id="'+n.id+'">✓ Lembrei</button>'
+    + '<button class="btn small" data-act="srs-arquivar" data-id="'+n.id+'">📦 Arquivar</button>'
+    + '<button class="btn small" data-act="srs-editor" data-id="'+n.id+'">✍️ Abrir no editor</button></div></div>';
+}
+act('srs-lembrei', el => {
+  const n = byId('leitura_notas', el.dataset.id); if (!n) return;
+  const atual = Number(n.intervalo_dias) || 1;
+  const prox = INTERVALOS_SRS.find(i => i > atual) || 120;
+  dbPatch('leitura_notas', n.id, { intervalo_dias: prox, proxima_revisao: addDias(hoje(), prox) });
+  toast('💡 Volta em ' + prox + ' dias.');
+  render();
+});
+act('srs-arquivar', el => {
+  const n = byId('leitura_notas', el.dataset.id); if (!n) return;
+  dbPatch('leitura_notas', n.id, { arquivada: true });
+  toast('Insight arquivado.', { undo: () => { dbPatch('leitura_notas', n.id, { arquivada: false }); render(); } });
+  render();
+});
+act('srs-editor', el => {
+  const n = byId('leitura_notas', el.dataset.id); if (!n) return;
+  const fonte = fonteDaNota(n);
+  const tx = dbUpsert('textos', { titulo: 'Sobre: ' + (n.conteudo.slice(0, 40)) + (n.conteudo.length > 40 ? '…' : ''),
+    conteudo: '> ' + n.conteudo.replace(/\n/g, '\n> ') + (fonte ? '\n> — ' + fonte : '') + '\n\n', status: 'rascunho',
+    tags: ['insight'], palavras: contarPalavras(n.conteudo), atualizado_em: nowISO() });
+  Actions['srs-lembrei'](el);
+  nav('escrita/editor/' + tx.id);
+});
+
+/* ---- registrar páginas (FAB / atalho Hoje) ---- */
+act('qa-leitura', () => {
+  closeModal();
+  const lendo = T('livros').filter(l => l.status === 'lendo');
+  if (!lendo.length) { toast('Marque um livro como "lendo" primeiro.', {icone:'📖'}); nav('leitura'); return; }
+  modal('<div class="bx-h"><div class="h2">📖 Registrar leitura</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Livro</label><select class="select" id="lt-livro">'
+    + lendo.map(l => '<option value="'+l.id+'">'+esc(l.titulo)+' ('+(l.pagina_atual||0)+'/'+(l.paginas_total||'?')+')</option>').join('') + '</select></div>'
+    + '<div class="field"><label>Páginas lidas agora</label><input class="input" type="number" id="lt-pgs" inputmode="numeric" autofocus placeholder="ex.: 12"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="leitura-salvar">✓ Registrar</button></div>');
+});
+act('leitura-salvar', () => {
+  const livro = byId('livros', $('#lt-livro').value);
+  const pgs = Number($('#lt-pgs').value);
+  if (!livro || !(pgs > 0)) { toast('Quantas páginas você leu?', {icone:'📖'}); return; }
+  registrarPaginas(livro, pgs);
+  closeModal();
+});
+function registrarPaginas(livro, pgs) {
+  const reg = dbUpsert('leitura_registros', { livro_id: livro.id, data: hoje(), paginas: pgs });
+  const novaPag = Math.min((livro.pagina_atual || 0) + pgs, livro.paginas_total || 99999);
+  dbPatch('livros', livro.id, { pagina_atual: novaPag });
+  autoHabito('leitura', pgs);
+  toast('📖 +' + pgs + ' páginas em "' + esc(livro.titulo) + '"', { undo: () => {
+    dbDelete('leitura_registros', reg.id); dbPatch('livros', livro.id, { pagina_atual: livro.pagina_atual || 0 }); render(); } });
+  if (window.checkConquistas) checkConquistas('leitura');
+  if (livro.paginas_total && novaPag >= livro.paginas_total && livro.status !== 'concluido') {
+    setTimeout(() => modal('<div class="bx-h"><div class="h2">🎉 Terminou o livro?</div></div>'
+      + '<p><b>'+esc(livro.titulo)+'</b> chegou à última página!</p>'
+      + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Ainda não</button>'
+      + '<button class="btn primary" data-act="livro-concluir" data-id="'+livro.id+'">✅ Concluir livro</button></div>'), 600);
+  }
+  render();
+}
+act('livro-concluir', el => {
+  dbPatch('livros', el.dataset.id, { status: 'concluido', fim: hoje() });
+  closeModal(); render();
+  toast('Livro concluído! 🎉 Avalie-o quando quiser.', {icone:'📚'});
+  if (window.checkConquistas) checkConquistas('leitura');
+});
+
+/* ---- página LEITURA ---- */
+reg('leitura', {
+  titulo: 'Leitura',
+  render: (params) => {
+    const aba = params[0] || 'livros';
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">📖 Leitura</div>'
+      + '<div class="seg"><button class="'+(aba==='livros'?'on':'')+'" data-act="nav" data-r="leitura">📚 Livros</button>'
+      + '<button class="'+(aba==='artigos'?'on':'')+'" data-act="nav" data-r="leitura/artigos">📰 Artigos</button>'
+      + '<button class="'+(aba==='insights'?'on':'')+'" data-act="nav" data-r="leitura/insights">💡 Insights</button></div></div>';
+    if (aba === 'artigos') return html + artigosTabHTML();
+    if (aba === 'insights') return html + insightsTabHTML();
+    return html + livrosTabHTML();
+  }
+});
+function livroCardHTML(l) {
+  const pct = l.paginas_total ? Math.round((l.pagina_atual||0)/l.paginas_total*100) : 0;
+  return '<div class="card" style="margin-bottom:10px"><div class="row" data-act="livro-abrir" data-id="'+l.id+'" style="cursor:pointer">'
+    + '<span style="font-size:24px">📕</span><div class="grow"><b>'+esc(l.titulo)+'</b>'
+    + '<div class="tiny muted">'+esc(l.autor||'')+(l.avaliacao?' · '+'★'.repeat(l.avaliacao):'')+(l.area_id?' · '+(areaDe(l.area_id)||{}).nome:'')+'</div>'
+    + (l.status==='lendo' && l.paginas_total ? '<div class="row" style="margin-top:6px"><div class="bar" style="flex:1"><i style="width:'+pct+'%"></i></div><span class="tiny muted">'+(l.pagina_atual||0)+'/'+l.paginas_total+' ('+pct+'%)</span></div>' : '')
+    + '</div>'+(l.status==='lendo' ? '<button class="btn small primary" data-act="livro-pgs" data-id="'+l.id+'">+ págs</button>' : '')+'</div></div>';
+}
+function livrosTabHTML() {
+  const ls = T('livros');
+  const grupo = st => ls.filter(l => l.status === st);
+  let html = '<button class="btn primary" data-act="livro-add" style="margin-bottom:14px">+ Livro</button>';
+  const lendo = grupo('lendo'), querLer = grupo('quero_ler'), conc = ordenar(grupo('concluido'), l => l.fim||'', true), aband = grupo('abandonado');
+  if (lendo.length) html += '<div class="sect"><div class="h2">📖 Lendo agora</div></div>' + lendo.map(livroCardHTML).join('');
+  if (querLer.length) html += '<div class="sect"><div class="h2">📚 Quero ler</div></div>' + querLer.map(livroCardHTML).join('');
+  if (conc.length) html += '<div class="sect"><div class="h2">✅ Concluídos ('+conc.length+')</div></div>' + conc.map(livroCardHTML).join('');
+  if (aband.length) html += '<details class="help"><summary>🕊️ Abandonados ('+aband.length+')</summary>' + aband.map(livroCardHTML).join('') + '</details>';
+  if (!ls.length) html += '<div class="card"><div class="empty"><span class="em">📚</span>Sua biblioteca começa com o primeiro livro.</div></div>';
+  return html;
+}
+act('livro-pgs', el => {
+  const l = byId('livros', el.dataset.id);
+  modal('<div class="bx-h"><div class="h2">📖 '+esc(l.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Páginas lidas agora</label><input class="input" type="number" id="lt-pgs" autofocus></div>'
+    + '<div class="bx-foot"><button class="btn primary" data-act="livro-pgs-save" data-id="'+l.id+'">✓ Registrar</button></div>');
+});
+act('livro-pgs-save', el => { const l = byId('livros', el.dataset.id); const p = Number($('#lt-pgs').value);
+  if (!(p>0)) { toast('Quantas páginas?'); return; } closeModal(); registrarPaginas(l, p); });
+const livroFields = () => [
+  {k:'titulo', l:'Título', req:1, foco:1},
+  {k:'autor', l:'Autor', meia:1},
+  {k:'area_id', t:'sel', l:'Área', meia:1, opts: optsAreas()},
+  {k:'status', t:'sel', l:'Status', meia:1, opts: STATUS_LIVRO.map(([v,t]) => ({v,t}))},
+  {k:'paginas_total', t:'num', l:'Total de páginas', meia:1},
+  {k:'pagina_atual', t:'num', l:'Página atual', meia:1},
+  {k:'inicio', t:'date', l:'Começou em', meia:1},
+  {k:'fim', t:'date', l:'Terminou em', meia:1},
+  {k:'avaliacao', t:'stars', l:'Avaliação'},
+  {k:'resenha', t:'ta', l:'Resenha / impressões', rows:3}
+];
+act('livro-add', () => editModal({ titulo:'Novo livro', fields: livroFields(), vals:{status:'quero_ler'},
+  onSave: v => { dbUpsert('livros', v); render(); } }));
+act('livro-abrir', el => {
+  const l = byId('livros', el.dataset.id); if (!l) return;
+  editModal({ titulo:'📕 Livro', fields: livroFields(), vals: l,
+    extra: '<div class="field"><label>Notas deste livro</label>'+notasListaHTML(notasDe('livro_id', l.id))+'</div>'
+      + notaFormHTML('livro', l.id),
+    onSave: v => { if (v.status === 'concluido' && !v.fim) v.fim = hoje(); if (v.status === 'lendo' && !v.inicio) v.inicio = hoje();
+      dbPatch('livros', l.id, v); render(); if (window.checkConquistas) checkConquistas('leitura'); },
+    onDelete: () => { notasDe('livro_id', l.id).forEach(n => dbDelete('leitura_notas', n.id));
+      T('leitura_registros').filter(r => r.livro_id === l.id).forEach(r => dbDelete('leitura_registros', r.id));
+      dbDelete('livros', l.id); render(); toast('Livro excluído.'); } });
+});
+
+/* ---- notas (citação / anotação / insight) ---- */
+function notasListaHTML(notas) {
+  if (!notas.length) return '<span class="muted tiny">nenhuma nota ainda</span>';
+  const icone = { citacao:'❝', anotacao:'📝', insight:'💡' };
+  return '<div class="list">' + ordenar(notas, n => n.criado_em||'', true).map(n =>
+    '<div class="item" style="cursor:default;align-items:flex-start"><span>'+icone[n.tipo]+'</span>'
+    + '<div class="grow"><div style="white-space:pre-wrap;font-size:13.5px">'+esc(n.conteudo)+'</div>'
+    + '<div class="sub">'+(n.pagina?'p. '+n.pagina+' · ':'')+(n.tags||[]).map(t => '#'+esc(t)).join(' ')
+    + (n.tipo==='insight' && !n.arquivada ? ' · 🔁 revisão '+fmtData(n.proxima_revisao||hoje()) : '')+'</div></div>'
+    + '<button class="iconbtn" data-act="nota-del" data-id="'+n.id+'">✕</button></div>').join('') + '</div>';
+}
+function notaFormHTML(refTipo, refId) {
+  return '<div class="card" style="background:var(--bg);padding:12px"><div class="row" style="margin-bottom:8px" id="nota-tipos">'
+    + [['citacao','❝ citação'],['anotacao','📝 anotação'],['insight','💡 insight']].map(([v,l],i) =>
+      '<span class="chip mini'+(i===2?' sel':'')+'" data-act="nota-tipo" data-v="'+v+'">'+l+'</span>').join('') + '</div>'
+    + '<textarea class="textarea" id="nota-txt" rows="2" placeholder="escreva a nota…"></textarea>'
+    + '<div class="row" style="margin-top:8px"><input class="input" id="nota-pag" type="number" placeholder="pág." style="width:80px">'
+    + '<input class="input" id="nota-tags" placeholder="tags, separadas, por, vírgula" style="flex:1">'
+    + '<button class="btn small primary" data-act="nota-add" data-rt="'+refTipo+'" data-rid="'+refId+'">＋</button></div></div>';
+}
+act('nota-tipo', el => { $$('#nota-tipos .chip').forEach(c => c.classList.remove('sel')); el.classList.add('sel'); });
+act('nota-add', el => {
+  const txt = $('#nota-txt').value.trim();
+  if (!txt) { toast('Escreva a nota.'); return; }
+  const tipo = ($('#nota-tipos .chip.sel')||{}).dataset ? $('#nota-tipos .chip.sel').dataset.v : 'insight';
+  criarNota({ tipo, conteudo: txt, pagina: Number($('#nota-pag').value)||null,
+    tags: $('#nota-tags').value.split(',').map(s => s.trim()).filter(Boolean),
+    livro_id: el.dataset.rt === 'livro' ? el.dataset.rid : null,
+    artigo_id: el.dataset.rt === 'artigo' ? el.dataset.rid : null });
+  $('#nota-txt').value = ''; $('#nota-tags').value = ''; $('#nota-pag').value = '';
+  toast((tipo==='insight'?'💡 Insight salvo — entra na repetição espaçada.':'Nota salva ✓'));
+});
+function criarNota(n) {
+  const row = dbUpsert('leitura_notas', { ...n, proxima_revisao: addDias(hoje(), 1), intervalo_dias: 1, arquivada: false });
+  if (window.checkConquistas) checkConquistas('leitura');
+  return row;
+}
+act('nota-del', el => { const n = {...byId('leitura_notas', el.dataset.id)}; dbDelete('leitura_notas', el.dataset.id);
+  el.closest('.item').remove(); toast('Nota excluída.', {undo: () => { dbUpsert('leitura_notas', n); render(); }}); });
+
+/* ---- artigos (3 modos em cascata: embed → extração → colar) ---- */
+function artigosTabHTML() {
+  const as = ordenar(T('artigos'), a => a.criado_em||'', true);
+  const paraLer = as.filter(a => a.status !== 'lido'), lidos = as.filter(a => a.status === 'lido');
+  const item = a => '<div class="item" data-act="artigo-abrir" data-id="'+a.id+'"><span>📰</span><div class="grow">'
+    + '<div class="ttl">'+esc(a.titulo)+'</div><div class="sub">'+esc(a.fonte||(a.url?new URL(a.url).hostname:''))
+    + (a.conteudo_cache?' · <span class="ok">offline ✓</span>':'')+'</div></div>'
+    + (a.status!=='lido'?'<button class="btn small" data-act="artigo-lido" data-id="'+a.id+'">✓ lido</button>':'')+'</div>';
+  return '<button class="btn primary" data-act="artigo-add" style="margin-bottom:14px">+ Artigo (URL ou texto)</button>'
+    + '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Para ler ('+paraLer.length+')</div><div class="list" style="padding:0 10px 8px">'
+    + (paraLer.map(item).join('') || '<div class="empty small">nada na fila</div>') + '</div></div>'
+    + (lidos.length ? '<details class="help"><summary>✅ Lidos ('+lidos.length+')</summary><div class="list">'+lidos.map(item).join('')+'</div></details>' : '');
+}
+act('artigo-add', () => editModal({ titulo:'Novo artigo', fields: [
+    {k:'titulo', l:'Título', req:1, foco:1},
+    {k:'url', l:'URL (opcional — dá para colar o texto depois)', ph:'https://…'},
+    {k:'fonte', l:'Fonte', ph:'ex.: newsletter X'}
+  ], onSave: v => { const a = dbUpsert('artigos', { ...v, status:'para_ler' }); render(); abrirArtigo(a.id); } }));
+act('artigo-lido', el => { dbPatch('artigos', el.dataset.id, { status:'lido' }); render(); });
+act('artigo-abrir', el => abrirArtigo(el.dataset.id));
+function abrirArtigo(id) {
+  const a = byId('artigos', id); if (!a) return;
+  modal('<div class="bx-h"><div class="h2" style="font-size:15px">📰 '+esc(a.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div id="art-corpo">'+artigoCorpoHTML(a)+'</div>'
+    + '<hr class="sep"><div class="h3">Notas</div>'+notasListaHTML(notasDe('artigo_id', a.id))+notaFormHTML('artigo', a.id)
+    + '<div class="bx-foot"><button class="btn danger" data-act="artigo-del" data-id="'+a.id+'">Excluir</button><span class="sp"></span>'
+    + (a.status!=='lido'?'<button class="btn" data-act="artigo-lido-fechar" data-id="'+a.id+'">✓ Marcar lido</button>':'')
+    + '<button class="btn" data-act="m-close">Fechar</button></div>', { wide:true });
+}
+function artigoCorpoHTML(a) {
+  if (a.conteudo_cache) return '<div class="prose" style="max-height:46vh;overflow:auto;border:1px solid var(--border);border-radius:10px;padding:14px" data-leitura-pane>'
+    + mdRender(a.conteudo_cache) + '</div><div class="row" style="margin-top:8px"><button class="btn small ghost" data-act="artigo-limpar-cache" data-id="'+a.id+'">🗑 limpar texto salvo</button>'
+    + (a.url?'<a class="btn small ghost" href="'+esc(a.url)+'" target="_blank" rel="noopener">🌐 abrir original</a>':'')+'</div>';
+  return '<div class="banner acc">Escolha como ler — os modos caem em cascata se um falhar:</div>'
+    + '<div class="row wrap" style="margin-bottom:10px">'
+    + (a.url ? '<button class="btn" data-act="artigo-embed" data-id="'+a.id+'">🌐 1 · Embed</button>'
+      + '<button class="btn" data-act="artigo-extrair" data-id="'+a.id+'">✨ 2 · Extrair texto limpo</button>' : '')
+    + '<button class="btn" data-act="artigo-colar" data-id="'+a.id+'">📋 '+(a.url?'3 · ':'')+'Colar texto</button></div>'
+    + '<div id="art-leitor"></div>';
+}
+act('artigo-embed', el => {
+  const a = byId('artigos', el.dataset.id);
+  $('#art-leitor').innerHTML = '<iframe src="'+esc(a.url)+'" style="width:100%;height:46vh;border:1px solid var(--border);border-radius:10px;background:#fff"></iframe>'
+    + '<div class="tiny muted" style="margin-top:6px">Página em branco? O site bloqueia embed — use "Extrair texto" ou "Colar texto".</div>';
+});
+act('artigo-extrair', async el => {
+  const a = byId('artigos', el.dataset.id);
+  $('#art-leitor').innerHTML = '<div class="banner acc">✨ Extraindo texto limpo… (serviço gratuito r.jina.ai)</div>';
+  try {
+    const res = await fetch('https://r.jina.ai/' + a.url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    let txt = await res.text();
+    if (txt.length > 200000) txt = txt.slice(0, 200000) + '\n\n[texto truncado]';
+    dbPatch('artigos', a.id, { conteudo_cache: txt });
+    $('#art-corpo').innerHTML = artigoCorpoHTML(byId('artigos', a.id));
+    toast('Texto extraído e salvo para leitura offline ✓', {icone:'✨'});
+  } catch (e) {
+    $('#art-leitor').innerHTML = '<div class="banner warn">A extração falhou (limite do serviço gratuito ou bloqueio do site). O fluxo não trava: use <b>Colar texto</b>.</div>';
+  }
+});
+act('artigo-colar', el => {
+  $('#art-leitor').innerHTML = '<textarea class="textarea" id="art-colado" rows="7" placeholder="cole aqui o texto do artigo…"></textarea>'
+    + '<button class="btn primary small" data-act="artigo-colar-save" data-id="'+el.dataset.id+'" style="margin-top:8px">Salvar texto</button>';
+});
+act('artigo-colar-save', el => {
+  const txt = $('#art-colado').value.trim();
+  if (!txt) { toast('Cole o texto primeiro.'); return; }
+  dbPatch('artigos', el.dataset.id, { conteudo_cache: txt });
+  $('#art-corpo').innerHTML = artigoCorpoHTML(byId('artigos', el.dataset.id));
+  toast('Texto salvo (disponível offline) ✓');
+});
+act('artigo-limpar-cache', el => { dbPatch('artigos', el.dataset.id, { conteudo_cache: null });
+  $('#art-corpo').innerHTML = artigoCorpoHTML(byId('artigos', el.dataset.id)); });
+act('artigo-lido-fechar', el => { dbPatch('artigos', el.dataset.id, { status:'lido' }); closeModal(); render(); });
+act('artigo-del', el => {
+  const a = byId('artigos', el.dataset.id);
+  confirmBox('Excluir o artigo e suas notas?', () => {
+    notasDe('artigo_id', a.id).forEach(n => dbDelete('leitura_notas', n.id));
+    dbDelete('artigos', a.id); closeModal(true); render();
+  }, {perigo:1, sim:'Excluir'});
+});
+
+/* ---- aba Meus Insights ---- */
+function insightsTabHTML() {
+  const filtro = window._insFiltro || 'insight';
+  const busca = window._insBusca || '';
+  let notas = T('leitura_notas').filter(n => filtro === 'todas' ? true : n.tipo === filtro);
+  if (!window._insArq) notas = notas.filter(n => !n.arquivada);
+  if (busca) notas = notas.filter(n => norm(n.conteudo).includes(norm(busca)) || (n.tags||[]).some(t => norm(t).includes(norm(busca))));
+  const naFila = filaInsights().length;
+  return (naFila ? '<div class="banner acc">💡 ' + naFila + ' insight'+(naFila>1?'s':'')+' na fila de revisão de hoje — veja na tela Hoje.</div>' : '')
+    + '<div class="row wrap" style="margin-bottom:12px">'
+    + [['insight','💡 insights'],['citacao','❝ citações'],['anotacao','📝 anotações'],['todas','todas']].map(([v,l]) =>
+      '<span class="chip'+(filtro===v?' sel':'')+'" data-act="ins-filtro" data-v="'+v+'">'+l+'</span>').join('')
+    + '<span class="chip'+(window._insArq?' sel':'')+'" data-act="ins-arq">📦 arquivadas</span>'
+    + '<input class="input" data-inp="ins-busca" value="'+esc(busca)+'" placeholder="🔎 buscar…" style="flex:1;min-width:140px"></div>'
+    + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (ordenar(notas, n => n.criado_em||'', true).slice(0, 60).map(n => {
+      const fonte = fonteDaNota(n);
+      return '<div class="item" style="cursor:default;align-items:flex-start"><span>'+({citacao:'❝',anotacao:'📝',insight:'💡'}[n.tipo])+'</span>'
+        + '<div class="grow"><div style="white-space:pre-wrap">'+esc(n.conteudo)+'</div>'
+        + '<div class="sub">'+(fonte?'— '+esc(fonte)+' · ':'')+(n.tags||[]).map(t => '#'+esc(t)).join(' ')
+        + (n.tipo==='insight'?(n.arquivada?' · arquivada':' · 🔁 '+fmtData(n.proxima_revisao||hoje())):'')+'</div></div>'
+        + (n.tipo==='insight' && !n.arquivada ? '<button class="iconbtn" title="arquivar" data-act="srs-arquivar" data-id="'+n.id+'">📦</button>' : '')
+        + '<button class="iconbtn" data-act="srs-editor" data-id="'+n.id+'" title="abrir no editor">✍️</button>'
+        + '<button class="iconbtn" data-act="nota-del" data-id="'+n.id+'">✕</button></div>'; }).join('')
+    || '<div class="empty"><span class="em">💡</span>Salve insights ao ler — eles voltam para você na hora certa.</div>') + '</div></div>';
+}
+act('ins-filtro', el => { window._insFiltro = el.dataset.v; render(); });
+act('ins-arq', () => { window._insArq = !window._insArq; render(); });
+act('ins-busca', debounce(el => { window._insBusca = el.value; const r = rotaAtual(); if (r.nome==='leitura') { $('#main .fadein').innerHTML = Views.leitura.render(r.params); } }, 300));
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
