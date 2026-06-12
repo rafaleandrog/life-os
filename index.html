@@ -692,6 +692,936 @@ MENU.forEach(([r, em, l]) => {
 });
 
 /* ==ETAPAS== */
+/* ════════════════ ETAPA 2 — DADOS: Supabase REST + offline + onboarding + Saúde ════════════════ */
+
+/* ---- Modelo de dados (espelho da seção 5; chave primária por tabela) ---- */
+const TABLES = {
+  areas:'id', projetos:'id', secoes:'id', etiquetas:'id', tarefas:'id', filtros:'id',
+  habitos:'id', habito_registros:'id', blocos:'id', rotina_modelos:'id',
+  dias:'data', metas:'id', meta_registros:'id',
+  categorias_financeiras:'id', contas_financeiras:'id', lancamentos_financeiros:'id',
+  investimentos_ativos:'id', investimentos_movimentos:'id', investimentos_saldos:'id',
+  treino_planilhas:'id', treino_exercicios:'id', treino_sessoes:'id', treino_registros:'id',
+  corridas:'id', corpo_registros:'id',
+  livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
+  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave'
+};
+const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data', etiquetas:'nome' };
+
+/* ---- SQL idempotente (seção 5 do spec — botão "copiar SQL") ---- */
+const SQL_SETUP = `-- LIFE OS v4.1 — script de criação (idempotente; pode rodar mais de uma vez)
+-- ===== NÚCLEO =====
+create table if not exists areas (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, cor text not null default '#7C5CFC',
+  icone text default '📌', ordem int default 0,
+  criado_em timestamptz default now());
+
+create table if not exists projetos (
+  id uuid primary key default gen_random_uuid(),
+  area_id uuid references areas(id) on delete cascade,
+  nome text not null, status text default 'ativo',
+  prazo date, criado_em timestamptz default now());
+
+create table if not exists secoes (
+  id uuid primary key default gen_random_uuid(),
+  projeto_id uuid references projetos(id) on delete cascade,
+  nome text not null, ordem int default 0);
+
+create table if not exists etiquetas (
+  id uuid primary key default gen_random_uuid(),
+  nome text unique not null, cor text default '#9AA0B0');
+
+create table if not exists tarefas (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null, descricao text,
+  area_id uuid references areas(id) on delete set null,
+  projeto_id uuid references projetos(id) on delete set null,
+  secao_id uuid references secoes(id) on delete set null,
+  vencimento date,
+  hora time,
+  prioridade int default 4,
+  estimativa_min int,
+  recorrencia jsonb,
+  subtarefas jsonb default '[]',
+  etiquetas text[] default '{}',
+  comentarios jsonb default '[]',
+  links jsonb default '[]',
+  ordem int default 0,
+  origem text,
+  abandonada boolean default false,
+  concluida boolean default false, concluida_em timestamptz,
+  criado_em timestamptz default now());
+
+create table if not exists filtros (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, criterios jsonb not null, ordem int default 0);
+
+create table if not exists habitos (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, icone text default '✅',
+  area_id uuid references areas(id) on delete set null,
+  tipo text not null,
+  meta_quantidade numeric, unidade text, freq_semanal int,
+  dias_ativos int[] default '{0,1,2,3,4,5,6}',
+  tolerancia_streak boolean default false,
+  fonte_auto text,
+  ativo boolean default true, criado_em timestamptz default now());
+
+create table if not exists habito_registros (
+  id uuid primary key default gen_random_uuid(),
+  habito_id uuid references habitos(id) on delete cascade,
+  data date not null, valor numeric default 1,
+  unique (habito_id, data));
+
+create table if not exists blocos (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null,
+  area_id uuid references areas(id) on delete set null,
+  projeto_id uuid references projetos(id) on delete set null,
+  tarefa_id uuid references tarefas(id) on delete set null,
+  inicio timestamptz not null, fim timestamptz not null,
+  tempo_real_min int, foco boolean default false, template text);
+
+create table if not exists rotina_modelos (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, guiada boolean default false,
+  blocos jsonb not null);
+
+-- ===== RITUAL DIÁRIO =====
+create table if not exists dias (
+  data date primary key,
+  energia int, humor int, nota text,
+  planejado boolean default false,
+  encerrado boolean default false);
+
+-- ===== METAS =====
+create table if not exists metas (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null,
+  area_id uuid references areas(id) on delete set null,
+  valor_alvo numeric not null, valor_atual numeric default 0,
+  unidade text, direcao text default 'aumentar', prazo date, ano int,
+  vinculo_tipo text,
+  vinculo_id uuid, fator_conversao numeric default 1,
+  concluida boolean default false, criado_em timestamptz default now());
+
+create table if not exists meta_registros (
+  id uuid primary key default gen_random_uuid(),
+  meta_id uuid references metas(id) on delete cascade,
+  data date default current_date, valor numeric not null, nota text);
+
+-- ===== FINANÇAS · FLUXO =====
+create table if not exists categorias_financeiras (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, tipo text not null,
+  cor text default '#5CC8FC', orcamento_mensal numeric);
+
+create table if not exists contas_financeiras (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, tipo text default 'conta');
+
+create table if not exists lancamentos_financeiros (
+  id uuid primary key default gen_random_uuid(),
+  tipo text not null, valor numeric not null, data date not null,
+  categoria_id uuid references categorias_financeiras(id) on delete set null,
+  conta_id uuid references contas_financeiras(id) on delete set null,
+  descricao text, pago boolean default true, recorrencia jsonb,
+  criado_em timestamptz default now());
+
+-- ===== FINANÇAS · INVESTIMENTOS =====
+create table if not exists investimentos_ativos (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null,
+  classe text default 'outros',
+  instituicao text, ativo boolean default true,
+  criado_em timestamptz default now());
+
+create table if not exists investimentos_movimentos (
+  id uuid primary key default gen_random_uuid(),
+  ativo_id uuid references investimentos_ativos(id) on delete cascade,
+  tipo text not null,
+  valor numeric not null, data date not null default current_date,
+  nota text, criado_em timestamptz default now());
+
+create table if not exists investimentos_saldos (
+  id uuid primary key default gen_random_uuid(),
+  ativo_id uuid references investimentos_ativos(id) on delete cascade,
+  data date not null default current_date,
+  saldo numeric not null,
+  unique (ativo_id, data));
+
+-- ===== MUSCULAÇÃO =====
+create table if not exists treino_planilhas (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, ordem int default 0, ativo boolean default true,
+  criado_em timestamptz default now());
+
+create table if not exists treino_exercicios (
+  id uuid primary key default gen_random_uuid(),
+  planilha_id uuid references treino_planilhas(id) on delete cascade,
+  nome text not null, grupo_muscular text,
+  series_alvo int default 3, observacao text, ordem int default 0);
+
+create table if not exists treino_sessoes (
+  id uuid primary key default gen_random_uuid(),
+  planilha_id uuid references treino_planilhas(id) on delete set null,
+  data date not null default current_date,
+  nota text, criado_em timestamptz default now());
+
+create table if not exists treino_registros (
+  id uuid primary key default gen_random_uuid(),
+  sessao_id uuid references treino_sessoes(id) on delete cascade,
+  exercicio_id uuid references treino_exercicios(id) on delete set null,
+  exercicio_nome text not null,
+  carga_max numeric, series_feitas int, observacao text);
+
+-- ===== CORRIDA E CORPO =====
+create table if not exists corridas (
+  id uuid primary key default gen_random_uuid(),
+  data date not null default current_date,
+  distancia_km numeric not null, tempo_seg int not null,
+  percepcao int, tipo text, nota text,
+  criado_em timestamptz default now());
+
+create table if not exists corpo_registros (
+  id uuid primary key default gen_random_uuid(),
+  data date not null default current_date,
+  peso_kg numeric, medidas jsonb);
+
+-- ===== LEITURA =====
+create table if not exists livros (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null, autor text,
+  status text default 'quero_ler',
+  paginas_total int, pagina_atual int default 0,
+  inicio date, fim date, avaliacao int, resenha text,
+  area_id uuid references areas(id) on delete set null,
+  criado_em timestamptz default now());
+
+create table if not exists artigos (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null, url text, fonte text,
+  status text default 'para_ler', conteudo_cache text,
+  criado_em timestamptz default now());
+
+create table if not exists leitura_notas (
+  id uuid primary key default gen_random_uuid(),
+  livro_id uuid references livros(id) on delete cascade,
+  artigo_id uuid references artigos(id) on delete cascade,
+  tipo text not null,
+  conteudo text not null, pagina int, tags text[] default '{}',
+  proxima_revisao date default current_date,
+  intervalo_dias int default 1, arquivada boolean default false,
+  criado_em timestamptz default now());
+
+create table if not exists leitura_registros (
+  id uuid primary key default gen_random_uuid(),
+  livro_id uuid references livros(id) on delete cascade,
+  data date not null default current_date, paginas int not null);
+
+-- ===== ESCRITA =====
+create table if not exists textos (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null default 'Sem título',
+  conteudo text default '', status text default 'rascunho',
+  tags text[] default '{}',
+  area_id uuid references areas(id) on delete set null,
+  palavras int default 0,
+  criado_em timestamptz default now(),
+  atualizado_em timestamptz default now());
+
+-- ===== REVISÕES E CONQUISTAS =====
+create table if not exists revisoes (
+  id uuid primary key default gen_random_uuid(),
+  tipo text default 'semanal',
+  periodo_inicio date not null, periodo_fim date not null,
+  metricas jsonb, respostas jsonb,
+  criado_em timestamptz default now());
+
+create table if not exists conquistas (
+  codigo text primary key,
+  desbloqueada_em timestamptz default now());
+
+-- ===== CONFIGURAÇÕES =====
+create table if not exists configuracoes (chave text primary key, valor jsonb);`;
+
+/* ---- Estado local (offline-first, regra 12) ---- */
+const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags' };
+function tabelasVazias(){ return Object.fromEntries(Object.keys(TABLES).map(t => [t, []])); }
+const S = { data: tabelasVazias(), queue: [], flushing: false, syncErr: null, lastPull: null };
+let CFG = {};
+let FLAGS = {};
+function loadLocal() {
+  try { CFG = JSON.parse(localStorage.getItem(LSK.cfg) || '{}'); } catch(_) { CFG = {}; }
+  try { FLAGS = JSON.parse(localStorage.getItem(LSK.flags) || '{}'); } catch(_) { FLAGS = {}; }
+  try {
+    const d = JSON.parse(localStorage.getItem(LSK.data) || 'null');
+    if (d) for (const t of Object.keys(TABLES)) S.data[t] = Array.isArray(d[t]) ? d[t] : [];
+  } catch(_) {}
+  try { S.queue = JSON.parse(localStorage.getItem(LSK.queue) || '[]'); } catch(_) { S.queue = []; }
+}
+const saveLocal = debounce(() => { try { localStorage.setItem(LSK.data, JSON.stringify(S.data)); } catch(e) { toast('Atenção: armazenamento local cheio.', {icone:'⚠️'}); } }, 250);
+const saveQueue = () => { try { localStorage.setItem(LSK.queue, JSON.stringify(S.queue)); } catch(_) {} };
+const saveFlags = () => localStorage.setItem(LSK.flags, JSON.stringify(FLAGS));
+const saveCfg = () => localStorage.setItem(LSK.cfg, JSON.stringify(CFG));
+
+/* ---- API local de dados ---- */
+const T = t => S.data[t] || [];
+const byId = (t, id) => T(t).find(r => r[TABLES[t]] === id);
+const ordenar = (arr, fn, desc) => [...arr].sort((a, b) => { const x = fn(a), y = fn(b); return (x<y?-1:x>y?1:0) * (desc?-1:1); });
+function dbUpsert(t, row) {
+  const pk = TABLES[t];
+  if (row[pk] === undefined || row[pk] === null) row[pk] = pk === 'id' ? uid() : row[pk];
+  if (!row.criado_em && ['areas','projetos','tarefas','habitos','lancamentos_financeiros','investimentos_ativos','investimentos_movimentos','treino_planilhas','treino_sessoes','corridas','livros','artigos','leitura_notas','textos','revisoes','metas'].includes(t)) row.criado_em = nowISO();
+  const arr = T(t);
+  const i = arr.findIndex(r => r[pk] === row[pk]);
+  if (i < 0) arr.push(row); else arr[i] = row;
+  enqueue('up', t, [row]);
+  saveLocal();
+  return row;
+}
+function dbPatch(t, id, patch) {
+  const row = byId(t, id);
+  if (!row) return null;
+  Object.assign(row, patch);
+  enqueue('up', t, [row]);
+  saveLocal();
+  return row;
+}
+function dbDelete(t, id) {
+  const pk = TABLES[t];
+  const arr = T(t);
+  const i = arr.findIndex(r => r[pk] === id);
+  if (i < 0) return null;
+  const [row] = arr.splice(i, 1);
+  enqueue('del', t, id);
+  saveLocal();
+  return row;
+}
+/* configurações sincronizadas (tabela configuracoes) */
+const getCfg = (chave, def) => { const r = byId('configuracoes', chave); return r && r.valor !== undefined && r.valor !== null ? r.valor : def; };
+const setCfg = (chave, valor) => dbUpsert('configuracoes', { chave, valor });
+
+/* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
+async function sb(metodo, caminho, corpo, headersExtra) {
+  const url = String(CFG.url || '').replace(/\/+$/, '') + '/rest/v1/' + caminho;
+  const headers = { apikey: CFG.key, Authorization: 'Bearer ' + CFG.key, ...(headersExtra || {}) };
+  if (corpo != null) headers['Content-Type'] = 'application/json';
+  let res;
+  try {
+    res = await fetch(url, { method: metodo, headers, body: corpo != null ? JSON.stringify(corpo) : undefined });
+  } catch (e) {
+    throw { tipo:'rede', msg: navigator.onLine
+      ? 'Não consegui falar com o Supabase. O projeto pode estar pausado por inatividade — abra a Saúde do Sistema.'
+      : 'Você está offline. Os registros ficam na fila e sincronizam quando a internet voltar.' };
+  }
+  if (!res.ok) {
+    let det = ''; try { const j = await res.json(); det = j.message || j.hint || j.error || ''; } catch(_) {}
+    if (res.status === 401 || res.status === 403) throw { tipo:'auth', status:res.status, msg:'Chave do Supabase inválida ou sem permissão. Confira a anon key em Config.' };
+    if (res.status === 404 || /does not exist|42P01/i.test(det)) throw { tipo:'tabela', status:res.status, msg:'Falta tabela no banco. Abra a Saúde do Sistema e use o botão "copiar SQL".', det };
+    if (res.status >= 500) throw { tipo:'servidor', status:res.status, msg:'O Supabase respondeu com erro ('+res.status+'). Se persistir, o projeto pode estar pausado — veja a Saúde do Sistema.' };
+    throw { tipo:'outro', status:res.status, msg:'Erro do banco ('+res.status+'). '+det };
+  }
+  if (res.status === 204) return null;
+  const txt = await res.text();
+  return txt ? JSON.parse(txt) : null;
+}
+
+/* ---- Fila offline (zero perda de registros) ---- */
+function enqueue(op, t, payload) {
+  if (!CFG.url) return; // modo local: nada a sincronizar
+  if (op === 'up') {
+    const pk = TABLES[t];
+    const last = S.queue[S.queue.length - 1];
+    if (last && last.op === 'up' && last.t === t) {
+      for (const r of payload) {
+        const i = last.rows.findIndex(x => x[pk] === r[pk]);
+        if (i < 0) last.rows.push({...r}); else last.rows[i] = {...r};
+      }
+    } else S.queue.push({ op:'up', t, rows: payload.map(r => ({...r})) });
+  } else {
+    S.queue.push({ op:'del', t, id: payload });
+  }
+  saveQueue();
+  scheduleFlush();
+  atualizarSyncUI();
+}
+const scheduleFlush = debounce(() => flush(), 900);
+async function flush() {
+  if (!CFG.url || S.flushing || !S.queue.length) { atualizarSyncUI(); return; }
+  S.flushing = true; atualizarSyncUI();
+  try {
+    while (S.queue.length) {
+      const it = S.queue[0];
+      if (it.op === 'up') {
+        const oc = ON_CONFLICT[it.t] || TABLES[it.t];
+        await sb('POST', it.t + '?on_conflict=' + oc, it.rows, { Prefer: 'resolution=merge-duplicates,return=minimal' });
+      } else {
+        await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id));
+      }
+      S.queue.shift(); saveQueue();
+    }
+    S.syncErr = null;
+    FLAGS.lastSync = nowISO(); saveFlags();
+  } catch (e) {
+    S.syncErr = e.msg || String(e);
+  }
+  S.flushing = false; atualizarSyncUI();
+}
+async function pullTable(t) {
+  let out = [], from = 0; const page = 1000;
+  for (;;) {
+    const r = await sb('GET', t + '?select=*', null, { Range: from + '-' + (from + page - 1) });
+    out = out.concat(r || []);
+    if (!r || r.length < page) break;
+    from += page;
+  }
+  return out;
+}
+async function pullAll(silencioso) {
+  if (!CFG.url) return false;
+  await flush();
+  if (S.queue.length) return false; // não sobrescrever com pendências locais
+  const novo = {};
+  for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t);
+  S.data = novo; saveLocal();
+  S.lastPull = nowISO(); S.syncErr = null;
+  if (!silencioso) toast('Sincronizado ✓', { icone:'🔄' });
+  atualizarSyncUI();
+  return true;
+}
+async function fullPush() { // conectar depois: envia tudo que existe localmente
+  for (const t of Object.keys(TABLES)) {
+    const rows = T(t);
+    for (let i = 0; i < rows.length; i += 200) enqueue('up', t, rows.slice(i, i + 200));
+  }
+  await flush();
+}
+function syncStatus() {
+  if (!CFG.url) return 'off';
+  if (S.syncErr) return 'err';
+  if (S.flushing || S.queue.length) return 'pend';
+  return 'ok';
+}
+function atualizarSyncUI() {
+  const st = syncStatus();
+  $$('.sync-dot').forEach(d => d.className = 'sync-dot ' + st);
+  const l = $('#synclabel'); if (l) l.textContent = syncLabel();
+}
+window.addEventListener('online', () => { toast('Internet de volta — sincronizando…', {icone:'🌐'}); flush(); });
+
+/* ---- Helpers de formulário genérico (usados por todos os módulos) ---- */
+function fldHTML(f, v) {
+  const val = v === undefined || v === null ? (f.def !== undefined ? f.def : '') : v;
+  const req = f.req ? ' data-req="1"' : '';
+  let inp = '';
+  switch (f.t || 'text') {
+    case 'text': inp = '<input class="input" name="'+f.k+'" value="'+esc(val)+'" placeholder="'+esc(f.ph||'')+'"'+req+(f.foco?' autofocus':'')+'>'; break;
+    case 'num': inp = '<input class="input" name="'+f.k+'" type="number" inputmode="decimal" step="'+(f.step||'any')+'" value="'+esc(val)+'" placeholder="'+esc(f.ph||'')+'"'+req+'>'; break;
+    case 'money': inp = '<input class="input" name="'+f.k+'" inputmode="decimal" value="'+(val!==''?String(val).replace('.',','):'')+'" placeholder="'+esc(f.ph||'0,00')+'"'+req+'>'; break;
+    case 'date': inp = '<input class="input" name="'+f.k+'" type="date" value="'+esc(val)+'"'+req+'>'; break;
+    case 'time': inp = '<input class="input" name="'+f.k+'" type="time" value="'+esc(fmtHora(val))+'">'; break;
+    case 'ta': inp = '<textarea class="textarea" name="'+f.k+'" rows="'+(f.rows||3)+'" placeholder="'+esc(f.ph||'')+'">'+esc(val)+'</textarea>'; break;
+    case 'sel': inp = '<select class="select" name="'+f.k+'">'+(f.opts||[]).map(o => {
+        const ov = o.v !== undefined ? o.v : o, ot = o.t !== undefined ? o.t : o;
+        return '<option value="'+esc(ov)+'"'+(String(ov)===String(val)?' selected':'')+'>'+esc(ot)+'</option>';
+      }).join('')+'</select>'; break;
+    case 'chk': return '<label class="checkline"><input type="checkbox" name="'+f.k+'"'+(val?' checked':'')+'> '+esc(f.l)+(f.dica?' <span class="muted small">— '+esc(f.dica)+'</span>':'')+'</label>';
+    case 'cor': return '<div class="field"><label>'+esc(f.l)+'</label><div class="row wrap" data-cor="'+f.k+'" data-val="'+esc(val||PALETA[0])+'">'
+      + PALETA.map(c => '<span class="dot" data-act="fld-cor" data-c="'+c+'" style="width:26px;height:26px;cursor:pointer;background:'+c+';outline:'+(c===(val||PALETA[0])?'2px solid #fff':'none')+';outline-offset:2px"></span>').join('')+'</div></div>';
+    case 'stars': return '<div class="field"><label>'+esc(f.l)+'</label><div class="stars" data-stars="'+f.k+'" data-val="'+(val||0)+'">'
+      + [1,2,3,4,5].map(n => '<span data-act="fld-star" data-v="'+n+'" class="'+(n<=(val||0)?'on':'')+'">★</span>').join('')+'</div></div>';
+    case 'range': inp = '<div class="row"><input type="range" name="'+f.k+'" min="'+(f.min||1)+'" max="'+(f.max||5)+'" value="'+(val||f.min||1)+'" style="flex:1;accent-color:var(--acc)" data-inp="fld-range"><b data-rangeval>'+(val||f.min||1)+'</b></div>'; break;
+  }
+  return '<div class="field'+(f.meia?' meia':'')+'"><label>'+esc(f.l)+(f.req?' *':'')+'</label>'+inp+(f.dica?'<span class="tiny muted">'+esc(f.dica)+'</span>':'')+'</div>';
+}
+act('fld-cor', el => { const box = el.closest('[data-cor]'); box.dataset.val = el.dataset.c;
+  box.querySelectorAll('.dot').forEach(d => d.style.outline = d.dataset.c === el.dataset.c ? '2px solid #fff' : 'none'); });
+act('fld-star', el => { const box = el.closest('[data-stars]'); const v = Number(el.dataset.v);
+  box.dataset.val = v; box.querySelectorAll('span').forEach((s,i) => s.classList.toggle('on', i < v)); });
+act('fld-range', el => { el.parentElement.querySelector('[data-rangeval]').textContent = el.value; });
+function formHTML(fields, vals) {
+  vals = vals || {};
+  let out = '', meia = [];
+  const flushMeia = () => { if (meia.length) { out += '<div class="frow">'+meia.join('')+'</div>'; meia = []; } };
+  for (const f of fields) {
+    const h = fldHTML(f, vals[f.k]);
+    if (f.meia) { meia.push(h); if (meia.length === 2) flushMeia(); } else { flushMeia(); out += h; }
+  }
+  flushMeia();
+  return out;
+}
+function lerForm(box, fields) {
+  const o = {};
+  let ok = true;
+  for (const f of fields) {
+    if (f.t === 'cor') { o[f.k] = box.querySelector('[data-cor="'+f.k+'"]').dataset.val; continue; }
+    if (f.t === 'stars') { o[f.k] = Number(box.querySelector('[data-stars="'+f.k+'"]').dataset.val) || null; continue; }
+    const el = box.querySelector('[name="'+f.k+'"]'); if (!el) continue;
+    let v;
+    if (f.t === 'chk') v = el.checked;
+    else if (f.t === 'num' || f.t === 'range') v = el.value === '' ? null : Number(el.value);
+    else if (f.t === 'money') v = el.value === '' ? null : parseValor(el.value);
+    else v = el.value.trim ? el.value.trim() : el.value;
+    if (f.req && (v === '' || v === null || v === undefined)) { el.classList.add('shake'); el.style.borderColor = 'var(--err)'; setTimeout(()=>{el.classList.remove('shake');el.style.borderColor='';}, 900); ok = false; }
+    if (v === '') v = null;
+    o[f.k] = v;
+  }
+  return ok ? o : null;
+}
+function editModal(o) { // {titulo, fields, vals, onSave, onDelete, extra, salvar}
+  modal('<div class="bx-h"><div class="h2">'+esc(o.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<form data-sub="em-save">'+formHTML(o.fields, o.vals)+(o.extra||'')
+    + '<div class="bx-foot">'
+    + (o.onDelete ? '<button type="button" class="btn danger" data-act="em-del">Excluir</button><span class="sp"></span>' : '')
+    + '<button type="button" class="btn ghost" data-act="m-close">Cancelar</button>'
+    + '<button type="submit" class="btn primary">'+esc(o.salvar||'Salvar')+'</button></div></form>',
+    { onMount: ov => {
+        ov._fields = o.fields;
+        Actions['em-save'] = form => { const vals = lerForm(form, o.fields); if (!vals) return; closeModal(); o.onSave(vals); };
+        if (o.onDelete) Actions['em-del'] = () => confirmBox('Excluir mesmo? Você poderá desfazer logo em seguida.', () => { closeModal(); o.onDelete(); }, {perigo:1, sim:'Excluir'});
+        if (o.onMount) o.onMount(ov);
+      } });
+}
+
+/* ---- helpers de área/projeto ---- */
+const areaDe = id => byId('areas', id);
+const corArea = id => (areaDe(id) || {}).cor || '#9AA0B0';
+function areaChipHTML(id) {
+  const a = areaDe(id); if (!a) return '';
+  return '<span class="areachip" style="background:'+a.cor+'22;color:'+a.cor+'">'+a.icone+' '+esc(a.nome)+'</span>';
+}
+const optsAreas = (semVazio) => (semVazio ? [] : [{v:'',t:'— sem área —'}]).concat(ordenar(T('areas'), a => a.ordem||0).map(a => ({v:a.id, t:a.icone+' '+a.nome})));
+const optsProjetos = () => [{v:'',t:'— caixa de entrada —'}].concat(ordenar(T('projetos').filter(p=>p.status!=='arquivado'), p => p.nome).map(p => ({v:p.id, t:p.nome})));
+
+async function copiarTexto(t, msg) {
+  try { await navigator.clipboard.writeText(t); }
+  catch (_) { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(__){} ta.remove(); }
+  toast(msg || 'Copiado para a área de transferência ✓', { icone:'📋' });
+}
+act('copiar-sql', () => copiarTexto(SQL_SETUP, 'SQL copiado! Cole no SQL Editor do Supabase e clique em Run.'));
+
+/* ---- Dados de exemplo (primeiro acesso) ---- */
+function seedData() {
+  if (T('areas').length) return;
+  const aP = dbUpsert('areas', {nome:'Pessoal',  cor:'#7C5CFC', icone:'🏠', ordem:0});
+  const aT = dbUpsert('areas', {nome:'Trabalho', cor:'#5CC8FC', icone:'💼', ordem:1});
+  const aS = dbUpsert('areas', {nome:'Saúde',    cor:'#3DDC97', icone:'🏃', ordem:2});
+  const aM = dbUpsert('areas', {nome:'Mente',    cor:'#FFB454', icone:'📚', ordem:3});
+  const aF = dbUpsert('areas', {nome:'Finanças', cor:'#F472B6', icone:'💰', ordem:4});
+  dbUpsert('etiquetas', {nome:'urgente', cor:'#FF5C7A'});
+  dbUpsert('etiquetas', {nome:'casa', cor:'#3DDC97'});
+  dbUpsert('etiquetas', {nome:'rápido', cor:'#5CC8FC'});
+  dbUpsert('categorias_financeiras', {nome:'Salário', tipo:'entrada', cor:'#3DDC97'});
+  dbUpsert('categorias_financeiras', {nome:'Alimentação', tipo:'saida', cor:'#FFB454', orcamento_mensal:800});
+  dbUpsert('categorias_financeiras', {nome:'Moradia', tipo:'saida', cor:'#5CC8FC', orcamento_mensal:1500});
+  dbUpsert('categorias_financeiras', {nome:'Transporte', tipo:'saida', cor:'#C084FC', orcamento_mensal:300});
+  dbUpsert('categorias_financeiras', {nome:'Lazer', tipo:'saida', cor:'#F472B6', orcamento_mensal:250});
+  dbUpsert('categorias_financeiras', {nome:'Assinaturas', tipo:'saida', cor:'#FF5C7A', orcamento_mensal:120});
+  dbUpsert('contas_financeiras', {nome:'Conta principal', tipo:'conta'});
+  dbUpsert('contas_financeiras', {nome:'Carteira', tipo:'dinheiro'});
+  const proj = dbUpsert('projetos', {area_id:aP.id, nome:'Começar no Life OS', status:'ativo'});
+  const sec = dbUpsert('secoes', {projeto_id:proj.id, nome:'Primeiros passos', ordem:0});
+  dbUpsert('tarefas', {titulo:'Explorar a tela Hoje', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:2, estimativa_min:10, ordem:0});
+  dbUpsert('tarefas', {titulo:'Criar meu primeiro hábito', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:3, estimativa_min:5, ordem:1});
+  dbUpsert('tarefas', {titulo:'Fazer um backup (Config → Exportar)', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:addDias(hoje(), 7), prioridade:4, estimativa_min:5, ordem:2});
+  dbUpsert('habitos', {nome:'Beber água', icone:'💧', area_id:aS.id, tipo:'quantidade', meta_quantidade:8, unidade:'copos'});
+  dbUpsert('habitos', {nome:'Meditar', icone:'🧘', area_id:aM.id, tipo:'diario'});
+  dbUpsert('habitos', {nome:'Treinar', icone:'🏋️', area_id:aS.id, tipo:'semanal', freq_semanal:3, fonte_auto:'treino'});
+  dbUpsert('habitos', {nome:'Correr', icone:'🏃', area_id:aS.id, tipo:'semanal', freq_semanal:2, fonte_auto:'corrida'});
+  dbUpsert('habitos', {nome:'Ler', icone:'📖', area_id:aM.id, tipo:'quantidade', meta_quantidade:10, unidade:'páginas', fonte_auto:'leitura'});
+  const plA = dbUpsert('treino_planilhas', {nome:'Treino A — Peito/Tríceps', ordem:0});
+  [['Supino reto','Peito',4],['Supino inclinado c/ halteres','Peito',3],['Crucifixo','Peito',3],['Tríceps testa','Tríceps',3],['Tríceps corda','Tríceps',3]]
+    .forEach(([n,g,s],i) => dbUpsert('treino_exercicios', {planilha_id:plA.id, nome:n, grupo_muscular:g, series_alvo:s, ordem:i}));
+  const plB = dbUpsert('treino_planilhas', {nome:'Treino B — Costas/Bíceps', ordem:1});
+  [['Barra fixa','Costas',4],['Remada curvada','Costas',4],['Puxada alta','Costas',3],['Rosca direta','Bíceps',3],['Rosca martelo','Bíceps',3]]
+    .forEach(([n,g,s],i) => dbUpsert('treino_exercicios', {planilha_id:plB.id, nome:n, grupo_muscular:g, series_alvo:s, ordem:i}));
+  const ano = new Date().getFullYear();
+  dbUpsert('metas', {nome:'Ler 12 livros em '+ano, area_id:aM.id, valor_alvo:12, unidade:'livros', vinculo_tipo:'livros', ano});
+  dbUpsert('metas', {nome:'Correr 300 km em '+ano, area_id:aS.id, valor_alvo:300, unidade:'km', vinculo_tipo:'corrida_km', ano});
+}
+
+/* ---- Onboarding (configuração única — seção 2.2) ---- */
+function instrucoesSupabaseHTML() {
+  return '<details class="help"><summary>Como criar o banco gratuito (uma única vez, ~3 min)</summary>'
+    + '<ol class="small" style="padding-left:18px;line-height:1.8">'
+    + '<li>Crie uma conta gratuita em <a href="https://supabase.com" target="_blank" rel="noopener">supabase.com</a> e clique em <b>New project</b> (não pede cartão).</li>'
+    + '<li>No projeto, abra o <b>SQL Editor</b>, cole o script (botão abaixo) e clique em <b>Run</b>.</li>'
+    + '<li>Em <b>Settings → API</b>, copie a <b>Project URL</b> e a chave <b>anon public</b>.</li>'
+    + '<li>Cole os dois valores aqui embaixo. Pronto — você nunca mais precisa abrir o Supabase.</li></ol>'
+    + '<button class="btn small" data-act="copiar-sql">📋 Copiar SQL de criação</button></details>';
+}
+function showOnboarding() {
+  const pg = document.createElement('div');
+  pg.className = 'fullpage'; pg.id = 'onboard';
+  document.body.appendChild(pg);
+  let passo = 0;
+  const setPasso = p => { passo = p; draw(); };
+  function draw() {
+    const dots = '<div class="steps-dots">'+[0,1,2].map(i => '<i class="'+(i===passo?'on':'')+'"></i>').join('')+'</div>';
+    if (passo === 0) {
+      pg.innerHTML = '<div class="inner center">'
+        + '<div style="font-size:54px">⚡</div><div class="h1" style="font-size:28px">Life OS</div>'
+        + '<p class="muted">Tarefas, hábitos, tempo, metas, treino, corrida, leitura, escrita e finanças — tudo em um lugar, 100% grátis, no seu controle.</p>'
+        + '<div class="col" style="margin-top:22px">'
+        + '<button class="btn primary big" data-ob="sup">🔗 Conectar ao Supabase <span class="small" style="font-weight:400">(sincroniza celular ↔ PC)</span></button>'
+        + '<button class="btn big" data-ob="local">📱 Usar só neste dispositivo</button>'
+        + '<span class="tiny muted">Dá para conectar o Supabase depois, em Config — sem perder nada.</span></div>'+dots+'</div>';
+    } else if (passo === 1) {
+      pg.innerHTML = '<div class="inner">'
+        + '<div class="h1">Conectar ao Supabase</div>'
+        + '<p class="muted small">Esta é a única vez que você toca no Supabase. Depois, tudo acontece aqui no app.</p>'
+        + instrucoesSupabaseHTML()
+        + '<div class="field"><label>Project URL</label><input class="input" id="ob-url" placeholder="https://xxxx.supabase.co" value="'+esc(CFG.url||'')+'"></div>'
+        + '<div class="field"><label>anon key (public)</label><input class="input" id="ob-key" placeholder="eyJhbGciOi..." value="'+esc(CFG.key||'')+'"></div>'
+        + '<div id="ob-status"></div>'
+        + '<div class="row" style="margin-top:10px"><button class="btn ghost" data-ob="back">← Voltar</button><span class="sp"></span>'
+        + '<button class="btn primary" data-ob="validar">Validar e conectar</button></div>'+dots+'</div>';
+    } else {
+      pg.innerHTML = '<div class="inner center">'
+        + '<div style="font-size:48px">🔒</div><div class="h1">PIN local (opcional)</div>'
+        + '<p class="muted small">Um PIN simples pedido ao abrir o app neste dispositivo. Você pode pular.</p>'
+        + '<div class="row" style="justify-content:center"><input class="input" id="ob-pin" inputmode="numeric" maxlength="6" placeholder="4–6 dígitos" style="width:170px;text-align:center;font-size:20px;letter-spacing:6px"></div>'
+        + '<div class="row" style="margin-top:18px;justify-content:center"><button class="btn ghost" data-ob="pular">Pular</button>'
+        + '<button class="btn primary" data-ob="pin">Definir PIN e começar</button></div>'+dots+'</div>';
+    }
+  }
+  pg.addEventListener('click', async e => {
+    const b = e.target.closest('[data-ob]'); if (!b) return;
+    const acao = b.dataset.ob;
+    if (acao === 'sup') setPasso(1);
+    if (acao === 'back') setPasso(0);
+    if (acao === 'local') { seedData(); finalizar(); }
+    if (acao === 'pular') finalizar();
+    if (acao === 'pin') {
+      const p = pg.querySelector('#ob-pin').value.trim();
+      if (!/^\d{4,6}$/.test(p)) { toast('PIN deve ter de 4 a 6 dígitos.', {icone:'🔒'}); return; }
+      FLAGS.pinHash = await hashPin(p); FLAGS.pinLen = p.length; saveFlags();
+      finalizar();
+    }
+    if (acao === 'validar') {
+      const url = pg.querySelector('#ob-url').value.trim().replace(/\/+$/,'');
+      const key = pg.querySelector('#ob-key').value.trim();
+      const st = pg.querySelector('#ob-status');
+      if (!/^https:\/\/.+\.supabase\.(co|in)/.test(url) || key.length < 20) {
+        st.innerHTML = '<div class="banner err">Confira a URL (https://xxxx.supabase.co) e a anon key.</div>'; return;
+      }
+      st.innerHTML = '<div class="banner acc">Verificando conexão e tabelas…</div>';
+      CFG = { url, key }; saveCfg();
+      const r = await verificarTabelas();
+      if (r.erro) { st.innerHTML = '<div class="banner err">'+esc(r.erro)+'</div>'; return; }
+      if (r.faltando.length) {
+        st.innerHTML = '<div class="banner warn">Conectou! Mas faltam '+r.faltando.length+' tabelas: <b>'+r.faltando.slice(0,4).join(', ')+(r.faltando.length>4?'…':'')+'</b></div>'
+          + '<p class="small muted">Abra o <b>SQL Editor</b> do Supabase, cole o script e clique em Run. Depois volte aqui.</p>'
+          + '<div class="row"><button class="btn" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn primary" data-ob="validar">Verificar de novo</button></div>';
+        return;
+      }
+      st.innerHTML = '<div class="banner ok">✓ Conectado! '+r.ok+' tabelas prontas. Carregando seus dados…</div>';
+      try {
+        await pullAll(true);
+        if (!T('areas').length) { seedData(); await flush(); }
+      } catch (e2) { st.innerHTML = '<div class="banner err">'+esc(e2.msg||e2)+'</div>'; return; }
+      setPasso(2);
+    }
+  });
+  function finalizar() {
+    FLAGS.onboarded = true; saveFlags();
+    if (!T('areas').length) seedData();
+    pg.remove();
+    render();
+    toast('Bem-vindo ao Life OS! 🎉 Toque em ➕ para registrar qualquer coisa.', {ms:5200});
+  }
+  draw();
+}
+async function hashPin(p) {
+  try {
+    const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('lifeos:'+p));
+    return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2,'0')).join('');
+  } catch (_) { return 'plain:'+p; }
+}
+async function verificarTabelas() {
+  const nomes = Object.keys(TABLES);
+  const faltando = [];
+  let okCount = 0;
+  try { await sb('GET', 'areas?select=id&limit=1'); }
+  catch (e) { if (e.tipo !== 'tabela') return { erro: e.msg || String(e), faltando: [], ok: 0 }; }
+  const checks = await Promise.all(nomes.map(async t => {
+    try { await sb('GET', t + '?select=' + TABLES[t] + '&limit=1'); return { t, ok: true }; }
+    catch (e) { return { t, ok: false, tipo: e.tipo }; }
+  }));
+  for (const c of checks) { if (c.ok) okCount++; else faltando.push(c.t); }
+  return { faltando, ok: okCount };
+}
+
+/* ---- Tela de bloqueio (PIN) ---- */
+function showLock() {
+  if (!FLAGS.pinHash) return;
+  let dig = '';
+  const pg = document.createElement('div');
+  pg.className = 'fullpage'; pg.style.zIndex = 95;
+  const draw = () => {
+    pg.innerHTML = '<div class="inner center"><div style="font-size:44px">⚡</div><div class="h2" style="margin-top:8px">Digite seu PIN</div>'
+      + '<div class="pindots">'+Array.from({length: FLAGS.pinLen||4}, (_,i) => '<i class="'+(i<dig.length?'on':'')+'"></i>').join('')+'</div>'
+      + '<div class="pinpad">'+[1,2,3,4,5,6,7,8,9,'',0,'⌫'].map(n => n===''?'<span></span>':'<button data-pin="'+n+'">'+n+'</button>').join('')+'</div></div>';
+  };
+  pg.addEventListener('click', async e => {
+    const b = e.target.closest('[data-pin]'); if (!b) return;
+    const v = b.dataset.pin;
+    if (v === '⌫') dig = dig.slice(0, -1);
+    else if (dig.length < (FLAGS.pinLen||6)) dig += v;
+    draw();
+    if (dig.length === (FLAGS.pinLen||4)) {
+      if (await hashPin(dig) === FLAGS.pinHash) pg.remove();
+      else { dig = ''; draw(); pg.querySelector('.pindots').classList.add('shake'); }
+    }
+  });
+  draw();
+  document.body.appendChild(pg);
+}
+
+/* ---- SAÚDE DO SISTEMA (seção 2.1 — obrigatória) ---- */
+reg('saude', {
+  titulo: 'Saúde do Sistema',
+  render: () => '<div class="h1">🩺 Saúde do Sistema</div>'
+    + '<p class="muted small">Verifica conexão, tabelas e fila offline. Se algo faltar, a instrução aparece aqui — em português, com 1 clique.</p>'
+    + '<div id="saude-out"><div class="card"><div class="empty"><span class="em">⏳</span>Verificando…</div></div></div>'
+    + '<div class="row wrap"><button class="btn primary" data-act="saude-run">🔄 Verificar agora</button>'
+    + '<button class="btn" data-act="copiar-sql">📋 Copiar SQL de criação</button>'
+    + '<button class="btn" data-act="nav" data-r="config">⚙️ Config</button></div>',
+  mount: () => rodarSaude()
+});
+act('saude-run', () => rodarSaude());
+async function rodarSaude() {
+  const out = $('#saude-out'); if (!out) return;
+  const linha = (ok, titulo, det, extra) => '<div class="item" style="cursor:default"><span style="font-size:17px">'+(ok==='ok'?'✅':ok==='warn'?'⚠️':'❌')+'</span>'
+    + '<div class="grow"><div class="ttl">'+titulo+'</div><div class="sub">'+det+'</div>'+(extra||'')+'</div></div>';
+  let html = '';
+  if (!CFG.url) {
+    html += linha('warn', 'Modo local (sem sincronização)', 'O app funciona normalmente neste dispositivo. Para sincronizar celular ↔ PC, conecte um projeto Supabase gratuito.',
+      '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="cfg-conectar">🔗 Conectar Supabase</button></div>');
+    html += linha('ok', 'Dados locais', T('tarefas').length + ' tarefas, ' + T('habito_registros').length + ' registros de hábito salvos neste dispositivo.');
+    out.innerHTML = '<div class="card pad0"><div class="list">'+html+'</div></div>';
+    return;
+  }
+  html += linha(navigator.onLine ? 'ok' : 'warn', 'Internet', navigator.onLine ? 'Conectado.' : 'Offline — registros ficam na fila e sincronizam quando voltar.');
+  out.innerHTML = '<div class="card pad0"><div class="list">'+html+linha('warn','Conexão com o Supabase','Verificando…')+'</div></div>';
+  let conexaoOk = false;
+  try {
+    await sb('GET', 'areas?select=id&limit=1');
+    conexaoOk = true;
+    html += linha('ok', 'Conexão com o Supabase', 'Projeto respondendo normalmente. URL: ' + esc(CFG.url.replace(/^https:\/\//,'').slice(0, 30)) + '…');
+  } catch (e) {
+    if (e.tipo === 'tabela') { conexaoOk = true; html += linha('ok', 'Conexão com o Supabase', 'Projeto responde, mas faltam tabelas (veja abaixo).'); }
+    else if (e.tipo === 'auth') html += linha('err', 'Chave inválida', esc(e.msg), '<div class="row" style="margin-top:8px"><button class="btn small" data-act="cfg-conectar">Corrigir URL/chave</button></div>');
+    else html += linha('err', 'Projeto não responde — possivelmente PAUSADO por inatividade',
+      'O plano gratuito pausa após 7 dias sem uso. <b>Seus dados estão preservados.</b> Restaurar leva 1 clique:',
+      '<ol class="small muted" style="padding-left:18px;margin:6px 0"><li>Abra <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">supabase.com/dashboard</a></li><li>Entre no seu projeto</li><li>Clique em <b>Restore project</b> e aguarde ~2 min</li></ol>'
+      + '<button class="btn small primary" data-act="saude-run">Verificar de novo</button>');
+  }
+  if (conexaoOk) {
+    const r = await verificarTabelas();
+    if (r.faltando.length) {
+      html += linha('err', 'Faltam ' + r.faltando.length + ' tabelas no banco', '<b>' + r.faltando.join(', ') + '</b>',
+        '<div class="small muted" style="margin:6px 0">Abra o <b>SQL Editor</b> no painel do Supabase, cole o script (botão abaixo) e clique em <b>Run</b>. O script é seguro: não apaga nada e pode rodar várias vezes.</div>'
+        + '<div class="row"><button class="btn small" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn small primary" data-act="saude-run">Verificar de novo</button></div>');
+    } else {
+      html += linha('ok', 'Tabelas', 'Todas as ' + r.ok + ' tabelas do modelo de dados existem.');
+    }
+  }
+  const fila = S.queue.length;
+  html += linha(fila ? 'warn' : 'ok', 'Fila offline', fila
+    ? fila + ' alterações aguardando envio.' + (S.syncErr ? ' Último erro: ' + esc(S.syncErr) : '')
+    : 'Nada pendente. Última sincronização: ' + (FLAGS.lastSync ? fmtData(FLAGS.lastSync.slice(0,10)) + ' ' + FLAGS.lastSync.slice(11,16) : '—'),
+    fila ? '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="sync-agora">Enviar agora</button></div>' : '');
+  const ue = FLAGS.ultimoExport;
+  const dias = ue ? diffDias(ue.slice(0,10), hoje()) : null;
+  html += linha(!ue || dias > 30 ? 'warn' : 'ok', 'Backup', ue ? 'Último export: ' + fmtData(ue.slice(0,10)) + (dias > 30 ? ' — recomendado exportar 1×/mês.' : '.') : 'Nenhum backup ainda — exporte 1×/mês em Config → Dados.');
+  out.innerHTML = '<div class="card pad0"><div class="list">'+html+'</div></div>';
+}
+act('sync-agora', async () => { await flush(); if (!S.queue.length) { toast('Tudo sincronizado ✓', {icone:'✅'}); } else { toast(S.syncErr || 'Ainda há pendências.', {icone:'⚠️'}); } rodarSaude(); });
+
+/* ---- CONFIG ---- */
+reg('config', {
+  titulo: 'Config',
+  render: () => {
+    const st = syncStatus();
+    const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● Erro: '+esc(S.syncErr||'')+'</span>', off:'<span class="muted">● Modo local (sem nuvem)</span>'}[st];
+    return '<div class="h1">⚙️ Config</div>'
+    + '<div class="card"><div class="card-h"><div class="h2">☁️ Supabase (sincronização)</div></div>'
+      + '<p class="small" style="margin:0 0 10px">'+stTxt+(FLAGS.lastSync?' <span class="muted">· último envio '+esc(FLAGS.lastSync.slice(11,16))+'</span>':'')+'</p>'
+      + (CFG.url ? '<p class="small muted" style="margin:0 0 10px">Projeto: <b>'+esc(CFG.url.replace(/^https:\/\//,'').split('.')[0])+'</b></p>' : '<p class="small muted" style="margin:0 0 10px">Conecte um projeto gratuito para sincronizar entre dispositivos. Seus dados locais serão enviados — nada se perde.</p>')
+      + '<div class="row wrap">'
+      + '<button class="btn primary" data-act="nav" data-r="saude">🩺 Saúde do Sistema</button>'
+      + '<button class="btn" data-act="cfg-conectar">'+(CFG.url?'✏️ Editar conexão':'🔗 Conectar Supabase')+'</button>'
+      + (CFG.url ? '<button class="btn" data-act="cfg-pull">⬇️ Recarregar da nuvem</button><button class="btn" data-act="sync-agora">⬆️ Sincronizar agora</button>' : '')
+      + '<button class="btn ghost" data-act="copiar-sql">📋 Copiar SQL</button></div></div>'
+    + '<div class="card"><div class="card-h"><div class="h2">🎛️ Preferências</div></div><div id="cfg-prefs">'
+      + formHTML(prefsFields(), prefsVals()) + '</div>'
+      + '<button class="btn primary" data-act="cfg-prefs-save">Salvar preferências</button></div>'
+    + '<div class="card"><div class="card-h"><div class="h2">🗂️ Áreas da vida</div><button class="btn small" data-act="area-add">+ Área</button></div>'
+      + '<div class="row wrap">' + ordenar(T('areas'), a => a.ordem||0).map(a =>
+        '<span class="chip" data-act="area-edit" data-id="'+a.id+'" style="border-color:'+a.cor+'55"><span class="dot" style="background:'+a.cor+'"></span>'+a.icone+' '+esc(a.nome)+'</span>').join('')
+      + (T('areas').length ? '' : '<span class="muted small">Nenhuma área ainda.</span>') + '</div></div>'
+    + '<div class="card"><div class="card-h"><div class="h2">🏷️ Etiquetas</div><button class="btn small" data-act="etq-add">+ Etiqueta</button></div>'
+      + '<div class="row wrap">' + ordenar(T('etiquetas'), e2 => e2.nome).map(e2 =>
+        '<span class="chip" data-act="etq-edit" data-id="'+e2.id+'" style="border-color:'+(e2.cor||'#9AA0B0')+'66;color:'+(e2.cor||'var(--txt)')+'">@'+esc(e2.nome)+'</span>').join('')
+      + (T('etiquetas').length ? '' : '<span class="muted small">Nenhuma etiqueta.</span>') + '</div></div>'
+    + '<div class="card"><div class="card-h"><div class="h2">🔒 Segurança</div></div>'
+      + '<p class="small muted" style="margin:0 0 10px">'+(FLAGS.pinHash ? 'PIN ativo neste dispositivo.' : 'Sem PIN. O PIN vale só neste dispositivo.')+'</p>'
+      + '<div class="row wrap"><button class="btn" data-act="pin-set">'+(FLAGS.pinHash?'Trocar PIN':'Definir PIN')+'</button>'
+      + (FLAGS.pinHash ? '<button class="btn danger" data-act="pin-rm">Remover PIN</button>' : '') + '</div></div>'
+    + '<div class="card"><div class="card-h"><div class="h2">💾 Dados e backup</div></div>'
+      + '<p class="small muted" style="margin:0 0 10px">Backup recomendado: 1×/mês. Último: <b>'+(FLAGS.ultimoExport ? fmtData(FLAGS.ultimoExport.slice(0,10)) : 'nunca')+'</b></p>'
+      + '<div class="row wrap"><button class="btn primary" data-act="exportar">⬇️ Exportar JSON</button>'
+      + '<button class="btn" data-act="importar">⬆️ Importar JSON</button>'
+      + '<button class="btn danger" data-act="apagar-local">🗑️ Apagar dados locais</button></div></div>'
+    + '<div class="card"><div class="h3">Sobre</div><p class="small muted" style="margin:0">Life OS Pessoal v4.1 · pacote de 3 arquivos estáticos (index.html + manifest.webmanifest + sw.js) · custo R$ 0,00 · seus dados, suas regras.</p></div>';
+  }
+});
+function prefsFields() {
+  return [
+    {k:'nome', l:'Seu nome (para a saudação)', ph:'ex.: Rafael'},
+    {k:'janela_util', t:'num', l:'Janela útil do dia (horas) — barra de capacidade', meia:1, def:8},
+    {k:'reps_padrao', t:'num', l:'Repetições por série (estimar 1RM)', meia:1, def:10},
+    {k:'pomo_foco', t:'num', l:'Pomodoro: foco (min)', meia:1, def:25},
+    {k:'pomo_pausa', t:'num', l:'Pomodoro: pausa (min)', meia:1, def:5},
+    {k:'editor_serif', t:'chk', l:'Editor com fonte serifada', def:false}
+  ];
+}
+function prefsVals() {
+  return { nome:getCfg('nome',''), janela_util:getCfg('janela_util',8), reps_padrao:getCfg('reps_padrao',10),
+    pomo_foco:getCfg('pomo_foco',25), pomo_pausa:getCfg('pomo_pausa',5), editor_serif:getCfg('editor_serif',false) };
+}
+act('cfg-prefs-save', () => {
+  const v = lerForm($('#cfg-prefs'), prefsFields()); if (!v) return;
+  setCfg('nome', v.nome||''); setCfg('janela_util', v.janela_util||8); setCfg('reps_padrao', v.reps_padrao||10);
+  setCfg('pomo_foco', v.pomo_foco||25); setCfg('pomo_pausa', v.pomo_pausa||5); setCfg('editor_serif', !!v.editor_serif);
+  toast('Preferências salvas ✓', {icone:'✅'});
+});
+act('cfg-conectar', () => {
+  closeModal();
+  modal('<div class="bx-h"><div class="h2">🔗 Conectar ao Supabase</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + instrucoesSupabaseHTML()
+    + '<div class="field"><label>Project URL</label><input class="input" id="cx-url" placeholder="https://xxxx.supabase.co" value="'+esc(CFG.url||'')+'"></div>'
+    + '<div class="field"><label>anon key</label><input class="input" id="cx-key" value="'+esc(CFG.key||'')+'"></div>'
+    + '<div id="cx-status"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="cx-validar">Validar e conectar</button></div>');
+});
+act('cx-validar', async () => {
+  const url = $('#cx-url').value.trim().replace(/\/+$/,''), key = $('#cx-key').value.trim();
+  const st = $('#cx-status');
+  if (!/^https:\/\/.+\.supabase\.(co|in)/.test(url) || key.length < 20) { st.innerHTML = '<div class="banner err">Confira a URL e a anon key.</div>'; return; }
+  st.innerHTML = '<div class="banner acc">Verificando…</div>';
+  const temLocal = T('areas').length > 0;
+  CFG = { url, key }; saveCfg();
+  const r = await verificarTabelas();
+  if (r.erro) { st.innerHTML = '<div class="banner err">'+esc(r.erro)+'</div>'; return; }
+  if (r.faltando.length) {
+    st.innerHTML = '<div class="banner warn">Faltam tabelas: <b>'+r.faltando.slice(0,5).join(', ')+(r.faltando.length>5?'…':'')+'</b></div>'
+      + '<div class="row"><button class="btn small" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn small primary" data-act="cx-validar">Verificar de novo</button></div>';
+    return;
+  }
+  st.innerHTML = '<div class="banner ok">✓ Conectado! Enviando dados locais e sincronizando…</div>';
+  try {
+    if (temLocal) await fullPush();
+    await pullAll(true);
+    if (!T('areas').length) { seedData(); await flush(); }
+  } catch (e) { st.innerHTML = '<div class="banner err">'+esc(e.msg||e)+'</div>'; return; }
+  closeModal(); render();
+  toast('Supabase conectado — sincronização ativa ✓', {icone:'☁️'});
+});
+act('cfg-pull', () => confirmBox('Recarregar tudo da nuvem? Alterações locais já sincronizadas são mantidas; pendências na fila são preservadas.', async () => {
+  try { const ok = await pullAll(); if (ok) render(); else toast('Há pendências na fila — envie antes (Saúde do Sistema).', {icone:'⚠️'}); }
+  catch (e) { toast(e.msg || String(e), {icone:'❌'}); }
+}));
+act('pin-set', () => {
+  modal('<div class="bx-h"><div class="h2">Definir PIN</div></div>'
+    + '<div class="field"><label>PIN (4–6 dígitos)</label><input class="input" id="pin-novo" inputmode="numeric" maxlength="6" autofocus style="text-align:center;font-size:20px;letter-spacing:6px"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="pin-save">Salvar</button></div>');
+});
+act('pin-save', async () => {
+  const p = $('#pin-novo').value.trim();
+  if (!/^\d{4,6}$/.test(p)) { toast('PIN deve ter de 4 a 6 dígitos.', {icone:'🔒'}); return; }
+  FLAGS.pinHash = await hashPin(p); FLAGS.pinLen = p.length; saveFlags();
+  closeModal(); render(); toast('PIN definido ✓', {icone:'🔒'});
+});
+act('pin-rm', () => confirmBox('Remover o PIN deste dispositivo?', () => { delete FLAGS.pinHash; delete FLAGS.pinLen; saveFlags(); render(); toast('PIN removido.', {icone:'🔓'}); }));
+
+/* áreas / etiquetas CRUD */
+const areaFields = [
+  {k:'nome', l:'Nome', req:1, foco:1},
+  {k:'icone', l:'Ícone (emoji)', meia:1, def:'📌'},
+  {k:'ordem', t:'num', l:'Ordem', meia:1, def:0},
+  {k:'cor', t:'cor', l:'Cor'}
+];
+act('area-add', () => editModal({ titulo:'Nova área', fields:areaFields, onSave: v => { dbUpsert('areas', v); render(); } }));
+act('area-edit', el => {
+  const a = byId('areas', el.dataset.id);
+  editModal({ titulo:'Editar área', fields:areaFields, vals:a,
+    onSave: v => { dbPatch('areas', a.id, v); render(); },
+    onDelete: () => { const bkp = {...a}; dbDelete('areas', a.id); render();
+      toast('Área excluída.', { undo: () => { dbUpsert('areas', bkp); render(); } }); } });
+});
+const etqFields = [ {k:'nome', l:'Nome (sem espaços)', req:1, foco:1}, {k:'cor', t:'cor', l:'Cor'} ];
+act('etq-add', () => editModal({ titulo:'Nova etiqueta', fields:etqFields, onSave: v => { v.nome = v.nome.replace(/\s+/g,'-').toLowerCase(); dbUpsert('etiquetas', v); render(); } }));
+act('etq-edit', el => {
+  const t = byId('etiquetas', el.dataset.id);
+  editModal({ titulo:'Editar etiqueta', fields:etqFields, vals:t,
+    onSave: v => { v.nome = v.nome.replace(/\s+/g,'-').toLowerCase(); dbPatch('etiquetas', t.id, v); render(); },
+    onDelete: () => { const bkp = {...t}; dbDelete('etiquetas', t.id); render();
+      toast('Etiqueta excluída.', { undo: () => { dbUpsert('etiquetas', bkp); render(); } }); } });
+});
+
+/* export / import / apagar */
+act('exportar', () => {
+  const blob = new Blob([JSON.stringify({ app:'lifeos', versao:'4.1', exportado_em: nowISO(), dados: S.data }, null, 1)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'lifeos-backup-' + hoje() + '.json';
+  a.click(); URL.revokeObjectURL(a.href);
+  FLAGS.ultimoExport = nowISO(); saveFlags();
+  toast('Backup exportado ✓', {icone:'💾'});
+});
+act('importar', () => {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = () => {
+    const f = inp.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      try {
+        const j = JSON.parse(rd.result);
+        if (!j || !j.dados) throw new Error('formato');
+        confirmBox('Importar backup de <b>'+esc((j.exportado_em||'').slice(0,10))+'</b>? Os dados atuais deste dispositivo serão <b>substituídos</b>'+(CFG.url?' e enviados ao Supabase':'')+'.',
+          async () => {
+            for (const t of Object.keys(TABLES)) S.data[t] = Array.isArray(j.dados[t]) ? j.dados[t] : [];
+            saveLocal();
+            if (CFG.url) { await fullPush(); }
+            render(); toast('Backup importado ✓', {icone:'✅'});
+          }, {perigo:1, sim:'Importar'});
+      } catch (_) { toast('Arquivo inválido — esperado um backup do Life OS.', {icone:'❌'}); }
+    };
+    rd.readAsText(f);
+  };
+  inp.click();
+});
+act('apagar-local', () => confirmBox('Apagar TODOS os dados locais deste dispositivo? '+(CFG.url?'Os dados na nuvem (Supabase) permanecem — você pode recarregá-los depois.':'<b>Sem Supabase conectado, isso apaga tudo de verdade.</b>'),
+  () => { localStorage.removeItem(LSK.data); localStorage.removeItem(LSK.queue); localStorage.removeItem(LSK.flags); location.reload(); }, {perigo:1, sim:'Apagar tudo'}));
+
+/* ---- boot da etapa 2 ---- */
+loadLocal();
+BootHooks.push(() => {
+  showLock();
+  if (!FLAGS.onboarded) { showOnboarding(); return; }
+  if (CFG.url) flush().then(() => pullAll(true)).then(ok => { if (ok) render(); }).catch(()=>{});
+  setInterval(() => flush(), 45000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && CFG.url && (!S.lastPull || Date.now() - new Date(S.lastPull).getTime() > 10*60*1000)) {
+      pullAll(true).then(ok => { if (ok) render(); }).catch(()=>{});
+    }
+  });
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
