@@ -298,11 +298,14 @@ async function flush() {
   if (!CFG.url || !CFG.key || !usuarioAutenticado() || S.flushing || !S.queue.length) { atualizarSyncUI(); return; }
   S.flushing = true; atualizarSyncUI();
   try {
+    const me = usuarioAtual();
     while (S.queue.length) {
       const it = S.queue[0];
+      if (!me || !me.id) break; // sessão caiu no meio — pendências ficam na fila
       if (it.op === 'up') {
         const oc = ON_CONFLICT[it.t] || TABLES[it.t];
-        await sb('POST', it.t + '?on_conflict=' + oc, it.rows, { Prefer: 'resolution=merge-duplicates,return=minimal' });
+        const rows = it.rows.map(r => ({ ...r, user_id: me.id })); // cada linha pertence à conta logada (RLS)
+        await sb('POST', it.t + '?on_conflict=' + oc, rows, { Prefer: 'resolution=merge-duplicates,return=minimal' });
       } else {
         await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id));
       }
@@ -331,6 +334,9 @@ async function pullAll(silencioso) {
   if (S.queue.length) return false; // não sobrescrever com pendências locais
   const novo = {};
   for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t);
+  const totalNuvem = Object.values(novo).reduce((a, arr) => a + arr.length, 0);
+  const totalLocal = Object.values(S.data).reduce((a, arr) => a + arr.length, 0);
+  if (!totalNuvem && totalLocal) return 'vazio'; // nuvem vazia p/ esta conta: NÃO apagar dados locais
   S.data = novo; saveLocal();
   S.lastPull = nowISO(); S.syncErr = null;
   if (!silencioso) toast('Sincronizado ✓', { icone:'🔄' });
@@ -359,6 +365,17 @@ function atualizarSyncUI() {
 function usuarioAutenticado() {
   return !!(window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.user);
 }
+/* usuário logado normalizado {id, email, nome, avatar} (a partir da sessão do Supabase Auth) */
+function usuarioAtual() {
+  const u = window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.user;
+  if (!u) return null;
+  const md = u.user_metadata || (u.identities && u.identities[0] && u.identities[0].identity_data) || {};
+  return { id: u.id, email: u.email || md.email || '', nome: md.full_name || md.name || '', avatar: md.avatar_url || md.picture || '' };
+}
+function logout() { if (window.LifeOSAuth && window.LifeOSAuth.logout) window.LifeOSAuth.logout(); }
+act('auth-login', () => { if (window.LifeOSAuth && window.LifeOSAuth.loginGoogle) window.LifeOSAuth.loginGoogle(); });
+act('auth-logout', () => confirmBox('Sair da conta Google? Os dados locais continuam neste dispositivo; a sincronização pausa até entrar de novo.', () => logout()));
+act('auth-copy-url', () => { const u = new URL('.', location.href); u.hash=''; u.search=''; copiarTexto(u.href, 'URL do app copiada — cole em Site URL no Supabase.'); });
 async function sincronizarNuvemInicial(silencioso) {
   if (!CFG.url || !CFG.key) { atualizarSyncUI(); return false; }
   if (!usuarioAutenticado()) {
@@ -366,13 +383,19 @@ async function sincronizarNuvemInicial(silencioso) {
     atualizarSyncUI();
     return false;
   }
+  // banco ainda sem proteção por usuário? guia a migração e não tenta sincronizar
+  const chk = await verificarTabelas().catch(() => null);
+  if (chk && (chk.faltando.length || chk.precisaMigrar)) { atualizarSyncUI(); modalMigracao(chk); render(); return false; }
   await flush();
   const ok = await pullAll(true);
-  if (ok && !T('areas').length) {
+  if (ok === 'vazio') { // nuvem vazia para esta conta e há dados locais → envia tudo (idempotente)
+    await fullPush();
+    if (!S.queue.length && !silencioso) toast('Seus dados deste dispositivo foram enviados para a sua conta ✓', { icone:'☁️', ms:5500 });
+  } else if (ok && !T('areas').length) {
     seedData();
     await flush();
   }
-  if (!silencioso) toast('Sincronizado ✓', { icone:'🔄' });
+  if (!silencioso && ok === true) toast('Sincronizado ✓', { icone:'🔄' });
   render();
   return ok;
 }
@@ -473,7 +496,7 @@ async function copiarTexto(t, msg) {
   catch (_) { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(__){} ta.remove(); }
   toast(msg || 'Copiado para a área de transferência ✓', { icone:'📋' });
 }
-act('copiar-sql', () => copiarTexto(SQL_SETUP, 'SQL copiado! Cole no SQL Editor do Supabase e clique em Run.'));
+act('copiar-sql', () => copiarTexto(sqlSetup(), 'SQL copiado! Cole no SQL Editor do Supabase e clique em Run.'));
 
 /* ---- Dados de exemplo (primeiro acesso) ---- */
 function seedData() {
@@ -582,8 +605,68 @@ async function verificarTabelas() {
     catch (e) { return { t, ok: false, tipo: e.tipo }; }
   }));
   for (const c of checks) { if (c.ok) okCount++; else faltando.push(c.t); }
-  return { faltando, ok: okCount };
+  // banco já tem proteção por usuário (coluna user_id)? se não, precisa rodar o SQL de atualização
+  let precisaMigrar = false;
+  if (!faltando.includes('areas')) {
+    try { await sb('GET', 'areas?select=user_id&limit=1'); }
+    catch (e) { if (/user_id|42703|column/i.test(e.det || e.msg || '')) precisaMigrar = true; }
+  }
+  return { faltando, ok: okCount, precisaMigrar };
 }
+/* SQL completo: criação + login Google (coluna user_id, adoção dos dados e RLS por usuário).
+   Gerado na hora para incluir o id da conta logada — assim os dados antigos viram seus. */
+function sqlSetup() {
+  const me = usuarioAtual();
+  const uid = me && me.id, email = me && me.email;
+  let s = SQL_SETUP + '\n\n';
+  s += '-- ===== LOGIN GOOGLE: dados por usuário (user_id + Row-Level Security) =====\n';
+  s += uid
+    ? '-- Dados já existentes serão adotados pela conta ' + (email || uid) + '.\n'
+    : '-- ATENÇÃO: gere este script com o login Google já feito no app, para os dados existentes serem adotados pela sua conta.\n';
+  for (const t of Object.keys(TABLES)) {
+    s += '\nalter table ' + t + ' add column if not exists user_id uuid default auth.uid();';
+    if (uid) s += "\nupdate " + t + " set user_id = '" + uid + "' where user_id is null;";
+    s += '\ncreate index if not exists ' + t + '_user_idx on ' + t + '(user_id);'
+      + '\nalter table ' + t + ' enable row level security;'
+      + '\ndrop policy if exists ' + t + '_own on ' + t + ';'
+      + '\ncreate policy ' + t + '_own on ' + t + ' for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());\n';
+  }
+  s += `
+-- chaves únicas passam a valer por usuário
+alter table etiquetas drop constraint if exists etiquetas_nome_key;
+create unique index if not exists etiquetas_user_nome on etiquetas(user_id, nome);
+alter table dias drop constraint if exists dias_pkey;
+create unique index if not exists dias_user_data on dias(user_id, data);
+alter table configuracoes drop constraint if exists configuracoes_pkey;
+create unique index if not exists configuracoes_user_chave on configuracoes(user_id, chave);
+alter table conquistas drop constraint if exists conquistas_pkey;
+create unique index if not exists conquistas_user_codigo on conquistas(user_id, codigo);
+-- pronto! Volte ao app e toque em "Já rodei — verificar".`;
+  return s;
+}
+function modalMigracao(chk) {
+  const u = usuarioAtual();
+  const ref = String(CFG.url || '').replace(/^https:\/\//, '').split('.')[0];
+  modal('<div class="bx-h"><div class="h2">🔁 Atualize o banco (1 minuto, uma única vez)</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="small muted" style="margin-top:0">Para o login Google funcionar com seus dados protegidos por conta, o banco precisa de um script de atualização. Ele é <b>seguro</b>: não apaga nada e pode rodar mais de uma vez.</p>'
+    + (chk.faltando && chk.faltando.length ? '<div class="banner warn tiny">Faltam tabelas: <b>' + esc(chk.faltando.slice(0, 5).join(', ')) + (chk.faltando.length > 5 ? '…' : '') + '</b></div>' : '')
+    + (chk.precisaMigrar ? '<div class="banner acc tiny">As tabelas existem, mas ainda não têm a proteção por usuário (coluna user_id + RLS).</div>' : '')
+    + (u ? '<p class="small" style="margin:8px 0">O script já <b>adota os seus dados atuais</b> para a conta <b>' + esc(u.email || '') + '</b>.</p>'
+         : '<div class="banner warn tiny">Entre com o Google antes de copiar o script, para ele adotar seus dados para a sua conta.</div>')
+    + '<ol class="small muted" style="padding-left:18px;line-height:1.8"><li>Toque em <b>Copiar SQL</b> abaixo.</li>'
+    + '<li>Abra o <b>SQL Editor</b> do seu projeto Supabase e cole (Ctrl/Cmd+V).</li>'
+    + '<li>Clique em <b>Run</b> e volte aqui.</li></ol>'
+    + '<div class="bx-foot"><button class="btn" data-act="copiar-sql">📋 Copiar SQL</button>'
+    + (ref ? '<a class="btn" target="_blank" rel="noopener" href="https://supabase.com/dashboard/project/' + esc(ref) + '/sql/new">Abrir SQL Editor ↗</a>' : '')
+    + '<span class="sp"></span><button class="btn primary" data-act="auth-verificar">Já rodei — verificar</button></div>');
+}
+act('auth-verificar', async () => {
+  closeModal();
+  toast('Verificando o banco…', { icone:'🩺' });
+  await sincronizarNuvemInicial(false).catch(() => {});
+  const chk = await verificarTabelas().catch(() => null);
+  if (chk && !chk.faltando.length && !chk.precisaMigrar) toast('Banco atualizado e sincronização ativa ✓', { icone:'✅', ms:5000 });
+});
 
 /* ---- Tela de bloqueio (PIN) ---- */
 function showLock() {
@@ -661,6 +744,12 @@ async function rodarSaude() {
     } else {
       html += linha('ok', 'Tabelas', 'Todas as ' + r.ok + ' tabelas do modelo de dados existem.');
     }
+    if (r.precisaMigrar) {
+      html += linha('err', 'Banco precisa do script de atualização (login Google)', 'As tabelas ainda não têm a proteção por usuário (user_id + RLS). Rode o SQL uma vez — ele adota seus dados atuais para a sua conta.',
+        '<div class="row" style="margin-top:8px"><button class="btn small" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn small primary" data-act="saude-run">Verificar de novo</button></div>');
+    } else if (!r.faltando.length && usuarioAtual()) {
+      html += linha('ok', 'Proteção por usuário (RLS)', 'Cada registro é gravado e lido apenas pela sua conta (' + esc(usuarioAtual().email||'') + ').');
+    }
   }
   const fila = S.queue.length;
   html += linha(fila ? 'warn' : 'ok', 'Fila offline', fila
@@ -687,7 +776,26 @@ reg('config', {
   render: () => {
     const st = syncStatus();
     const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● Erro: '+esc(S.syncErr||'')+'</span>', auth:'<span class="warn">● Aguardando login Google</span>', off:'<span class="muted">● Supabase indisponível</span>'}[st];
+    const u = usuarioAtual();
+    const appUrl = (() => { const x = new URL('.', location.href); x.hash=''; x.search=''; return x.href; })();
+    const contaCard = '<div class="card"><div class="card-h"><div class="h2">👤 Conta (login Google)</div></div>'
+      + (u
+        ? '<div class="row" style="margin-bottom:10px">'
+          + (u.avatar ? '<img class="avatar" src="'+esc(u.avatar)+'" alt="" referrerpolicy="no-referrer">' : '<span class="avatar" style="display:inline-flex;align-items:center;justify-content:center">👤</span>')
+          + '<div class="grow"><div style="font-weight:700">'+esc(u.nome || 'Conectado')+'</div><div class="small muted">'+esc(u.email||'')+'</div></div>'
+          + '<button class="btn small" data-act="auth-logout">Sair</button></div>'
+          + '<p class="tiny muted" style="margin:0">Seus dados são gravados na sua conta e protegidos por usuário (RLS). Cada alteração é salva no banco automaticamente.</p>'
+        : '<p class="small muted" style="margin:0 0 10px">Entre com o Google para sincronizar com a nuvem. Sem login, o app continua funcionando neste dispositivo e guarda tudo numa fila.</p>'
+          + '<div class="row"><button class="gbtn" data-act="auth-login">'+G_ICON+' Entrar com Google</button></div>')
+      + '<details class="help" style="margin-top:10px"><summary>Login não funciona? Confira as URLs no Supabase</summary>'
+        + '<p class="small muted">No painel do Supabase, em <b>Authentication → URL Configuration</b>:</p>'
+        + '<ul class="small muted" style="padding-left:18px;line-height:1.8">'
+        + '<li><b>Site URL</b>: <code>'+esc(appUrl)+'</code> <button class="btn small ghost" data-act="auth-copy-url">copiar</button></li>'
+        + '<li><b>Redirect URLs</b>: adicione <code>'+esc(appUrl)+'</code> (e <code>'+esc(appUrl)+'*</code>)</li></ul>'
+        + '<p class="small muted">E em <b>Authentication → Providers → Google</b>, o provedor precisa estar ativado.</p></details>'
+      + '</div>';
     return '<div class="h1">⚙️ Config</div>'
+    + contaCard
     + '<div class="card"><div class="card-h"><div class="h2">☁️ Supabase (sincronização)</div></div>'
       + '<p class="small" style="margin:0 0 10px">'+stTxt+(FLAGS.lastSync?' <span class="muted">· último envio '+esc(FLAGS.lastSync.slice(11,16))+'</span>':'')+'</p>'
       + '<p class="small muted" style="margin:0 0 10px">Projeto Supabase já configurado: <b>'+esc((CFG.url||'').replace(/^https:\/\//,'').split('.')[0]||'Life OS')+'</b>. Não é necessário colar URL nem chave pública.</p>'
@@ -715,7 +823,7 @@ reg('config', {
       + '<div class="row wrap"><button class="btn primary" data-act="exportar">⬇️ Exportar JSON</button>'
       + '<button class="btn" data-act="importar">⬆️ Importar JSON</button>'
       + '<button class="btn danger" data-act="apagar-local">🗑️ Apagar dados locais</button></div></div>'
-    + '<div class="card"><div class="h3">Sobre</div><p class="small muted" style="margin:0">Life OS Pessoal v4.1 · pacote de 3 arquivos estáticos (index.html + manifest.webmanifest + sw.js) · custo R$ 0,00 · seus dados, suas regras.</p></div>';
+    + '<div class="card"><div class="h3">Sobre</div><p class="small muted" style="margin:0">Life OS Pessoal v4.2 (login Google + dados por usuário) · estrutura modular · custo R$ 0,00 · seus dados, suas regras.</p></div>';
   }
 });
 function prefsFields() {
@@ -4017,244 +4125,238 @@ act('rev-abrir', el => {
     { wide:true });
 });
 /* ============ ETAPA 16: Dashboard Geral + Conquistas ============ */
+/* ============ ETAPA 16: Dashboard Geral + Conquistas ============ */
+function kpiHTML(l, v, d) {
+  return '<div class="kpi"><div class="l">'+l+'</div><div class="v">'+v+'</div>'+(d?'<div class="d muted tiny">'+d+'</div>':'')+'</div>';
+}
 reg('dashboard', {
-  icon:'🏠', label:'Dashboard',
+  titulo: 'Dashboard',
   render() {
-    const hoje = dataHoje();
-    const ano = hoje.slice(0,4);
-    const mesAtual = hoje.slice(0,7);
-    // Tarefas hoje
-    const tarefasHoje = T('tarefas').filter(t => !t.concluida && !t.abandonada && t.vencimento === hoje).length;
-    const concluidas7 = (() => {
-      const d7 = addDias(hoje,-6);
-      return T('tarefas').filter(t => t.concluida && t.concluido_em >= d7).length;
-    })();
-    // Hábitos hoje
-    const habsAtivos = T('habitos').filter(h => h.ativo !== false);
-    const marcadosHoje = habsAtivos.filter(h => (T('habito_logs').some(l => l.habito_id === h.id && l.data === hoje))).length;
-    const habPct = habsAtivos.length ? Math.round(marcadosHoje / habsAtivos.length * 100) : 0;
-    // Corrida semana
-    const ini7 = addDias(hoje,-6);
-    const kmSemana = T('corridas').filter(c => c.data >= ini7).reduce((s,c) => s + (c.distancia_km||0), 0);
-    // Treinos semana
-    const treinosSemana = T('treinos').filter(t => t.data >= ini7).length;
-    // Finanças mês
-    const saldo = lacDoMes ? lacDoMes(mesAtual) : 0;
-    // Patrimônio
-    const pat = patrimonioTotal ? patrimonioTotal() : 0;
-    // Metas ativas
-    const metasAtivas = T('metas').filter(m => m.ativo !== false && !m.arquivada);
-    const metasOk = metasAtivas.filter(m => {
-      const p = metaProgresso ? metaProgresso(m) : null;
-      return p && p.pct >= 100;
-    }).length;
-    // Escrita semana
-    const palavrasSemana = T('escrita_logs').filter(l => l.data >= ini7).reduce((s,l) => s+(l.palavras||0),0);
-    // Energia média 7 dias
-    const fechamentos7 = T('fechamentos').filter(f => f.data >= ini7);
-    const energiaMedia = fechamentos7.length ? (fechamentos7.reduce((s,f)=>s+(f.energia||0),0)/fechamentos7.length).toFixed(1) : '–';
-    // Heatmap de hábitos (últimos 84 dias = 12 semanas)
-    const hmHtml = typeof heatmapHabito !== 'undefined' && habsAtivos.length
-      ? ('<div class="field"><label>Heatmap hábitos (12 semanas)</label>'+heatmapHabito(habsAtivos, 84)+'</div>') : '';
-
-    // Streak de hábitos (melhor streak)
-    const melhorStreak = habsAtivos.reduce((mx, h) => {
-      const s = typeof streakDiario !== 'undefined' ? streakDiario(h) : 0;
-      return s > mx ? s : mx;
-    }, 0);
-
-    // Gráfico patrimônio
-    const serieP = typeof serieMensalPatrimonio !== 'undefined' ? serieMensalPatrimonio(12) : [];
-    const patChart = serieP.length > 1 ? svgLinha(serieP.map(p=>p.valor), serieP.map(p=>p.mes.slice(5)), { color:'#7C5CFC', h:80 }) : '';
-
-    // Conquistas
+    const h0 = hoje(), ini7 = addDias(h0, -6), ym = mesDe(h0);
+    const mx = metricasSemana(ini7, h0); // mesmas métricas congeladas da revisão (últimos 7 dias)
+    const pendHoje = T('tarefas').filter(t => !t.concluida && !t.abandonada && t.vencimento === h0).length;
+    const feitasHoje = T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === h0).length;
+    const rm = resumoMes(ym);
+    const pat = patrimonioTotal();
+    // melhor streak entre hábitos ativos
+    let melhor = null;
+    for (const h of habitosAtivos()) { const s = habitoStreak(h); if (s.atual > 0 && (!melhor || s.atual > melhor.atual)) melhor = { atual: s.atual, h }; }
+    // metas
+    const metasAtivas = T('metas').filter(m => !m.concluida);
+    const metasBatidas = T('metas').filter(m => m.concluida || metaProgresso(m).atingida).length;
+    const metasRisco = metasAtivas.filter(m => { const st = metaProgresso(m).status; return st === 'risco' || st === 'vencida'; });
+    // tarefas concluídas por dia — 14 dias
+    const barras = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = addDias(h0, -i);
+      barras.push({ x: (i % 2 === 0) ? d.slice(8) : '', y: T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === d).length });
+    }
+    // heatmap geral de hábitos (12 semanas): % dos hábitos diários cumpridos no dia
+    const porDia = {};
+    const hsDiarios = habitosAtivos().filter(h => h.tipo !== 'semanal');
+    if (hsDiarios.length) for (let d = addDias(h0, -83); d <= h0; d = addDias(d, 1)) {
+      let poss = 0, fei = 0;
+      for (const h of hsDiarios) if (diaAtivo(h, d)) { poss++; if (diaFeito(h, d)) fei++; }
+      if (poss) porDia[d] = fei / poss;
+    }
+    const serieP = serieMensalPatrimonio(12);
+    const topMetas = metasAtivas.map(m => ({ m, p: metaProgresso(m) })).sort((a, b) => b.p.pct - a.p.pct).slice(0, 3);
     checkConquistas('dashboard');
 
-    // Gráfico tarefas 7 dias
-    const taskBars = (() => {
-      const vals = [], labs = [];
-      for (let i=6;i>=0;i--) { const d=addDias(hoje,-i); vals.push(T('tarefas').filter(t=>t.concluida&&t.concluido_em===d).length); labs.push(d.slice(8)); }
-      return svgBarras(vals, labs, { color:'#7C5CFC', h:64 });
-    })();
-
-    return '<div class="h1" style="margin-bottom:16px">🏠 Dashboard</div>'
-      + '<div class="grid2">'
-      + statCard('📋','Tarefas hoje',tarefasHoje,'pendentes')
-      + statCard('✅','Concluídas (7d)',concluidas7,'tarefas')
-      + statCard('🔥','Hábitos hoje',habPct+'%','do dia')
-      + statCard('⚡','Energia média',energiaMedia,'/5')
-      + statCard('🏃','Km semana',fmtNum(kmSemana,1),'km')
-      + statCard('🏋️','Treinos semana',treinosSemana,'sessões')
-      + statCard('✍️','Palavras semana',fmtNum(palavrasSemana),'palavras')
-      + statCard('🎯','Metas concluídas',metasOk+'/'+metasAtivas.length,'metas')
+    return '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">📊 Dashboard</div>'
+      + '<button class="btn small" data-act="nav" data-r="retro">🌅 Retrospectiva</button></div>'
+      + '<div class="grid4" style="margin-bottom:14px">'
+      + kpiHTML('✅ tarefas hoje', feitasHoje + '<span class="muted" style="font-size:14px"> feitas</span>', pendHoje ? pendHoje + ' pendentes' : 'dia limpo')
+      + kpiHTML('🔁 hábitos (7d)', mx.habitos_pct != null ? mx.habitos_pct + '%' : '—', melhor ? '🔥 melhor streak: ' + melhor.atual + (melhor.h.tipo === 'semanal' ? ' sem' : ' dias') : '')
+      + kpiHTML('🎯 foco (7d)', fmtMin(mx.foco_min), mx.energia_media != null ? '⚡ energia ' + mx.energia_media + '/5' : '')
+      + kpiHTML('🏋️ treinos (7d)', mx.treinos, '🏃 ' + fmtNum(mx.km, 1) + ' km')
+      + kpiHTML('📖 páginas (7d)', fmtNum(mx.paginas), '✍️ ' + fmtNum(mx.palavras) + ' palavras')
+      + kpiHTML('💸 gasto no mês', fmtBRL(rm.saidas), rm.entradas ? 'saldo ' + fmtBRL(rm.saldo) : 'sem entradas no mês')
+      + kpiHTML('📈 investido no mês', fmtBRL(rm.investido), 'fora do consumo')
+      + kpiHTML('🏦 patrimônio', fmtBRL(pat), metasAtivas.length ? metasBatidas + ' metas batidas' : '')
       + '</div>'
-      + (taskBars ? '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Tarefas concluídas — 7 dias</label>'+taskBars+'</div>' : '')
-      + (patChart ? '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Patrimônio — 12 meses</label>'+patChart+'</div>' : '')
-      + hmHtml
-      + '<div style="margin-top:16px"><div class="row" style="margin-bottom:8px"><div class="h2" style="flex:1">🏆 Conquistas</div>'
-      + '<button class="btn small" data-act="nav" data-r="conquistas">Ver todas →</button></div>'
-      + conquistasResumoHTML()
-      + '</div>';
+      + '<div class="grid2">'
+      + '<div class="card"><div class="h3" style="margin-bottom:6px">✅ Tarefas concluídas — 14 dias</div>' + svgBarras(barras, { h:150 }) + '</div>'
+      + '<div class="card"><div class="h3" style="margin-bottom:6px">🏦 Patrimônio — 12 meses</div>'
+        + (serieP.some(p => p.y > 0) ? svgLinha(serieP, { h:150, fmt: v => fmtBRL(v) }) : '<div class="empty small">registre saldos em Finanças → Investimentos</div>') + '</div>'
+      + '</div>'
+      + (hsDiarios.length ? '<div class="card"><div class="h3" style="margin-bottom:6px">🔁 Constância dos hábitos — 12 semanas</div>'
+        + heatmapHTML(porDia, 84, v => v >= 1 ? 4 : v >= 0.75 ? 3 : v >= 0.4 ? 2 : v > 0 ? 1 : 0) + '</div>' : '')
+      + (topMetas.length ? '<div class="card"><div class="card-h"><div class="h2">🎯 Metas em destaque</div>'
+        + '<button class="btn small" data-act="nav" data-r="metas">ver todas →</button></div>'
+        + topMetas.map(x => '<div class="row" style="margin-bottom:8px"><span class="small grow" style="font-weight:600">' + esc(x.m.nome) + '</span>'
+          + '<div class="bar" style="width:130px"><i style="width:' + Math.round(x.p.pct * 100) + '%"></i></div>'
+          + '<b class="small" style="width:42px;text-align:right">' + Math.round(x.p.pct * 100) + '%</b></div>').join('')
+        + (metasRisco.length ? '<div class="banner warn tiny" style="margin-top:6px">⚠️ ' + metasRisco.length + ' meta' + (metasRisco.length > 1 ? 's' : '') + ' em risco ou vencida' + (metasRisco.length > 1 ? 's' : '') + '</div>' : '')
+        + '</div>' : '')
+      + '<div class="card"><div class="card-h"><div class="h2">🏆 Conquistas</div>'
+      + '<button class="btn small" data-act="nav" data-r="conquistas">ver todas →</button></div>'
+      + conquistasResumoHTML() + '</div>';
   }
 });
 
-function statCard(icon, titulo, valor, sub) {
-  return '<div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px">'
-    + '<div style="font-size:24px;line-height:1">'+icon+'</div>'
-    + '<div><div class="small muted">'+titulo+'</div>'
-    + '<div style="font-size:22px;font-weight:700;line-height:1.2">'+valor+'</div>'
-    + '<div class="small muted">'+sub+'</div></div></div>';
-}
-
-/* Conquistas */
+/* ---- Conquistas (salvas na tabela `conquistas` → sincronizam entre dispositivos) ---- */
 const CONQUISTAS_DEF = [
-  { id:'primeira_tarefa', icon:'✅', nome:'Primeira tarefa!', desc:'Conclua sua primeira tarefa.', check: () => T('tarefas').some(t=>t.concluida) },
-  { id:'streak7', icon:'🔥', nome:'Em chamas', desc:'7 dias seguidos com pelo menos 1 hábito marcado.', check: () => {
-    const h = T('habitos').find(h=>h.ativo!==false);
-    return h ? (typeof streakDiario!=='undefined' ? streakDiario(h) : 0) >= 7 : false;
-  }},
-  { id:'100tarefas', icon:'💯', nome:'Centenário', desc:'100 tarefas concluídas.', check: () => T('tarefas').filter(t=>t.concluida).length >= 100 },
-  { id:'primeiroTreino', icon:'🏋️', nome:'Primeiro treino', desc:'Registre seu primeiro treino.', check: () => T('treinos').length > 0 },
-  { id:'50km', icon:'🏃', nome:'50 km!', desc:'Acumule 50 km rodados.', check: () => T('corridas').reduce((s,c)=>s+(c.distancia_km||0),0) >= 50 },
-  { id:'primeiroLivro', icon:'📚', nome:'Primeiro livro', desc:'Conclua sua primeira leitura.', check: () => T('livros').some(l=>l.status==='concluido') },
-  { id:'1000palavras', icon:'✍️', nome:'Escritor', desc:'Escreva 1.000 palavras.', check: () => T('escrita_logs').reduce((s,l)=>s+(l.palavras||0),0) >= 1000 },
-  { id:'primeiraRevisao', icon:'🧭', nome:'Revisor', desc:'Conclua sua primeira revisão semanal.', check: () => T('revisoes').some(r=>r.tipo==='semanal') },
-  { id:'primeiraMeta', icon:'🎯', nome:'Visionário', desc:'Cadastre sua primeira meta.', check: () => T('metas').length > 0 },
-  { id:'patrimonio100k', icon:'💰', nome:'Centena', desc:'Patrimônio acima de R$ 100.000.', check: () => (typeof patrimonioTotal!=='undefined'?patrimonioTotal():0) >= 100000 },
-  { id:'streak30', icon:'🌟', nome:'Mês sólido', desc:'30 dias seguidos com hábitos marcados.', check: () => {
-    const h = T('habitos').find(h=>h.ativo!==false);
-    return h ? (typeof streakDiario!=='undefined'?streakDiario(h):0) >= 30 : false;
-  }},
-  { id:'revisao4', icon:'🔭', nome:'Disciplinado', desc:'4 revisões semanais concluídas.', check: () => T('revisoes').filter(r=>r.tipo==='semanal').length >= 4 },
-  { id:'10treinos', icon:'💪', nome:'Consistente', desc:'10 treinos registrados.', check: () => T('treinos').length >= 10 },
-  { id:'3metas', icon:'🏆', nome:'Ambicioso', desc:'3 metas ativas ao mesmo tempo.', check: () => T('metas').filter(m=>m.ativo!==false&&!m.arquivada).length >= 3 },
-  { id:'primeiroFoco', icon:'🎯', nome:'Foco total', desc:'Complete uma sessão de foco.', check: () => T('agenda_blocos').some(b=>b.tipo==='foco'&&b.realizado) },
+  { id:'primeira_tarefa', icon:'✅', nome:'Primeiro check', desc:'Conclua sua primeira tarefa.',
+    check: () => T('tarefas').some(t => t.concluida) },
+  { id:'tarefas_100', icon:'💯', nome:'Centenário', desc:'Conclua 100 tarefas.',
+    check: () => T('tarefas').filter(t => t.concluida).length >= 100 },
+  { id:'streak_7', icon:'🔥', nome:'Em chamas', desc:'Streak de 7 em algum hábito.',
+    check: () => habitosAtivos().some(h => habitoStreak(h).atual >= 7) },
+  { id:'streak_30', icon:'🌟', nome:'Mês sólido', desc:'Streak de 30 em algum hábito.',
+    check: () => habitosAtivos().some(h => habitoStreak(h).atual >= 30) },
+  { id:'treino_1', icon:'🏋️', nome:'Primeiro treino', desc:'Registre seu primeiro treino.',
+    check: () => T('treino_sessoes').length > 0 },
+  { id:'treino_10', icon:'💪', nome:'Consistente', desc:'10 treinos registrados.',
+    check: () => T('treino_sessoes').length >= 10 },
+  { id:'corrida_50km', icon:'🏃', nome:'Rodou 50', desc:'Acumule 50 km de corrida.',
+    check: () => sum(T('corridas').map(c => c.distancia_km)) >= 50 },
+  { id:'corrida_200km', icon:'🚀', nome:'Maratonista de base', desc:'Acumule 200 km de corrida.',
+    check: () => sum(T('corridas').map(c => c.distancia_km)) >= 200 },
+  { id:'livro_1', icon:'📚', nome:'Primeira página virada', desc:'Conclua seu primeiro livro.',
+    check: () => T('livros').some(l => l.status === 'concluido') },
+  { id:'livro_5', icon:'🦉', nome:'Leitor de verdade', desc:'Conclua 5 livros.',
+    check: () => T('livros').filter(l => l.status === 'concluido').length >= 5 },
+  { id:'palavras_1k', icon:'✍️', nome:'Escritor', desc:'Escreva 1.000 palavras.',
+    check: () => sum(Object.values(escritaLog())) >= 1000 },
+  { id:'palavras_10k', icon:'📜', nome:'Ensaísta', desc:'Escreva 10.000 palavras.',
+    check: () => sum(Object.values(escritaLog())) >= 10000 },
+  { id:'foco_10h', icon:'🎯', nome:'Profundo', desc:'10 horas de foco registradas.',
+    check: () => sum(T('blocos').filter(b => b.foco).map(b => b.tempo_real_min || 0)) >= 600 },
+  { id:'revisao_1', icon:'🧭', nome:'Piloto', desc:'Conclua sua primeira revisão semanal.',
+    check: () => T('revisoes').some(r => r.tipo === 'semanal') },
+  { id:'revisao_4', icon:'🔭', nome:'Disciplinado', desc:'4 revisões semanais concluídas.',
+    check: () => T('revisoes').filter(r => r.tipo === 'semanal').length >= 4 },
+  { id:'aporte_1', icon:'📈', nome:'Investidor', desc:'Registre seu primeiro aporte.',
+    check: () => T('investimentos_movimentos').some(m => m.tipo === 'aporte') },
+  { id:'patrimonio_100k', icon:'💰', nome:'Seis dígitos', desc:'Patrimônio acima de R$ 100 mil.',
+    check: () => patrimonioTotal() >= 100000 },
+  { id:'meta_batida', icon:'🏆', nome:'Alvo no centro', desc:'Bata uma meta.',
+    check: () => T('metas').some(m => m.concluida || metaProgresso(m).atingida) }
 ];
-
-function checkConquistas(trigger) {
-  const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
-  let changed = false;
-  CONQUISTAS_DEF.forEach(c => {
-    if (!desbloqueadas[c.id]) {
-      try { if (c.check()) { desbloqueadas[c.id] = dataHoje(); changed = true; toast('🏆 '+c.nome+' desbloqueada!', {ms:4000}); } } catch(_) {}
-    }
-  });
-  if (changed) localStorage.setItem('lcos_conquistas', JSON.stringify(desbloqueadas));
+function conquistasMapa() { const m = {}; for (const c of T('conquistas')) m[c.codigo] = c.desbloqueada_em || true; return m; }
+function checkConquistas(origem) {
+  // migra conquistas antigas guardadas só no navegador (versões anteriores)
+  try {
+    const old = JSON.parse(localStorage.getItem('lcos_conquistas') || 'null');
+    if (old) { for (const k of Object.keys(old)) if (!byId('conquistas', k)) dbUpsert('conquistas', { codigo:k, desbloqueada_em: old[k] || nowISO() });
+      localStorage.removeItem('lcos_conquistas'); }
+  } catch (_) {}
+  const tem = conquistasMapa();
+  const novas = [];
+  for (const c of CONQUISTAS_DEF) {
+    if (tem[c.id]) continue;
+    try { if (c.check()) { dbUpsert('conquistas', { codigo: c.id, desbloqueada_em: nowISO() }); novas.push(c); } } catch (_) {}
+  }
+  if (novas.length === 1) toast('🏆 Conquista desbloqueada: <b>' + esc(novas[0].nome) + '</b>!', { ms: 5000 });
+  else if (novas.length > 1) toast('🏆 ' + novas.length + ' conquistas desbloqueadas! Veja no Dashboard.', { ms: 5000 });
 }
 window.checkConquistas = checkConquistas;
-
+BootHooks.push(() => { if (FLAGS.onboarded) { try { checkConquistas('boot'); } catch (_) {} } });
 function conquistasResumoHTML() {
-  const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
-  const total = CONQUISTAS_DEF.length;
-  const ok = CONQUISTAS_DEF.filter(c=>desbloqueadas[c.id]).length;
-  return '<div class="row wrap" style="gap:6px;margin-bottom:6px">'
-    + CONQUISTAS_DEF.slice(0,8).map(c => {
-      const on = !!desbloqueadas[c.id];
-      return '<div title="'+esc(c.nome)+': '+esc(c.desc)+'" style="font-size:24px;opacity:'+(on?'1':'0.25')+'">'+c.icon+'</div>';
-    }).join('')
-    + '</div><div class="small muted">'+ok+' / '+total+' desbloqueadas</div>';
+  const tem = conquistasMapa();
+  const ok = CONQUISTAS_DEF.filter(c => tem[c.id]).length;
+  return '<div class="row wrap" style="gap:8px;margin-bottom:8px">'
+    + CONQUISTAS_DEF.map(c => '<span title="' + esc(c.nome) + ' — ' + esc(c.desc) + '" style="font-size:23px;' + (tem[c.id] ? '' : 'opacity:.22;filter:grayscale(1)') + '">' + c.icon + '</span>').join('')
+    + '</div><div class="small muted">' + ok + ' de ' + CONQUISTAS_DEF.length + ' desbloqueadas</div>';
 }
-
 reg('conquistas', {
-  icon:'🏆', label:'Conquistas', hidden: true,
+  titulo: 'Conquistas',
   render() {
-    const desbloqueadas = JSON.parse(localStorage.getItem('lcos_conquistas') || '{}');
-    checkConquistas('conquistas');
-    return '<div class="row" style="margin-bottom:16px"><div class="h1" style="flex:1">🏆 Conquistas</div>'
+    checkConquistas('tela');
+    const tem = conquistasMapa();
+    return '<div class="row" style="margin-bottom:12px"><div class="h1" style="flex:1">🏆 Conquistas</div>'
       + '<button class="btn small" data-act="nav" data-r="dashboard">← Dashboard</button></div>'
-      + '<div class="list">' + CONQUISTAS_DEF.map(c => {
-        const on = !!desbloqueadas[c.id];
-        return '<div class="item" style="opacity:'+(on?'1':'0.45')+'">'
-          + '<span style="font-size:28px">'+c.icon+'</span>'
-          + '<div class="grow"><div class="ttl">'+esc(c.nome)+(on?' <span class="chip mini ok">desbloqueada</span>':'')+'</div>'
-          + '<div class="sub">'+esc(c.desc)+(on?' · '+fmtDataCurta(desbloqueadas[c.id]):'')+'</div></div></div>';
-      }).join('') + '</div>';
+      + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+      + CONQUISTAS_DEF.map(c => {
+        const q = tem[c.id];
+        return '<div class="item" style="cursor:default;' + (q ? '' : 'opacity:.45') + '">'
+          + '<span style="font-size:26px;' + (q ? '' : 'filter:grayscale(1)') + '">' + c.icon + '</span>'
+          + '<div class="grow"><div class="ttl">' + esc(c.nome) + (q ? ' <span class="badge ok">✓</span>' : '') + '</div>'
+          + '<div class="sub">' + esc(c.desc) + (q && typeof q === 'string' ? ' · ' + fmtDataCurta(q.slice(0,10)) : '') + '</div></div></div>';
+      }).join('') + '</div></div>';
   }
+});
+
+/* lembrete na Hoje: entrar com o Google quando a sincronização estiver pausada */
+HojeExtras.alertas.push(() => {
+  if (!CFG.url || !CFG.key || usuarioAutenticado()) return '';
+  return '<div class="banner warn" data-act="auth-login" style="cursor:pointer">🔑 Sincronização pausada — toque para entrar com o Google e salvar tudo na nuvem →</div>';
 });
 
 /* ============ ETAPA 17: Retrospectiva Anual ============ */
 reg('retro', {
-  icon:'🌅', label:'Retrospectiva', hidden: true,
-  render() {
-    const hoje = dataHoje();
-    const anoAtual = parseInt(hoje.slice(0,4));
-    const anos = [...new Set([
-      ...T('tarefas').map(t=>t.criado_em&&t.criado_em.slice(0,4)).filter(Boolean),
-      ...T('treinos').map(t=>t.data&&t.data.slice(0,4)).filter(Boolean),
-      String(anoAtual)
-    ])].sort((a,b)=>b-a);
-    const ano = window._retroAno || String(anoAtual);
-    window._retroAno = ano;
+  titulo: 'Retrospectiva',
+  render(params) {
+    const anoAtual = anoDe(hoje());
+    const ano = Number(params[0]) || anoAtual;
+    const ini = ano + '-01-01', fim = ano + '-12-31';
+    const noAno = d => d && d >= ini && d <= fim;
 
-    const ini = ano+'-01-01', fim = ano+'-12-31';
-    const tarefasConcluidas = T('tarefas').filter(t=>t.concluida&&(t.concluido_em||'').slice(0,4)===ano).length;
-    const habitosDias = (() => {
-      const logs = T('habito_logs').filter(l=>l.data>=ini&&l.data<=fim);
-      return [...new Set(logs.map(l=>l.data))].length;
-    })();
-    const kmTotal = T('corridas').filter(c=>c.data>=ini&&c.data<=fim).reduce((s,c)=>s+(c.distancia_km||0),0);
-    const treinosTotal = T('treinos').filter(t=>t.data>=ini&&t.data<=fim).length;
-    const livrosConcluidos = T('livros').filter(l=>l.status==='concluido'&&(l.concluido_em||'').slice(0,4)===ano).length;
-    const palavrasTotal = T('escrita_logs').filter(l=>(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.palavras||0),0);
-    const revisoesSemana = T('revisoes').filter(r=>r.tipo==='semanal'&&(r.periodo_fim||'').slice(0,4)===ano).length;
-    const metasConcluidas = T('metas').filter(m=>(m.concluida_em||'').slice(0,4)===ano).length;
-    const receitaAno = T('lancamentos').filter(l=>l.tipo==='receita'&&(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.valor||0),0);
-    const despesaAno = T('lancamentos').filter(l=>l.tipo==='despesa'&&(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.valor||0),0);
-    const patrimonioFim = typeof patrimonioTotal!=='undefined' ? patrimonioTotal() : 0;
+    const tarefas = T('tarefas').filter(t => t.concluida && noAno((t.concluida_em||'').slice(0,10))).length;
+    const diasComHabito = new Set(T('habito_registros').filter(r => noAno(r.data) && Number(r.valor) > 0).map(r => r.data)).size;
+    const corridasAno = T('corridas').filter(c => noAno(c.data));
+    const km = sum(corridasAno.map(c => c.distancia_km));
+    const treinos = T('treino_sessoes').filter(s => noAno(s.data)).length;
+    const livros = T('livros').filter(l => l.status === 'concluido' && noAno(l.fim)).length;
+    const paginas = sum(T('leitura_registros').filter(r => noAno(r.data)).map(r => r.paginas));
+    const log = escritaLog();
+    const palavras = sum(Object.keys(log).filter(noAno).map(d => log[d]));
+    const focoMin = sum(T('blocos').filter(b => b.foco && b.inicio && noAno(dISO(new Date(b.inicio)))).map(b => b.tempo_real_min || 0));
+    const revisoes = T('revisoes').filter(r => r.tipo === 'semanal' && noAno(r.periodo_fim)).length;
+    const metasBatidas = T('metas').filter(m => (m.ano === ano || (m.prazo && anoDe(m.prazo) === ano)) && (m.concluida || metaProgresso(m).atingida)).length;
+    const lancsAno = T('lancamentos_financeiros').filter(l => l.pago && noAno(l.data));
+    const entradas = sum(lancsAno.filter(l => l.tipo === 'entrada').map(l => l.valor));
+    const saidas = sum(lancsAno.filter(l => l.tipo === 'saida').map(l => l.valor));
+    const aportes = sum(T('investimentos_movimentos').filter(m => m.tipo === 'aporte' && noAno(m.data)).map(m => m.valor));
+    const pat = patrimonioTotal();
 
-    const mesLbls = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
-    const kmPorMes = Array(12).fill(0);
-    T('corridas').filter(c=>c.data>=ini&&c.data<=fim).forEach(c=>{const m=parseInt(c.data.slice(5,7))-1;kmPorMes[m]+=(c.distancia_km||0);});
-    const kmChart = svgBarras(kmPorMes, mesLbls, {color:'#3EAF8B',h:72});
+    const kmMes = MESES_C.map((nome, i) => ({ x: nome, y: Math.round(sum(corridasAno.filter(c => Number(c.data.slice(5,7)) === i + 1).map(c => c.distancia_km)) * 10) / 10 }));
 
-    return '<div class="row" style="margin-bottom:12px"><div class="h1" style="flex:1">🌅 Retrospectiva '+ano+'</div>'
-      + '<select class="inp" style="width:100px" data-act="retro-ano">'
-      + anos.map(a=>'<option value="'+a+'"'+(a===ano?' selected':'')+'>'+a+'</option>').join('')+'</select></div>'
-      + '<div class="grid2">'
-      + statCard('✅','Tarefas concluídas',tarefasConcluidas,'tarefas')
-      + statCard('🔥','Dias com hábitos',habitosDias,'dias ativos')
-      + statCard('🏃','Distância total',fmtNum(kmTotal,1),'km rodados')
-      + statCard('🏋️','Treinos',treinosTotal,'sessões')
-      + statCard('📚','Livros concluídos',livrosConcluidos,'livros')
-      + statCard('✍️','Palavras escritas',fmtNum(palavrasTotal),'palavras')
-      + statCard('🧭','Revisões semanais',revisoesSemana,'revisões')
-      + statCard('🎯','Metas alcançadas',metasConcluidas,'metas')
+    return '<div class="row" style="margin-bottom:12px">'
+      + '<button class="btn small" data-act="nav" data-r="retro/' + (ano - 1) + '">←</button>'
+      + '<div class="h1" style="flex:1;text-align:center">🌅 Retrospectiva ' + ano + '</div>'
+      + (ano < anoAtual ? '<button class="btn small" data-act="nav" data-r="retro/' + (ano + 1) + '">→</button>' : '<span style="width:34px"></span>') + '</div>'
+      + (ano === anoAtual && hoje().slice(5,7) !== '12' ? '<div class="banner acc tiny" style="margin-bottom:10px">O ano ainda está rolando — estes números crescem até dezembro. 😉</div>' : '')
+      + '<div class="grid4" style="margin-bottom:14px">'
+      + kpiHTML('✅ tarefas concluídas', fmtNum(tarefas), '')
+      + kpiHTML('🔁 dias com hábitos', fmtNum(diasComHabito), 'de ' + (ano === anoAtual ? diffDias(ini, hoje()) + 1 : 365))
+      + kpiHTML('🏃 km corridos', fmtNum(km, 1), corridasAno.length + ' corridas')
+      + kpiHTML('🏋️ treinos', fmtNum(treinos), '')
+      + kpiHTML('📚 livros concluídos', fmtNum(livros), fmtNum(paginas) + ' páginas')
+      + kpiHTML('✍️ palavras escritas', fmtNum(palavras), '')
+      + kpiHTML('🎯 foco', fmtMin(focoMin), '')
+      + kpiHTML('🧭 revisões semanais', fmtNum(revisoes), metasBatidas ? metasBatidas + ' metas batidas' : '')
       + '</div>'
-      + '<div class="card" style="padding:12px 16px;margin-top:4px"><label class="field-lbl" style="display:block;margin-bottom:6px">Km por mês</label>'+kmChart+'</div>'
-      + '<div class="grid2" style="margin-top:4px">'
-      + statCard('💰','Receita',fmtBRL(receitaAno),'no ano')
-      + statCard('💳','Despesa',fmtBRL(despesaAno),'no ano')
-      + statCard('📈','Saldo do ano',fmtBRL(receitaAno-despesaAno),'resultado')
-      + statCard('🏦','Patrimônio atual',fmtBRL(patrimonioFim),'total')
+      + (km > 0 ? '<div class="card"><div class="h3" style="margin-bottom:6px">🏃 Km por mês</div>' + svgBarras(kmMes, { h:150, vals:false }) + '</div>' : '')
+      + '<div class="grid4" style="margin-bottom:14px">'
+      + kpiHTML('💵 entradas', fmtBRL(entradas), '')
+      + kpiHTML('💸 saídas', fmtBRL(saidas), '')
+      + kpiHTML('📈 investido', fmtBRL(aportes), 'fora do consumo')
+      + kpiHTML('🏦 patrimônio atual', fmtBRL(pat), '')
       + '</div>'
-      + '<div style="margin-top:16px;display:flex;gap:8px">'
-      + '<button class="btn primary" data-act="retro-compartilhar">📤 Exportar resumo</button>'
-      + '</div>';
+      + '<div class="row"><button class="btn primary" data-act="retro-compartilhar" data-ano="' + ano + '">📤 Compartilhar resumo</button></div>';
   }
 });
-act('retro-ano', el => { window._retroAno = el.value; render(); });
-act('retro-compartilhar', () => {
-  const ano = window._retroAno || dataHoje().slice(0,4);
-  const ini = ano+'-01-01', fim = ano+'-12-31';
-  const tarefas = T('tarefas').filter(t=>t.concluida&&(t.concluido_em||'').slice(0,4)===ano).length;
-  const km = T('corridas').filter(c=>c.data>=ini&&c.data<=fim).reduce((s,c)=>s+(c.distancia_km||0),0);
-  const treinos = T('treinos').filter(t=>t.data>=ini&&t.data<=fim).length;
-  const livros = T('livros').filter(l=>l.status==='concluido'&&(l.concluido_em||'').slice(0,4)===ano).length;
-  const palavras = T('escrita_logs').filter(l=>(l.data||'').slice(0,4)===ano).reduce((s,l)=>s+(l.palavras||0),0);
-  const texto = '🌅 Meu ano '+ano+' no Life OS\n\n'
-    + '✅ '+tarefas+' tarefas concluídas\n'
-    + '🏃 '+fmtNum(km,1)+' km rodados\n'
-    + '🏋️ '+treinos+' treinos\n'
-    + '📚 '+livros+' livros\n'
-    + '✍️ '+fmtNum(palavras)+' palavras escritas\n';
-  if (navigator.share) {
-    navigator.share({ title: 'Life OS '+ano, text: texto }).catch(()=>{});
-  } else {
-    navigator.clipboard.writeText(texto).then(()=>toast('📋 Resumo copiado!')).catch(()=>toast('Abra o console para ver o resumo'));
-    console.log(texto);
-  }
+act('retro-compartilhar', el => {
+  const ano = Number(el.dataset.ano) || anoDe(hoje());
+  const ini = ano + '-01-01', fim = ano + '-12-31';
+  const noAno = d => d && d >= ini && d <= fim;
+  const tarefas = T('tarefas').filter(t => t.concluida && noAno((t.concluida_em||'').slice(0,10))).length;
+  const km = sum(T('corridas').filter(c => noAno(c.data)).map(c => c.distancia_km));
+  const treinos = T('treino_sessoes').filter(s => noAno(s.data)).length;
+  const livros = T('livros').filter(l => l.status === 'concluido' && noAno(l.fim)).length;
+  const log = escritaLog();
+  const palavras = sum(Object.keys(log).filter(noAno).map(d => log[d]));
+  const texto = '🌅 Meu ' + ano + ' no Life OS\n\n'
+    + '✅ ' + fmtNum(tarefas) + ' tarefas concluídas\n'
+    + '🏃 ' + fmtNum(km, 1) + ' km corridos\n'
+    + '🏋️ ' + fmtNum(treinos) + ' treinos\n'
+    + '📚 ' + fmtNum(livros) + ' livros\n'
+    + '✍️ ' + fmtNum(palavras) + ' palavras escritas';
+  if (navigator.share) navigator.share({ title: 'Life OS ' + ano, text: texto }).catch(() => {});
+  else copiarTexto(texto, '📋 Resumo copiado — cole onde quiser!');
 });
-
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */

@@ -334,3 +334,8 @@ details.help summary{cursor:pointer;font-weight:700;font-size:13.5px}
 .auth-button{position:fixed;top:16px;right:16px;z-index:9999;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--elev);color:var(--txt);font-weight:700;cursor:pointer;box-shadow:var(--shadow)}
 .auth-button:hover{border-color:var(--acc);background:var(--acc-soft)}
 .auth-button[hidden]{display:none!important}
+.sync-dot.auth{background:#FFB454;animation:pulse 2s infinite}
+.gbtn{display:inline-flex;align-items:center;gap:10px;background:#fff;color:#1f1f1f;border:none;border-radius:10px;padding:11px 18px;font-weight:700;font-size:14.5px;cursor:pointer;font-family:inherit}
+.gbtn:active{transform:scale(.97)}
+.gbtn .gi{width:18px;height:18px;flex:none}
+.avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:var(--elev);flex:none}

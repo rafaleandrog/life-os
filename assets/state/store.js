@@ -14,7 +14,8 @@ const TABLES = {
   livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
   textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave'
 };
-const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data', etiquetas:'nome' };
+const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data',
+  etiquetas:'user_id,nome', dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
 
 /* ---- Estado local (offline-first, regra 12) ---- */
 const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags' };
