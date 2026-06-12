@@ -53,7 +53,7 @@ function syncDotHTML() {
 }
 function syncLabel() {
   if (!window.syncStatus) return 'modo local';
-  return {ok:'sincronizado', pend:'sincronizando…', err:'erro de sinc.', off:'modo local'}[syncStatus()];
+  return {ok:'sincronizado', pend:'sincronizando…', err:'erro de sinc.', auth:'aguardando login', off:'Supabase indisponível'}[syncStatus()];
 }
 act('nav', el => nav(el.dataset.r));
 act('menu-mais', () => {

@@ -18,12 +18,15 @@ const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'a
 
 /* ---- Estado local (offline-first, regra 12) ---- */
 const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags' };
+const appSupabaseConfig = () => window.LifeOSSupabase ? { url: window.LifeOSSupabase.url, key: window.LifeOSSupabase.anonKey } : {};
 function tabelasVazias(){ return Object.fromEntries(Object.keys(TABLES).map(t => [t, []])); }
 const S = { data: tabelasVazias(), queue: [], flushing: false, syncErr: null, lastPull: null };
 let CFG = {};
 let FLAGS = {};
 function loadLocal() {
   try { CFG = JSON.parse(localStorage.getItem(LSK.cfg) || '{}'); } catch(_) { CFG = {}; }
+  CFG = { ...CFG, ...appSupabaseConfig() };
+  if (CFG.url && CFG.key) saveCfg();
   try { FLAGS = JSON.parse(localStorage.getItem(LSK.flags) || '{}'); } catch(_) { FLAGS = {}; }
   try {
     const d = JSON.parse(localStorage.getItem(LSK.data) || 'null');

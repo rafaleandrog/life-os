@@ -22,6 +22,15 @@ function updateAuthSession(session) {
   AUTH_STATE.session = session || null;
   AUTH_STATE.user = session && session.user ? session.user : null;
   setAuthButtonVisible(!AUTH_STATE.user);
+  if (typeof window.atualizarSyncUI === 'function') window.atualizarSyncUI();
+  if (typeof window.LifeOSAfterAuthChange === 'function') window.LifeOSAfterAuthChange(AUTH_STATE);
+}
+
+function getOAuthRedirectUrl() {
+  const url = new URL('.', window.location.href);
+  url.hash = '';
+  url.search = '';
+  return url.href;
 }
 
 async function loginGoogle() {
@@ -35,7 +44,10 @@ async function loginGoogle() {
 
   const { error } = await client.auth.signInWithOAuth({
     provider: 'google',
-    options: { redirectTo: window.location.href.split('#')[0] }
+    options: {
+      redirectTo: getOAuthRedirectUrl(),
+      queryParams: { prompt: 'select_account' }
+    }
   });
   if (error) {
     AUTH_STATE.error = error.message;
@@ -96,5 +108,6 @@ window.LifeOSAuth = {
   initAuth,
   loginGoogle,
   logout,
-  restoreSession
+  restoreSession,
+  getOAuthRedirectUrl
 };

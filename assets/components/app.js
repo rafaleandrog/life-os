@@ -243,7 +243,16 @@ create table if not exists configuracoes (chave text primary key, valor jsonb);`
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
   const url = String(CFG.url || '').replace(/\/+$/, '') + '/rest/v1/' + caminho;
-  const headers = { apikey: CFG.key, Authorization: 'Bearer ' + CFG.key, ...(headersExtra || {}) };
+  let bearer = window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.session
+    ? window.LifeOSAuth.state.session.access_token
+    : null;
+  if (!bearer && window.supabaseClient && window.supabaseClient.auth) {
+    try {
+      const { data } = await window.supabaseClient.auth.getSession();
+      bearer = data && data.session ? data.session.access_token : null;
+    } catch (_) {}
+  }
+  const headers = { apikey: CFG.key, Authorization: 'Bearer ' + (bearer || CFG.key), ...(headersExtra || {}) };
   if (corpo != null) headers['Content-Type'] = 'application/json';
   let res;
   try {
@@ -255,7 +264,7 @@ async function sb(metodo, caminho, corpo, headersExtra) {
   }
   if (!res.ok) {
     let det = ''; try { const j = await res.json(); det = j.message || j.hint || j.error || ''; } catch(_) {}
-    if (res.status === 401 || res.status === 403) throw { tipo:'auth', status:res.status, msg:'Chave do Supabase inválida ou sem permissão. Confira a anon key em Config.' };
+    if (res.status === 401 || res.status === 403) throw { tipo:'auth', status:res.status, msg:'Sessão Google ausente, expirada ou sem permissão para acessar o Supabase.' };
     if (res.status === 404 || /does not exist|42P01/i.test(det)) throw { tipo:'tabela', status:res.status, msg:'Falta tabela no banco. Abra a Saúde do Sistema e use o botão "copiar SQL".', det };
     if (res.status >= 500) throw { tipo:'servidor', status:res.status, msg:'O Supabase respondeu com erro ('+res.status+'). Se persistir, o projeto pode estar pausado — veja a Saúde do Sistema.' };
     throw { tipo:'outro', status:res.status, msg:'Erro do banco ('+res.status+'). '+det };
@@ -267,7 +276,7 @@ async function sb(metodo, caminho, corpo, headersExtra) {
 
 /* ---- Fila offline (zero perda de registros) ---- */
 function enqueue(op, t, payload) {
-  if (!CFG.url) return; // modo local: nada a sincronizar
+  if (!CFG.url || !CFG.key) return; // sem Supabase configurado: nada a sincronizar
   if (op === 'up') {
     const pk = TABLES[t];
     const last = S.queue[S.queue.length - 1];
@@ -286,7 +295,7 @@ function enqueue(op, t, payload) {
 }
 const scheduleFlush = debounce(() => flush(), 900);
 async function flush() {
-  if (!CFG.url || S.flushing || !S.queue.length) { atualizarSyncUI(); return; }
+  if (!CFG.url || !CFG.key || !usuarioAutenticado() || S.flushing || !S.queue.length) { atualizarSyncUI(); return; }
   S.flushing = true; atualizarSyncUI();
   try {
     while (S.queue.length) {
@@ -317,7 +326,7 @@ async function pullTable(t) {
   return out;
 }
 async function pullAll(silencioso) {
-  if (!CFG.url) return false;
+  if (!CFG.url || !CFG.key || !usuarioAutenticado()) return false;
   await flush();
   if (S.queue.length) return false; // não sobrescrever com pendências locais
   const novo = {};
@@ -336,7 +345,8 @@ async function fullPush() { // conectar depois: envia tudo que existe localmente
   await flush();
 }
 function syncStatus() {
-  if (!CFG.url) return 'off';
+  if (!CFG.url || !CFG.key) return 'off';
+  if (window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.ready && !window.LifeOSAuth.state.user) return 'auth';
   if (S.syncErr) return 'err';
   if (S.flushing || S.queue.length) return 'pend';
   return 'ok';
@@ -346,7 +356,33 @@ function atualizarSyncUI() {
   $$('.sync-dot').forEach(d => d.className = 'sync-dot ' + st);
   const l = $('#synclabel'); if (l) l.textContent = syncLabel();
 }
-window.addEventListener('online', () => { toast('Internet de volta — sincronizando…', {icone:'🌐'}); flush(); });
+function usuarioAutenticado() {
+  return !!(window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.user);
+}
+async function sincronizarNuvemInicial(silencioso) {
+  if (!CFG.url || !CFG.key) { atualizarSyncUI(); return false; }
+  if (!usuarioAutenticado()) {
+    S.syncErr = null;
+    atualizarSyncUI();
+    return false;
+  }
+  await flush();
+  const ok = await pullAll(true);
+  if (ok && !T('areas').length) {
+    seedData();
+    await flush();
+  }
+  if (!silencioso) toast('Sincronizado ✓', { icone:'🔄' });
+  render();
+  return ok;
+}
+window.LifeOSAfterAuthChange = state => {
+  if (state && state.user) sincronizarNuvemInicial(true).catch(e => { S.syncErr = e.msg || String(e); atualizarSyncUI(); });
+};
+window.addEventListener('online', () => {
+  toast('Internet de volta — sincronizando…', {icone:'🌐'});
+  sincronizarNuvemInicial(true).catch(() => {});
+});
 
 /* ---- Helpers de formulário genérico (usados por todos os módulos) ---- */
 function fldHTML(f, v) {
@@ -481,12 +517,8 @@ function seedData() {
 
 /* ---- Onboarding (configuração única — seção 2.2) ---- */
 function instrucoesSupabaseHTML() {
-  return '<details class="help"><summary>Como criar o banco gratuito (uma única vez, ~3 min)</summary>'
-    + '<ol class="small" style="padding-left:18px;line-height:1.8">'
-    + '<li>Crie uma conta gratuita em <a href="https://supabase.com" target="_blank" rel="noopener">supabase.com</a> e clique em <b>New project</b> (não pede cartão).</li>'
-    + '<li>No projeto, abra o <b>SQL Editor</b>, cole o script (botão abaixo) e clique em <b>Run</b>.</li>'
-    + '<li>Em <b>Settings → API</b>, copie a <b>Project URL</b> e a chave <b>anon public</b>.</li>'
-    + '<li>Cole os dois valores aqui embaixo. Pronto — você nunca mais precisa abrir o Supabase.</li></ol>'
+  return '<details class="help"><summary>Supabase já está pronto</summary>'
+    + '<p class="small muted">A configuração do projeto fica embutida no app. Para sincronizar, basta entrar com Google; não é necessário colar URL, chave pública ou qualquer código.</p>'
     + '<button class="btn small" data-act="copiar-sql">📋 Copiar SQL de criação</button></details>';
 }
 function showOnboarding() {
@@ -496,25 +528,14 @@ function showOnboarding() {
   let passo = 0;
   const setPasso = p => { passo = p; draw(); };
   function draw() {
-    const dots = '<div class="steps-dots">'+[0,1,2].map(i => '<i class="'+(i===passo?'on':'')+'"></i>').join('')+'</div>';
+    const dots = '<div class="steps-dots">'+[0,1].map(i => '<i class="'+(i===passo?'on':'')+'"></i>').join('')+'</div>';
     if (passo === 0) {
       pg.innerHTML = '<div class="inner center">'
         + '<div style="font-size:54px">⚡</div><div class="h1" style="font-size:28px">Life OS</div>'
-        + '<p class="muted">Tarefas, hábitos, tempo, metas, treino, corrida, leitura, escrita e finanças — tudo em um lugar, 100% grátis, no seu controle.</p>'
+        + '<p class="muted">Tarefas, hábitos, tempo, metas, treino, corrida, leitura, escrita e finanças — tudo em um lugar, com Supabase já configurado.</p>'
         + '<div class="col" style="margin-top:22px">'
-        + '<button class="btn primary big" data-ob="sup">🔗 Conectar ao Supabase <span class="small" style="font-weight:400">(sincroniza celular ↔ PC)</span></button>'
-        + '<button class="btn big" data-ob="local">📱 Usar só neste dispositivo</button>'
-        + '<span class="tiny muted">Dá para conectar o Supabase depois, em Config — sem perder nada.</span></div>'+dots+'</div>';
-    } else if (passo === 1) {
-      pg.innerHTML = '<div class="inner">'
-        + '<div class="h1">Conectar ao Supabase</div>'
-        + '<p class="muted small">Esta é a única vez que você toca no Supabase. Depois, tudo acontece aqui no app.</p>'
-        + instrucoesSupabaseHTML()
-        + '<div class="field"><label>Project URL</label><input class="input" id="ob-url" placeholder="https://xxxx.supabase.co" value="'+esc(CFG.url||'')+'"></div>'
-        + '<div class="field"><label>anon key (public)</label><input class="input" id="ob-key" placeholder="eyJhbGciOi..." value="'+esc(CFG.key||'')+'"></div>'
-        + '<div id="ob-status"></div>'
-        + '<div class="row" style="margin-top:10px"><button class="btn ghost" data-ob="back">← Voltar</button><span class="sp"></span>'
-        + '<button class="btn primary" data-ob="validar">Validar e conectar</button></div>'+dots+'</div>';
+        + '<button class="btn primary big" data-ob="start">Começar agora</button>'
+        + '<span class="tiny muted">Entre com Google quando quiser sincronizar seus dados entre dispositivos.</span></div>'+dots+'</div>';
     } else {
       pg.innerHTML = '<div class="inner center">'
         + '<div style="font-size:48px">🔒</div><div class="h1">PIN local (opcional)</div>'
@@ -527,9 +548,7 @@ function showOnboarding() {
   pg.addEventListener('click', async e => {
     const b = e.target.closest('[data-ob]'); if (!b) return;
     const acao = b.dataset.ob;
-    if (acao === 'sup') setPasso(1);
-    if (acao === 'back') setPasso(0);
-    if (acao === 'local') { seedData(); finalizar(); }
+    if (acao === 'start') setPasso(1);
     if (acao === 'pular') finalizar();
     if (acao === 'pin') {
       const p = pg.querySelector('#ob-pin').value.trim();
@@ -537,37 +556,12 @@ function showOnboarding() {
       FLAGS.pinHash = await hashPin(p); FLAGS.pinLen = p.length; saveFlags();
       finalizar();
     }
-    if (acao === 'validar') {
-      const url = pg.querySelector('#ob-url').value.trim().replace(/\/+$/,'');
-      const key = pg.querySelector('#ob-key').value.trim();
-      const st = pg.querySelector('#ob-status');
-      if (!/^https:\/\/.+\.supabase\.(co|in)/.test(url) || key.length < 20) {
-        st.innerHTML = '<div class="banner err">Confira a URL (https://xxxx.supabase.co) e a anon key.</div>'; return;
-      }
-      st.innerHTML = '<div class="banner acc">Verificando conexão e tabelas…</div>';
-      CFG = { url, key }; saveCfg();
-      const r = await verificarTabelas();
-      if (r.erro) { st.innerHTML = '<div class="banner err">'+esc(r.erro)+'</div>'; return; }
-      if (r.faltando.length) {
-        st.innerHTML = '<div class="banner warn">Conectou! Mas faltam '+r.faltando.length+' tabelas: <b>'+r.faltando.slice(0,4).join(', ')+(r.faltando.length>4?'…':'')+'</b></div>'
-          + '<p class="small muted">Abra o <b>SQL Editor</b> do Supabase, cole o script e clique em Run. Depois volte aqui.</p>'
-          + '<div class="row"><button class="btn" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn primary" data-ob="validar">Verificar de novo</button></div>';
-        return;
-      }
-      st.innerHTML = '<div class="banner ok">✓ Conectado! '+r.ok+' tabelas prontas. Carregando seus dados…</div>';
-      try {
-        await pullAll(true);
-        if (!T('areas').length) { seedData(); await flush(); }
-      } catch (e2) { st.innerHTML = '<div class="banner err">'+esc(e2.msg||e2)+'</div>'; return; }
-      setPasso(2);
-    }
   });
   function finalizar() {
     FLAGS.onboarded = true; saveFlags();
-    if (!T('areas').length) seedData();
     pg.remove();
     render();
-    toast('Bem-vindo ao Life OS! 🎉 Toque em ➕ para registrar qualquer coisa.', {ms:5200});
+    toast('Bem-vindo ao Life OS! 🎉 Entre com Google para sincronizar.', {ms:5200});
   }
   draw();
 }
@@ -634,12 +628,14 @@ async function rodarSaude() {
   const linha = (ok, titulo, det, extra) => '<div class="item" style="cursor:default"><span style="font-size:17px">'+(ok==='ok'?'✅':ok==='warn'?'⚠️':'❌')+'</span>'
     + '<div class="grow"><div class="ttl">'+titulo+'</div><div class="sub">'+det+'</div>'+(extra||'')+'</div></div>';
   let html = '';
-  if (!CFG.url) {
-    html += linha('warn', 'Modo local (sem sincronização)', 'O app funciona normalmente neste dispositivo. Para sincronizar celular ↔ PC, conecte um projeto Supabase gratuito.',
-      '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="cfg-conectar">🔗 Conectar Supabase</button></div>');
+  if (!CFG.url || !CFG.key) {
+    html += linha('err', 'Supabase não inicializado', 'A configuração embutida do app não foi carregada. Recarregue a página limpando o cache do navegador.');
     html += linha('ok', 'Dados locais', T('tarefas').length + ' tarefas, ' + T('habito_registros').length + ' registros de hábito salvos neste dispositivo.');
     out.innerHTML = '<div class="card pad0"><div class="list">'+html+'</div></div>';
     return;
+  }
+  if (window.LifeOSAuth && window.LifeOSAuth.state.ready && !usuarioAutenticado()) {
+    html += linha('warn', 'Login Google pendente', 'Entre com Google para liberar sincronização e restaurar sua sessão Supabase.');
   }
   html += linha(navigator.onLine ? 'ok' : 'warn', 'Internet', navigator.onLine ? 'Conectado.' : 'Offline — registros ficam na fila e sincronizam quando voltar.');
   out.innerHTML = '<div class="card pad0"><div class="list">'+html+linha('warn','Conexão com o Supabase','Verificando…')+'</div></div>';
@@ -650,7 +646,7 @@ async function rodarSaude() {
     html += linha('ok', 'Conexão com o Supabase', 'Projeto respondendo normalmente. URL: ' + esc(CFG.url.replace(/^https:\/\//,'').slice(0, 30)) + '…');
   } catch (e) {
     if (e.tipo === 'tabela') { conexaoOk = true; html += linha('ok', 'Conexão com o Supabase', 'Projeto responde, mas faltam tabelas (veja abaixo).'); }
-    else if (e.tipo === 'auth') html += linha('err', 'Chave inválida', esc(e.msg), '<div class="row" style="margin-top:8px"><button class="btn small" data-act="cfg-conectar">Corrigir URL/chave</button></div>');
+    else if (e.tipo === 'auth') html += linha('warn', 'Login Google necessário', esc(e.msg), '<div class="row" style="margin-top:8px"><button class="btn small primary" id="saude-login-google" data-act="login-google">Entrar com Google</button></div>');
     else html += linha('err', 'Projeto não responde — possivelmente PAUSADO por inatividade',
       'O plano gratuito pausa após 7 dias sem uso. <b>Seus dados estão preservados.</b> Restaurar leva 1 clique:',
       '<ol class="small muted" style="padding-left:18px;margin:6px 0"><li>Abra <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">supabase.com/dashboard</a></li><li>Entre no seu projeto</li><li>Clique em <b>Restore project</b> e aguarde ~2 min</li></ol>'
@@ -676,21 +672,27 @@ async function rodarSaude() {
   html += linha(!ue || dias > 30 ? 'warn' : 'ok', 'Backup', ue ? 'Último export: ' + fmtData(ue.slice(0,10)) + (dias > 30 ? ' — recomendado exportar 1×/mês.' : '.') : 'Nenhum backup ainda — exporte 1×/mês em Config → Dados.');
   out.innerHTML = '<div class="card pad0"><div class="list">'+html+'</div></div>';
 }
-act('sync-agora', async () => { await flush(); if (!S.queue.length) { toast('Tudo sincronizado ✓', {icone:'✅'}); } else { toast(S.syncErr || 'Ainda há pendências.', {icone:'⚠️'}); } rodarSaude(); });
+act('login-google', () => { if (window.LifeOSAuth) window.LifeOSAuth.loginGoogle(); });
+act('sync-agora', async () => {
+  await sincronizarNuvemInicial(false);
+  if (!usuarioAutenticado()) toast('Entre com Google para sincronizar.', {icone:'🔐'});
+  else if (!S.queue.length) toast('Tudo sincronizado ✓', {icone:'✅'});
+  else toast(S.syncErr || 'Ainda há pendências.', {icone:'⚠️'});
+  rodarSaude();
+});
 
 /* ---- CONFIG ---- */
 reg('config', {
   titulo: 'Config',
   render: () => {
     const st = syncStatus();
-    const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● Erro: '+esc(S.syncErr||'')+'</span>', off:'<span class="muted">● Modo local (sem nuvem)</span>'}[st];
+    const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● Erro: '+esc(S.syncErr||'')+'</span>', auth:'<span class="warn">● Aguardando login Google</span>', off:'<span class="muted">● Supabase indisponível</span>'}[st];
     return '<div class="h1">⚙️ Config</div>'
     + '<div class="card"><div class="card-h"><div class="h2">☁️ Supabase (sincronização)</div></div>'
       + '<p class="small" style="margin:0 0 10px">'+stTxt+(FLAGS.lastSync?' <span class="muted">· último envio '+esc(FLAGS.lastSync.slice(11,16))+'</span>':'')+'</p>'
-      + (CFG.url ? '<p class="small muted" style="margin:0 0 10px">Projeto: <b>'+esc(CFG.url.replace(/^https:\/\//,'').split('.')[0])+'</b></p>' : '<p class="small muted" style="margin:0 0 10px">Conecte um projeto gratuito para sincronizar entre dispositivos. Seus dados locais serão enviados — nada se perde.</p>')
+      + '<p class="small muted" style="margin:0 0 10px">Projeto Supabase já configurado: <b>'+esc((CFG.url||'').replace(/^https:\/\//,'').split('.')[0]||'Life OS')+'</b>. Não é necessário colar URL nem chave pública.</p>'
       + '<div class="row wrap">'
       + '<button class="btn primary" data-act="nav" data-r="saude">🩺 Saúde do Sistema</button>'
-      + '<button class="btn" data-act="cfg-conectar">'+(CFG.url?'✏️ Editar conexão':'🔗 Conectar Supabase')+'</button>'
       + (CFG.url ? '<button class="btn" data-act="cfg-pull">⬇️ Recarregar da nuvem</button><button class="btn" data-act="sync-agora">⬆️ Sincronizar agora</button>' : '')
       + '<button class="btn ghost" data-act="copiar-sql">📋 Copiar SQL</button></div></div>'
     + '<div class="card"><div class="card-h"><div class="h2">🎛️ Preferências</div></div><div id="cfg-prefs">'
@@ -738,37 +740,13 @@ act('cfg-prefs-save', () => {
 });
 act('cfg-conectar', () => {
   closeModal();
-  modal('<div class="bx-h"><div class="h2">🔗 Conectar ao Supabase</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-    + instrucoesSupabaseHTML()
-    + '<div class="field"><label>Project URL</label><input class="input" id="cx-url" placeholder="https://xxxx.supabase.co" value="'+esc(CFG.url||'')+'"></div>'
-    + '<div class="field"><label>anon key</label><input class="input" id="cx-key" value="'+esc(CFG.key||'')+'"></div>'
-    + '<div id="cx-status"></div>'
-    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="cx-validar">Validar e conectar</button></div>');
-});
-act('cx-validar', async () => {
-  const url = $('#cx-url').value.trim().replace(/\/+$/,''), key = $('#cx-key').value.trim();
-  const st = $('#cx-status');
-  if (!/^https:\/\/.+\.supabase\.(co|in)/.test(url) || key.length < 20) { st.innerHTML = '<div class="banner err">Confira a URL e a anon key.</div>'; return; }
-  st.innerHTML = '<div class="banner acc">Verificando…</div>';
-  const temLocal = T('areas').length > 0;
-  CFG = { url, key }; saveCfg();
-  const r = await verificarTabelas();
-  if (r.erro) { st.innerHTML = '<div class="banner err">'+esc(r.erro)+'</div>'; return; }
-  if (r.faltando.length) {
-    st.innerHTML = '<div class="banner warn">Faltam tabelas: <b>'+r.faltando.slice(0,5).join(', ')+(r.faltando.length>5?'…':'')+'</b></div>'
-      + '<div class="row"><button class="btn small" data-act="copiar-sql">📋 Copiar SQL</button><button class="btn small primary" data-act="cx-validar">Verificar de novo</button></div>';
-    return;
-  }
-  st.innerHTML = '<div class="banner ok">✓ Conectado! Enviando dados locais e sincronizando…</div>';
-  try {
-    if (temLocal) await fullPush();
-    await pullAll(true);
-    if (!T('areas').length) { seedData(); await flush(); }
-  } catch (e) { st.innerHTML = '<div class="banner err">'+esc(e.msg||e)+'</div>'; return; }
-  closeModal(); render();
-  toast('Supabase conectado — sincronização ativa ✓', {icone:'☁️'});
+  modal('<div class="bx-h"><div class="h2">☁️ Supabase já configurado</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="banner ok">As credenciais públicas do projeto já estão embutidas no app. Você não precisa informar nenhum código.</div>'
+    + '<p class="small muted">Para acessar seus dados, use o botão <b>Entrar com Google</b>. A sincronização começa automaticamente após a sessão ser restaurada.</p>'
+    + '<div class="bx-foot"><button class="btn primary" data-act="m-close">Entendi</button></div>');
 });
 act('cfg-pull', () => confirmBox('Recarregar tudo da nuvem? Alterações locais já sincronizadas são mantidas; pendências na fila são preservadas.', async () => {
+  if (!usuarioAutenticado()) { toast('Entre com Google para recarregar da nuvem.', {icone:'🔐'}); return; }
   try { const ok = await pullAll(); if (ok) render(); else toast('Há pendências na fila — envie antes (Saúde do Sistema).', {icone:'⚠️'}); }
   catch (e) { toast(e.msg || String(e), {icone:'❌'}); }
 }));
@@ -850,12 +828,15 @@ act('apagar-local', () => confirmBox('Apagar TODOS os dados locais deste disposi
 loadLocal();
 BootHooks.push(() => {
   showLock();
-  if (!FLAGS.onboarded) { showOnboarding(); return; }
-  if (CFG.url) flush().then(() => pullAll(true)).then(ok => { if (ok) render(); }).catch(()=>{});
-  setInterval(() => flush(), 45000);
+  if (!FLAGS.onboarded) {
+    FLAGS.onboarded = true;
+    saveFlags();
+  }
+  sincronizarNuvemInicial(true).catch(e => { S.syncErr = e.msg || String(e); atualizarSyncUI(); });
+  setInterval(() => sincronizarNuvemInicial(true).catch(() => {}), 45000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && CFG.url && (!S.lastPull || Date.now() - new Date(S.lastPull).getTime() > 10*60*1000)) {
-      pullAll(true).then(ok => { if (ok) render(); }).catch(()=>{});
+    if (!document.hidden && (!S.lastPull || Date.now() - new Date(S.lastPull).getTime() > 10*60*1000)) {
+      sincronizarNuvemInicial(true).catch(() => {});
     }
   });
 });
@@ -4277,12 +4258,15 @@ act('retro-compartilhar', () => {
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
+function runBootHooks() {
+  BootHooks.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
+}
 function boot() {
   render();
-  BootHooks.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
-  if (window.LifeOSAuth && typeof window.LifeOSAuth.initAuth === 'function') {
-    window.LifeOSAuth.initAuth().catch(e => console.error('Falha ao inicializar autenticação:', e));
-  }
+  const authReady = window.LifeOSAuth && typeof window.LifeOSAuth.initAuth === 'function'
+    ? window.LifeOSAuth.initAuth().catch(e => console.error('Falha ao inicializar autenticação:', e))
+    : Promise.resolve();
+  authReady.finally(runBootHooks);
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

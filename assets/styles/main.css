@@ -306,7 +306,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 .banner .x{margin-left:auto;cursor:pointer;opacity:.7}
 .sync-dot{width:9px;height:9px;border-radius:50%;flex:none}
 .sync-dot.ok{background:var(--ok)} .sync-dot.pend{background:var(--warn);animation:pulse 1.4s infinite}
-.sync-dot.err{background:var(--err)} .sync-dot.off{background:var(--txt2)}
+.sync-dot.err{background:var(--err)} .sync-dot.auth{background:var(--warn)} .sync-dot.off{background:var(--txt2)}
 @keyframes pulse{50%{opacity:.35}}
 .fire{animation:firewig 1s ease-in-out infinite alternate;display:inline-block}
 @keyframes firewig{from{transform:scale(1)}to{transform:scale(1.18)}}
