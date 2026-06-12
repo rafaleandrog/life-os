@@ -3586,6 +3586,253 @@ function insightsTabHTML() {
 act('ins-filtro', el => { window._insFiltro = el.dataset.v; render(); });
 act('ins-arq', () => { window._insArq = !window._insArq; render(); });
 act('ins-busca', debounce(el => { window._insBusca = el.value; const r = rotaAtual(); if (r.nome==='leitura') { $('#main .fadein').innerHTML = Views.leitura.render(r.params); } }, 300));
+/* ════════════════ ETAPA 10 — ESCRITA (editor, autosave, modo ⇄, captura, streak) ════════════════ */
+addCSS('.ed-wrap{max-width:760px;margin:0 auto}.ed-ta{width:100%;min-height:58vh;background:var(--bg);border:1px solid var(--border);border-radius:12px;'
+ + 'padding:22px;color:var(--txt);font-size:16px;line-height:1.75;outline:none;resize:vertical}'
+ + '.ed-ta:focus{border-color:var(--acc)}.ed-ta.serif{font-family:var(--serif);font-size:17.5px}'
+ + '.ed-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}'
+ + '@media(max-width:899px){.ed-split{grid-template-columns:1fr}.ed-pane-leitura{order:-1}}'
+ + '.ed-foco{position:fixed;inset:0;background:var(--bg);z-index:75;overflow:auto;padding:26px 16px}'
+ + '.cap-bar{position:sticky;top:0;z-index:4;display:none;gap:8px;background:var(--elev);border:1px solid var(--acc);border-radius:10px;padding:7px 10px;margin-bottom:8px}');
+
+const STATUS_TEXTO = [['rascunho','📝 rascunho'],['em_revisao','🔍 em revisão'],['concluido','✅ concluído']];
+function escritaLog() { return getCfg('escrita_log', {}) || {}; }
+function registrarEscritaLog(delta) {
+  if (!(delta > 0)) return;
+  const log = { ...escritaLog() };
+  log[hoje()] = (log[hoje()] || 0) + delta;
+  setCfg('escrita_log', log);
+  if (window.checkConquistas) checkConquistas('escrita');
+}
+function streakEscritor() {
+  const log = escritaLog();
+  let d = (log[hoje()] || 0) > 0 ? hoje() : addDias(hoje(), -1), n = 0;
+  while ((log[d] || 0) > 0) { n++; d = addDias(d, -1); }
+  return n;
+}
+function palavrasSemana(ini) { const log = escritaLog(); let tot = 0; for (let i = 0; i < 7; i++) tot += log[addDias(ini, i)] || 0; return tot; }
+
+/* ---- página ESCRITA (lista) ---- */
+reg('escrita', {
+  titulo: 'Escrita',
+  render: (params) => {
+    if (params[0] === 'editor') return editorHTML(params[1]);
+    const ts = ordenar(T('textos'), t => t.atualizado_em || t.criado_em || '', true);
+    const stk = streakEscritor();
+    const semanas = [];
+    for (let i = 7; i >= 0; i--) { const s = addDias(inicioSemana(hoje()), -7*i); semanas.push({ x: fmtDataCurta(s), y: palavrasSemana(s) }); }
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">✍️ Escrita</div>'
+      + '<button class="btn primary" data-act="texto-novo">+ Novo texto</button></div>'
+      + '<div class="grid3">'
+      + '<div class="kpi"><div class="l">🔥 streak do escritor</div><div class="v">'+stk+' dia'+(stk===1?'':'s')+'</div></div>'
+      + '<div class="kpi"><div class="l">palavras esta semana</div><div class="v">'+fmtNum(palavrasSemana(inicioSemana(hoje())))+'</div></div>'
+      + '<div class="kpi"><div class="l">textos</div><div class="v">'+ts.length+'</div></div></div>'
+      + '<div class="card"><div class="h2">📈 Palavras por semana</div>'+svgBarras(semanas, { fmt: v => fmtNum(v) })+'</div>'
+      + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+      + (ts.map(t => '<div class="item" data-act="texto-abrir" data-id="'+t.id+'"><span>📄</span><div class="grow">'
+        + '<div class="ttl">'+esc(t.titulo)+'</div><div class="sub">'+(STATUS_TEXTO.find(s=>s[0]===t.status)||['',t.status])[1]
+        + ' · '+fmtNum(t.palavras||0)+' palavras · '+fmtData((t.atualizado_em||t.criado_em||'').slice(0,10))
+        + ' '+(t.tags||[]).map(tg => '#'+esc(tg)).join(' ')+'</div></div></div>').join('')
+      || '<div class="empty"><span class="em">✍️</span>Comece um texto — o editor salva sozinho a cada pausa.</div>') + '</div></div>';
+    return html;
+  }
+});
+act('texto-novo', () => { const t = dbUpsert('textos', { titulo:'Sem título', conteudo:'', status:'rascunho', tags:[], palavras:0, atualizado_em: nowISO() }); nav('escrita/editor/'+t.id); });
+act('texto-abrir', el => nav('escrita/editor/'+el.dataset.id));
+
+/* ---- editor ---- */
+function editorHTML(id) {
+  const t = byId('textos', id);
+  if (!t) return '<div class="empty">Texto não encontrado.</div>';
+  window._edPalavrasAntes = t.palavras || 0;
+  const serif = getCfg('editor_serif', false);
+  const leitura = window._edLeitura;
+  const edPane = '<div class="ed-pane-editor">'
+    + '<div class="row wrap" style="margin-bottom:10px">'
+    + '<input class="input" id="ed-titulo" data-inp="ed-mudou" value="'+esc(t.titulo)+'" style="flex:1;min-width:160px;font-weight:700;font-size:16px">'
+    + '<select class="select" id="ed-status" data-chg="ed-mudou" style="width:auto">'+STATUS_TEXTO.map(([v,l]) => '<option value="'+v+'"'+(v===t.status?' selected':'')+'>'+l+'</option>').join('')+'</select>'
+    + '<select class="select" id="ed-areasel" data-chg="ed-mudou" style="width:auto">'+optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(t.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('')+'</select>'
+    + '</div>'
+    + '<div class="row wrap" style="margin-bottom:10px">'
+    + '<input class="input" id="ed-tags" data-inp="ed-mudou" value="'+esc((t.tags||[]).join(', '))+'" placeholder="tags, por, vírgula" style="flex:1;min-width:120px">'
+    + ['**','*','## ','> ','- ','[]('].map((mk,i) => '<button class="btn small icon" data-act="ed-md" data-mk="'+esc(mk)+'" title="markdown">'+['B','I','H','❝','•','🔗'][i]+'</button>').join('')
+    + '</div>'
+    + (window._edPreview
+      ? '<div class="prose'+(serif?' serif':'')+'" style="border:1px solid var(--border);border-radius:12px;padding:22px;min-height:40vh" id="ed-preview">'+mdRender(t.conteudo||'')+'</div>'
+      : '<textarea class="ed-ta'+(serif?' serif':'')+'" id="ed-area" data-inp="ed-input" placeholder="Escreva…  (markdown: ## título, **negrito**, > citação)">'+esc(t.conteudo||'')+'</textarea>')
+    + '</div>';
+  const leituraPane = leitura ? '<div class="ed-pane-leitura card" style="position:sticky;top:14px;max-height:84vh;overflow:auto">'+painelLeituraHTML()+'</div>' : '';
+  return '<div class="row wrap" style="margin-bottom:12px">'
+    + '<button class="btn small" data-act="nav" data-r="escrita">← Textos</button>'
+    + '<span class="badge" id="ed-count">'+fmtNum(t.palavras||0)+' palavras</span>'
+    + '<span class="tiny ok" id="ed-status-save">salvo ✓</span><span class="sp"></span>'
+    + '<button class="btn small'+(window._edPreview?' primary':'')+'" data-act="ed-preview">👁 '+(window._edPreview?'Editar':'Preview')+'</button>'
+    + '<button class="btn small'+(leitura?' primary':'')+'" data-act="ed-leitura">⇄ Leitura</button>'
+    + '<button class="btn small" data-act="ed-foco">🎯 Foco</button>'
+    + '<button class="btn small danger icon" data-act="texto-del" data-id="'+t.id+'">🗑</button></div>'
+    + (leitura ? '<div class="ed-split">'+leituraPane+edPane+'</div>' : '<div class="ed-wrap">'+edPane+'</div>');
+}
+let _edSaveTimer = null;
+function edTextoAtual() { const r = rotaAtual(); return r.nome === 'escrita' && r.params[0] === 'editor' ? byId('textos', r.params[1]) : null; }
+act('ed-input', () => {
+  const ta = $('#ed-area'); if (!ta) return;
+  $('#ed-count').textContent = fmtNum(contarPalavras(ta.value)) + ' palavras';
+  $('#ed-status-save').textContent = 'digitando…'; $('#ed-status-save').className = 'tiny muted';
+  clearTimeout(_edSaveTimer);
+  _edSaveTimer = setTimeout(edSalvar, 1500); // autosave debounce ~1,5s (regra 9)
+});
+act('ed-mudou', () => { clearTimeout(_edSaveTimer); _edSaveTimer = setTimeout(edSalvar, 800); });
+function edSalvar() {
+  const t = edTextoAtual(); if (!t) return;
+  const ta = $('#ed-area');
+  const conteudo = ta ? ta.value : t.conteudo;
+  const palavras = contarPalavras(conteudo);
+  const delta = palavras - (window._edPalavrasAntes || 0);
+  if (delta > 0) registrarEscritaLog(delta);
+  window._edPalavrasAntes = palavras;
+  dbPatch('textos', t.id, {
+    titulo: ($('#ed-titulo')||{value:t.titulo}).value.trim() || 'Sem título',
+    status: ($('#ed-status')||{value:t.status}).value,
+    area_id: $('#ed-areasel') ? ($('#ed-areasel').value || null) : t.area_id,
+    tags: (($('#ed-tags')||{value:''}).value || '').split(',').map(s => s.trim()).filter(Boolean),
+    conteudo, palavras, atualizado_em: nowISO()
+  });
+  const st = $('#ed-status-save'); if (st) { st.textContent = 'salvo ✓'; st.className = 'tiny ok'; }
+}
+act('ed-md', el => {
+  const ta = $('#ed-area'); if (!ta) { toast('Saia do preview para editar.'); return; }
+  const mk = el.dataset.mk, s = ta.selectionStart, e = ta.selectionEnd, sel = ta.value.slice(s, e);
+  let ins;
+  if (mk === '**' || mk === '*') ins = mk + (sel || 'texto') + mk;
+  else if (mk === '[](') ins = '[' + (sel || 'link') + '](url)';
+  else ins = mk + (sel || '');
+  ta.value = ta.value.slice(0, s) + ins + ta.value.slice(e);
+  ta.focus(); ta.selectionStart = ta.selectionEnd = s + ins.length;
+  Actions['ed-input']();
+});
+act('ed-preview', () => { edSalvar(); window._edPreview = !window._edPreview; render(); });
+act('ed-leitura', () => { edSalvar(); window._edLeitura = !window._edLeitura; render(); });
+act('texto-del', el => {
+  const t = byId('textos', el.dataset.id);
+  confirmBox('Excluir o texto "'+esc(t.titulo)+'"?', () => {
+    const bkp = {...t}; dbDelete('textos', t.id); nav('escrita');
+    toast('Texto excluído.', {undo: () => { dbUpsert('textos', bkp); render(); }});
+  }, {perigo:1, sim:'Excluir'});
+});
+/* modo foco do editor */
+act('ed-foco', () => {
+  const t = edTextoAtual(); if (!t) return;
+  edSalvar();
+  const f = document.createElement('div');
+  f.className = 'ed-foco'; f.id = 'edfoco';
+  f.innerHTML = '<div class="ed-wrap"><div class="row" style="margin-bottom:12px"><span class="muted small">🎯 modo foco — só você e o texto</span><span class="sp"></span>'
+    + '<span class="badge" id="ed-count">'+fmtNum(t.palavras||0)+' palavras</span><span class="tiny ok" id="ed-status-save">salvo ✓</span>'
+    + '<button class="btn small" data-act="ed-foco-sair">Sair</button></div>'
+    + '<textarea class="ed-ta'+(getCfg('editor_serif',false)?' serif':'')+'" id="ed-area" data-inp="ed-input" style="min-height:80vh">'+esc(t.conteudo||'')+'</textarea></div>';
+  document.body.appendChild(f);
+  const ta = f.querySelector('#ed-area'); ta.focus(); ta.selectionStart = ta.value.length;
+});
+act('ed-foco-sair', () => { edSalvar(); const f = $('#edfoco'); if (f) f.remove(); render(); });
+
+/* ---- painel de leitura do editor (URL / embed / colar / biblioteca / insights) ---- */
+function painelLeituraHTML() {
+  const fonte = window._edFonte || { tipo: 'biblioteca' };
+  const tabs = [['biblioteca','📑'],['url','🌐'],['colar','📋'],['insights','💡']];
+  let corpo = '';
+  if (fonte.tipo === 'biblioteca') {
+    if (fonte.artigo_id) {
+      const a = byId('artigos', fonte.artigo_id);
+      corpo = a ? '<div class="row" style="margin-bottom:8px"><button class="btn small" data-act="ed-lt-voltar">←</button><b class="small" style="flex:1">'+esc(a.titulo)+'</b></div>'
+        + (a.conteudo_cache
+          ? '<div class="prose" style="font-size:14px" data-leitura-pane data-ref-artigo="'+a.id+'">'+mdRender(a.conteudo_cache)+'</div>'
+          : '<div class="banner warn small">Sem texto salvo. '+(a.url?'<button class="btn small" data-act="ed-lt-extrair" data-id="'+a.id+'">✨ Extrair agora</button>':'')+'</div>') : 'artigo sumiu';
+    } else {
+      corpo = '<div class="list">' + (ordenar(T('artigos'), a => a.criado_em||'', true).map(a =>
+        '<div class="item" data-act="ed-lt-artigo" data-id="'+a.id+'"><span>📰</span><div class="grow"><div class="ttl small">'+esc(a.titulo)+'</div>'
+        + '<div class="sub">'+(a.conteudo_cache?'<span class="ok">offline ✓</span>':'sem cache')+'</div></div></div>').join('')
+        || '<div class="empty small">nenhum artigo na biblioteca</div>') + '</div>';
+    }
+  } else if (fonte.tipo === 'url') {
+    corpo = '<form class="row" data-sub="ed-lt-url" style="margin-bottom:8px"><input class="input" id="ed-lt-url-inp" placeholder="https://…" value="'+esc(fonte.url||'')+'"><button class="btn small primary" type="submit">Ler</button></form>'
+      + (fonte.url ? '<div class="row wrap" style="margin-bottom:8px"><button class="btn small" data-act="ed-lt-url-extrair">✨ Extrair texto</button><button class="btn small" data-act="ed-lt-url-embed">🌐 Embed</button></div>' : '')
+      + '<div id="ed-lt-url-out">'+(fonte.html||'')+'</div>';
+  } else if (fonte.tipo === 'colar') {
+    corpo = (fonte.texto
+      ? '<div class="prose" style="font-size:14px" data-leitura-pane>'+mdRender(fonte.texto)+'</div><button class="btn small ghost" data-act="ed-lt-colar-limpar" style="margin-top:8px">limpar</button>'
+      : '<textarea class="textarea" id="ed-lt-colar" rows="6" placeholder="cole o texto de referência…"></textarea><button class="btn small primary" data-act="ed-lt-colar-ok" style="margin-top:8px">Usar texto</button>');
+  } else {
+    corpo = '<div class="list">' + (ordenar(T('leitura_notas').filter(n => n.tipo === 'insight' && !n.arquivada), n => n.criado_em||'', true).slice(0, 30).map(n =>
+      '<div class="item" style="align-items:flex-start"><span>💡</span><div class="grow small" style="white-space:pre-wrap">'+esc(n.conteudo)+'</div>'
+      + '<button class="iconbtn" data-act="ed-lt-inserir-insight" data-id="'+n.id+'" title="inserir no texto">↘</button></div>').join('')
+      || '<div class="empty small">sem insights ainda</div>') + '</div>';
+  }
+  return '<div class="row" style="margin-bottom:10px">'
+    + tabs.map(([v, em]) => '<button class="btn small'+(fonte.tipo===v?' primary':'')+'" data-act="ed-lt-tab" data-v="'+v+'">'+em+'</button>').join('')
+    + '<span class="sp"></span><span class="tiny muted">selecione texto p/ capturar</span></div>'
+    + '<div class="cap-bar" id="cap-bar"><button class="btn small" data-act="cap-citar">❝ Citar no texto</button>'
+    + '<button class="btn small" data-act="cap-insight">💡 Salvar insight</button></div>' + corpo;
+}
+function edRefreshLeitura() { const p = $('.ed-pane-leitura'); if (p) { p.innerHTML = painelLeituraHTML(); } }
+act('ed-lt-tab', el => { window._edFonte = { tipo: el.dataset.v }; edRefreshLeitura(); });
+act('ed-lt-artigo', el => { window._edFonte = { tipo:'biblioteca', artigo_id: el.dataset.id }; edRefreshLeitura(); });
+act('ed-lt-voltar', () => { window._edFonte = { tipo:'biblioteca' }; edRefreshLeitura(); });
+act('ed-lt-extrair', async el => {
+  const a = byId('artigos', el.dataset.id);
+  try { const res = await fetch('https://r.jina.ai/' + a.url); if (!res.ok) throw 0;
+    dbPatch('artigos', a.id, { conteudo_cache: (await res.text()).slice(0, 200000) }); edRefreshLeitura();
+  } catch (_) { toast('Extração falhou — cole o texto na aba 📋.', {icone:'⚠️'}); }
+});
+act('ed-lt-url', () => { const url = $('#ed-lt-url-inp').value.trim(); if (!url) return; window._edFonte = { tipo:'url', url }; edRefreshLeitura(); });
+act('ed-lt-url-extrair', async () => {
+  const f = window._edFonte;
+  $('#ed-lt-url-out').innerHTML = '<div class="banner acc small">extraindo…</div>';
+  try { const res = await fetch('https://r.jina.ai/' + f.url); if (!res.ok) throw 0;
+    f.html = '<div class="prose" style="font-size:14px" data-leitura-pane>'+mdRender((await res.text()).slice(0, 200000))+'</div>';
+    $('#ed-lt-url-out').innerHTML = f.html;
+  } catch (_) { $('#ed-lt-url-out').innerHTML = '<div class="banner warn small">Falhou. Tente o embed ou cole o texto (aba 📋).</div>'; }
+});
+act('ed-lt-url-embed', () => {
+  const f = window._edFonte;
+  f.html = '<iframe src="'+esc(f.url)+'" style="width:100%;height:52vh;border:1px solid var(--border);border-radius:10px;background:#fff"></iframe>';
+  $('#ed-lt-url-out').innerHTML = f.html;
+});
+act('ed-lt-colar-ok', () => { const v = $('#ed-lt-colar').value.trim(); if (!v) return; window._edFonte = { tipo:'colar', texto: v }; edRefreshLeitura(); });
+act('ed-lt-colar-limpar', () => { window._edFonte = { tipo:'colar' }; edRefreshLeitura(); });
+act('ed-lt-inserir-insight', el => {
+  const n = byId('leitura_notas', el.dataset.id); if (!n) return;
+  edInserir('\n> ' + n.conteudo.replace(/\n/g, '\n> ') + (fonteDaNota(n) ? '\n> — ' + fonteDaNota(n) : '') + '\n\n');
+});
+function edInserir(txt) {
+  const ta = $('#ed-area');
+  if (!ta) { toast('Abra o modo edição (saia do preview).'); return; }
+  const s = ta.selectionStart ?? ta.value.length;
+  ta.value = ta.value.slice(0, s) + txt + ta.value.slice(ta.selectionEnd ?? s);
+  Actions['ed-input']();
+  toast('Inserido no texto ✓');
+}
+/* captura por seleção (mouseup/touchend no painel de leitura) */
+['mouseup','touchend'].forEach(ev => document.addEventListener(ev, () => {
+  const bar = $('#cap-bar'); if (!bar) return;
+  setTimeout(() => {
+    const sel = window.getSelection();
+    const txt = sel ? String(sel).trim() : '';
+    const dentro = sel && sel.anchorNode && sel.anchorNode.parentElement && sel.anchorNode.parentElement.closest('[data-leitura-pane]');
+    if (txt && dentro) { window._edSel = { texto: txt, artigo_id: (dentro.dataset||{}).refArtigo || null }; bar.style.display = 'flex'; }
+    else bar.style.display = 'none';
+  }, 30);
+}));
+act('cap-citar', () => {
+  const s = window._edSel; if (!s) return;
+  edInserir('\n> ' + s.texto.replace(/\n/g, '\n> ') + '\n\n');
+  if (s.artigo_id) criarNota({ tipo:'citacao', conteudo: s.texto, artigo_id: s.artigo_id, tags: [] });
+  $('#cap-bar').style.display = 'none';
+});
+act('cap-insight', () => {
+  const s = window._edSel; if (!s) return;
+  criarNota({ tipo:'insight', conteudo: s.texto, artigo_id: s.artigo_id || null, tags: [] });
+  toast('💡 Insight salvo — entra na repetição espaçada.');
+  $('#cap-bar').style.display = 'none';
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
