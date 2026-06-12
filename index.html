@@ -4246,6 +4246,237 @@ act('meta-reg-save', el => {
   const m = byId('metas', el.dataset.id), p = metaProgresso(m);
   toast(p.atingida ? '🎉 Meta "'+esc(m.nome)+'" batida!' : 'Progresso registrado ✓ ('+Math.round(p.pct*100)+'%)');
 });
+/* ════════════════ ETAPA 13 — FINANÇAS · FLUXO (Painel A) ════════════════ */
+const lancDoMes = ym => T('lancamentos_financeiros').filter(l => mesDe(l.data) === ym);
+const catFin = id => byId('categorias_financeiras', id);
+const aportadoNoMes = ym => sum(T('investimentos_movimentos').filter(v => v.tipo === 'aporte' && mesDe(v.data) === ym).map(v => v.valor));
+function resumoMes(ym) {
+  const ls = lancDoMes(ym);
+  const entradas = sum(ls.filter(l => l.tipo === 'entrada' && l.pago).map(l => l.valor));
+  const saidas = sum(ls.filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor));
+  return { entradas, saidas, saldo: entradas - saidas, investido: aportadoNoMes(ym),
+    pendentes: T('lancamentos_financeiros').filter(l => !l.pago && l.data <= fimDoMes(ym)).length };
+}
+const fimDoMes = ym => { const [y, m] = ym.split('-').map(Number); return ym + '-' + pad2(new Date(y, m, 0).getDate()); };
+function gastoCategoriaMes(catId, ym) {
+  return sum(lancDoMes(ym).filter(l => l.categoria_id === catId && l.tipo === 'saida' && l.pago).map(l => l.valor));
+}
+const corOrcamento = pct => pct > 1 ? 'err' : pct >= 0.8 ? 'warn' : 'ok';
+
+/* geração de recorrências na virada do mês (regra 6) */
+function gerarRecorrenciasDoMes() {
+  const ym = mesDe(hoje());
+  if (getCfg('fin_mes_gerado') === ym) return;
+  let n = 0;
+  for (const t of T('lancamentos_financeiros').filter(l => l.recorrencia && l.recorrencia.freq === 'mensal')) {
+    if (mesDe(t.data) === ym) continue;
+    const [y, m] = ym.split('-').map(Number);
+    const dia = Math.min((t.recorrencia.dia || pDate(t.data).getDate()), new Date(y, m, 0).getDate());
+    const jaExiste = T('lancamentos_financeiros').some(l => l.id !== t.id && mesDe(l.data) === ym
+      && norm(l.descricao || '') === norm(t.descricao || '') && l.categoria_id === t.categoria_id);
+    if (!jaExiste) { dbUpsert('lancamentos_financeiros', { tipo: t.tipo, valor: t.valor, data: ym + '-' + pad2(dia),
+      categoria_id: t.categoria_id, conta_id: t.conta_id, descricao: t.descricao, pago: false, recorrencia: null }); n++; }
+  }
+  setCfg('fin_mes_gerado', ym);
+  if (n) toast(n + ' lançamento'+(n>1?'s':'')+' recorrente'+(n>1?'s':'')+' do mês gerado'+(n>1?'s':'')+' 📆');
+}
+BootHooks.push(() => { if (FLAGS.onboarded) gerarRecorrenciasDoMes(); });
+
+/* alerta na Hoje: contas vencendo ≤ 3 dias */
+HojeExtras.alertas.push(() => {
+  const limite = addDias(hoje(), 3);
+  const venc = T('lancamentos_financeiros').filter(l => !l.pago && l.data <= limite);
+  if (!venc.length) return '';
+  const atrasos = venc.filter(l => l.data < hoje()).length;
+  return '<div class="banner '+(atrasos ? 'err' : 'warn')+'" data-act="nav" data-r="financas" style="cursor:pointer">💸 '
+    + venc.length + ' conta'+(venc.length>1?'s':'')+' vencendo em até 3 dias ('+fmtBRL(sum(venc.map(l=>l.valor)))+')'
+    + (atrasos ? ' — '+atrasos+' já vencida'+(atrasos>1?'s':'') : '') + ' →</div>';
+});
+
+/* ---- registro rápido de gasto (FAB / atalho) ---- */
+act('qa-gasto', () => { closeModal(); lancRapidoModal('saida'); });
+function lancRapidoModal(tipo) {
+  const cats = T('categorias_financeiras').filter(c => c.tipo === tipo);
+  modal('<div class="bx-h"><div class="h2">'+(tipo==='saida'?'💸 Novo gasto':'💵 Nova entrada')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Valor (R$) *</label><input class="input" id="lc-valor" inputmode="decimal" autofocus placeholder="0,00" style="font-size:22px;font-weight:700"></div>'
+    + '<div class="frow"><div class="field"><label>Categoria</label><select class="select" id="lc-cat">'
+    + cats.map(c => '<option value="'+c.id+'">'+esc(c.nome)+'</option>').join('') + '<option value="">— sem categoria —</option></select></div>'
+    + '<div class="field"><label>Conta</label><select class="select" id="lc-conta">'
+    + T('contas_financeiras').map(c => '<option value="'+c.id+'">'+esc(c.nome)+'</option>').join('') + '<option value="">—</option></select></div></div>'
+    + '<div class="frow"><div class="field"><label>Descrição</label><input class="input" id="lc-desc" placeholder="ex.: mercado"></div>'
+    + '<div class="field"><label>Data</label><input class="input" type="date" id="lc-data" value="'+hoje()+'"></div></div>'
+    + '<label class="checkline"><input type="checkbox" id="lc-pago" checked> já '+(tipo==='saida'?'pago':'recebido')+'</label>'
+    + '<div class="bx-foot"><button class="btn primary big" data-act="lc-salvar" data-tipo="'+tipo+'">✓ Salvar</button></div>');
+}
+act('lc-salvar', el => {
+  const valor = parseValor($('#lc-valor').value);
+  if (!(valor > 0)) { toast('Informe o valor.'); return; }
+  const tipo = el.dataset.tipo;
+  const catId = $('#lc-cat').value || null;
+  const l = dbUpsert('lancamentos_financeiros', { tipo, valor, data: $('#lc-data').value || hoje(),
+    categoria_id: catId, conta_id: $('#lc-conta').value || null,
+    descricao: $('#lc-desc').value.trim() || null, pago: $('#lc-pago').checked, recorrencia: null });
+  closeModal();
+  toast((tipo==='saida'?'💸 −':'💵 +') + fmtBRL(valor) + ' registrado ✓', { undo: () => { dbDelete('lancamentos_financeiros', l.id); render(); } });
+  if (tipo === 'saida' && catId) {
+    const c = catFin(catId);
+    if (c && c.orcamento_mensal > 0) {
+      const pct = gastoCategoriaMes(catId, mesDe(hoje())) / c.orcamento_mensal;
+      if (pct > 1) setTimeout(() => toast('🔴 ' + esc(c.nome) + ' estourou o orçamento (' + Math.round(pct*100) + '%)', {ms:5000}), 600);
+      else if (pct >= 0.8) setTimeout(() => toast('🟡 ' + esc(c.nome) + ' chegou a ' + Math.round(pct*100) + '% do orçamento', {ms:5000}), 600);
+    }
+  }
+  if (window.checkConquistas) checkConquistas('financas');
+  render();
+});
+
+/* ---- página FINANÇAS (abas Fluxo | Investimentos) ---- */
+reg('financas', {
+  titulo: 'Finanças',
+  render: (params) => {
+    const aba = params[0] === 'investimentos' ? 'investimentos' : 'fluxo';
+    let html = '<div class="row wrap" style="margin-bottom:10px"><div class="h1" style="flex:1">💰 Finanças</div>'
+      + '<div class="seg"><button class="'+(aba==='fluxo'?'on':'')+'" data-act="nav" data-r="financas">💸 Fluxo</button>'
+      + '<button class="'+(aba==='investimentos'?'on':'')+'" data-act="nav" data-r="financas/investimentos">📈 Investimentos</button></div></div>';
+    if (aba === 'investimentos') return html + (window.investTabHTML ? investTabHTML(params) : '<div class="card"><div class="empty"><span class="em">🚧</span>Investimentos chegam na próxima etapa.</div></div>');
+    return html + fluxoTabHTML(params[1] || mesDe(hoje()));
+  }
+});
+function fluxoTabHTML(ym) {
+  const r = resumoMes(ym);
+  const [y, m] = ym.split('-').map(Number);
+  const mesAnt = m === 1 ? (y-1)+'-12' : y+'-'+pad2(m-1);
+  const mesProx = m === 12 ? (y+1)+'-01' : y+'-'+pad2(m+1);
+  let html = '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesAnt+'">←</button>'
+    + '<b style="flex:1;text-align:center">'+ucfirst(fmtMes(ym))+'</b>'
+    + '<button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesProx+'">→</button></div>'
+    + '<div class="grid4">'
+    + '<div class="kpi"><div class="l">entradas</div><div class="v ok">'+fmtBRL(r.entradas)+'</div></div>'
+    + '<div class="kpi"><div class="l">saídas</div><div class="v err">'+fmtBRL(r.saidas)+'</div></div>'
+    + '<div class="kpi"><div class="l">saldo do mês</div><div class="v '+(r.saldo>=0?'ok':'err')+'">'+fmtBRL(r.saldo)+'</div></div>'
+    + '<div class="kpi" style="border-color:rgba(124,92,252,.5)"><div class="l acc">📈 investido no mês</div><div class="v acc">'+fmtBRL(r.investido)+'</div><div class="d muted tiny">aporte não é despesa</div></div></div>'
+    + '<div class="row wrap" style="margin:2px 0 14px">'
+    + '<button class="btn primary" data-act="qa-gasto">+ Gasto</button>'
+    + '<button class="btn" data-act="lc-nova-entrada">+ Entrada</button>'
+    + '<button class="btn" data-act="lc-completo">+ Conta a pagar / recorrente</button>'
+    + '<button class="btn ghost" data-act="fin-cats">🏷️ Categorias</button>'
+    + '<button class="btn ghost" data-act="fin-contas">🏦 Contas</button></div>';
+  // contas a pagar / receber
+  const pend = ordenar(T('lancamentos_financeiros').filter(l => !l.pago), l => l.data).filter(l => l.data <= fimDoMes(ym));
+  if (pend.length) {
+    html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">📌 A pagar / receber</div><div class="list" style="padding:0 10px 8px">'
+      + pend.map(l => { const atras = l.data < hoje();
+        return '<div class="item" data-act="lc-edit" data-id="'+l.id+'"><span>'+(l.tipo==='saida'?'💸':'💵')+'</span>'
+          + '<div class="grow"><div class="ttl">'+esc(l.descricao||((catFin(l.categoria_id)||{}).nome)||'lançamento')+'</div>'
+          + '<div class="sub"><span class="'+(atras?'err':l.data<=addDias(hoje(),3)?'warn':'')+'">vence '+fmtData(l.data)+'</span>'
+          + (catFin(l.categoria_id)?' · '+esc(catFin(l.categoria_id).nome):'')+'</div></div>'
+          + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+fmtBRL(l.valor)+'</b>'
+          + '<button class="btn small ok" data-act="lc-pagar" data-id="'+l.id+'">✓ '+(l.tipo==='saida'?'pagar':'receber')+'</button></div>'; }).join('') + '</div></div>';
+  }
+  // orçamento por categoria
+  const catsOrc = T('categorias_financeiras').filter(c => c.tipo === 'saida' && c.orcamento_mensal > 0);
+  if (catsOrc.length) {
+    html += '<div class="card"><div class="h2">🎯 Orçamento do mês</div>' + catsOrc.map(c => {
+      const gasto = gastoCategoriaMes(c.id, ym), pct = gasto / c.orcamento_mensal;
+      return '<div style="margin-bottom:10px"><div class="row tiny" style="margin-bottom:4px"><span class="dot" style="background:'+(c.cor||'#5CC8FC')+'"></span><b>'+esc(c.nome)+'</b><span class="sp"></span>'
+        + '<span class="'+corOrcamento(pct)+'">'+fmtBRL(gasto)+' / '+fmtBRL(c.orcamento_mensal)+' ('+Math.round(pct*100)+'%)</span></div>'
+        + '<div class="bar"><i class="'+corOrcamento(pct)+'" style="width:'+clamp(pct*100,2,100)+'%"></i></div></div>';
+    }).join('') + '<div class="tiny muted">Aportes em investimentos nunca entram aqui — patrimônio não é consumo.</div></div>';
+  }
+  // entradas × saídas (6 meses)
+  let barras = '', mm = ym;
+  const grupos = [];
+  for (let i = 0; i < 6; i++) { grupos.unshift(mm); const [yy, mo] = mm.split('-').map(Number); mm = mo === 1 ? (yy-1)+'-12' : yy+'-'+pad2(mo-1); }
+  const maxV = Math.max(...grupos.map(g => { const rr = resumoMes(g); return Math.max(rr.entradas, rr.saidas); }), 1);
+  grupos.forEach((g, i) => {
+    const rr = resumoMes(g);
+    const x = 30 + i * 86;
+    barras += '<rect x="'+x+'" y="'+(150 - rr.entradas/maxV*130)+'" width="26" height="'+Math.max(1, rr.entradas/maxV*130)+'" rx="4" fill="var(--ok)"/>'
+      + '<rect x="'+(x+30)+'" y="'+(150 - rr.saidas/maxV*130)+'" width="26" height="'+Math.max(1, rr.saidas/maxV*130)+'" rx="4" fill="var(--err)"/>'
+      + '<text x="'+(x+28)+'" y="166" font-size="10" fill="#9AA0B0" text-anchor="middle">'+MESES_C[Number(g.slice(5,7))-1]+'</text>';
+  });
+  html += '<div class="card"><div class="h2">📊 Entradas × saídas (6 meses)</div><div class="chartbox"><svg viewBox="0 0 560 172">'+barras+'</svg></div>'
+    + '<div class="legend"><span><i class="dot" style="background:var(--ok)"></i>entradas</span><span><i class="dot" style="background:var(--err)"></i>saídas</span></div></div>';
+  // pizza por categoria
+  const porCat = {};
+  lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).forEach(l => { const k = l.categoria_id || 'sem'; porCat[k] = (porCat[k]||0) + Number(l.valor); });
+  html += '<div class="card"><div class="h2">🥧 Saídas por categoria</div>'
+    + svgPizza(Object.entries(porCat).map(([k, v]) => ({ label: k === 'sem' ? 'sem categoria' : (catFin(k)||{}).nome || '?', valor: v, cor: k === 'sem' ? '#9AA0B0' : (catFin(k)||{}).cor || '#5CC8FC' })), { fmt: fmtBRL }) + '</div>';
+  // lançamentos do mês
+  const doMes = ordenar(lancDoMes(ym), l => l.data + (l.criado_em||''), true);
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Lançamentos de '+fmtMes(ym)+' ('+doMes.length+')</div><div class="list" style="padding:0 10px 8px">'
+    + (doMes.slice(0, 60).map(l => '<div class="item" data-act="lc-edit" data-id="'+l.id+'"><span>'+(l.tipo==='saida'?'💸':'💵')+'</span>'
+      + '<div class="grow"><div class="ttl">'+esc(l.descricao||((catFin(l.categoria_id)||{}).nome)||'lançamento')+(l.recorrencia?' <span class="badge acc">🔁 modelo</span>':'')+(!l.pago?' <span class="badge warn">pendente</span>':'')+'</div>'
+      + '<div class="sub">'+fmtData(l.data)+(catFin(l.categoria_id)?' · '+esc(catFin(l.categoria_id).nome):'')+'</div></div>'
+      + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+(l.tipo==='saida'?'−':'+')+fmtBRL(l.valor)+'</b></div>').join('')
+    || '<div class="empty"><span class="em">💸</span>Nenhum lançamento neste mês.</div>') + '</div></div>';
+  return html;
+}
+act('lc-nova-entrada', () => lancRapidoModal('entrada'));
+act('lc-pagar', el => {
+  const l = byId('lancamentos_financeiros', el.dataset.id);
+  dbPatch('lancamentos_financeiros', l.id, { pago: true });
+  toast('✓ ' + fmtBRL(l.valor) + ' marcado como ' + (l.tipo==='saida'?'pago':'recebido') + '.', { undo: () => { dbPatch('lancamentos_financeiros', l.id, {pago:false}); render(); } });
+  if (window.checkConquistas) checkConquistas('financas');
+  render();
+});
+const lancFields = () => [
+  {k:'tipo', t:'sel', l:'Tipo', meia:1, opts:[{v:'saida',t:'💸 saída'},{v:'entrada',t:'💵 entrada'}]},
+  {k:'valor', t:'money', l:'Valor (R$)', meia:1, req:1},
+  {k:'descricao', l:'Descrição'},
+  {k:'categoria_id', t:'sel', l:'Categoria', meia:1, opts: [{v:'',t:'—'}].concat(T('categorias_financeiras').map(c => ({v:c.id, t:(c.tipo==='entrada'?'💵 ':'💸 ')+c.nome})))},
+  {k:'conta_id', t:'sel', l:'Conta', meia:1, opts: [{v:'',t:'—'}].concat(T('contas_financeiras').map(c => ({v:c.id, t:c.nome})))},
+  {k:'data', t:'date', l:'Data/vencimento', meia:1},
+  {k:'pago', t:'chk', l:'Pago / recebido'},
+  {k:'recorrente', t:'chk', l:'Repete todo mês (modelo recorrente)', dica:'gera lançamento pendente na virada do mês'}
+];
+act('lc-completo', () => editModal({ titulo:'Novo lançamento', fields: lancFields(), vals:{tipo:'saida', data: hoje(), pago:false},
+  onSave: v => { salvarLancCompleto(v, null); } }));
+act('lc-edit', el => {
+  const l = byId('lancamentos_financeiros', el.dataset.id);
+  editModal({ titulo:'Lançamento', fields: lancFields(), vals: {...l, recorrente: !!l.recorrencia},
+    onSave: v => salvarLancCompleto(v, l),
+    onDelete: () => { const bkp = {...l}; dbDelete('lancamentos_financeiros', l.id); render();
+      toast('Lançamento excluído.', {undo: () => { dbUpsert('lancamentos_financeiros', bkp); render(); }}); } });
+});
+function salvarLancCompleto(v, existente) {
+  if (!(v.valor > 0)) { toast('Informe o valor.'); return; }
+  dbUpsert('lancamentos_financeiros', { id: existente ? existente.id : undefined, tipo: v.tipo, valor: v.valor,
+    data: v.data || hoje(), categoria_id: v.categoria_id || null, conta_id: v.conta_id || null,
+    descricao: v.descricao || null, pago: !!v.pago,
+    recorrencia: v.recorrente ? { freq:'mensal', dia: pDate(v.data || hoje()).getDate() } : null });
+  render();
+}
+/* categorias e contas */
+const catFinFields = [
+  {k:'nome', l:'Nome', req:1, foco:1},
+  {k:'tipo', t:'sel', l:'Tipo', meia:1, opts:[{v:'saida',t:'💸 saída'},{v:'entrada',t:'💵 entrada'}]},
+  {k:'orcamento_mensal', t:'money', l:'Orçamento mensal (R$)', meia:1, dica:'só para saídas'},
+  {k:'cor', t:'cor', l:'Cor'}
+];
+act('fin-cats', () => {
+  modal('<div class="bx-h"><div class="h2">🏷️ Categorias</div><button class="btn small" data-act="cat-add">+ Nova</button></div><div class="list">'
+    + T('categorias_financeiras').map(c => '<div class="item" data-act="cat-edit" data-id="'+c.id+'"><span class="dot" style="background:'+(c.cor||'#5CC8FC')+'"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(c.nome)+'</div><div class="sub">'+(c.tipo==='entrada'?'entrada':'saída')+(c.orcamento_mensal?' · orçamento '+fmtBRL(c.orcamento_mensal):'')+'</div></div></div>').join('')+'</div>');
+});
+act('cat-add', () => { closeModal(); editModal({ titulo:'Nova categoria', fields: catFinFields, vals:{tipo:'saida'},
+  onSave: v => { dbUpsert('categorias_financeiras', v); render(); } }); });
+act('cat-edit', el => { closeModal();
+  const c = byId('categorias_financeiras', el.dataset.id);
+  editModal({ titulo:'Categoria', fields: catFinFields, vals: c,
+    onSave: v => { dbPatch('categorias_financeiras', c.id, v); render(); },
+    onDelete: () => { dbDelete('categorias_financeiras', c.id); render(); toast('Categoria excluída (lançamentos preservados).'); } }); });
+act('fin-contas', () => {
+  modal('<div class="bx-h"><div class="h2">🏦 Contas</div><button class="btn small" data-act="conta-add">+ Nova</button></div><div class="list">'
+    + T('contas_financeiras').map(c => '<div class="item" data-act="conta-edit" data-id="'+c.id+'"><span>🏦</span><div class="grow"><div class="ttl">'+esc(c.nome)+'</div><div class="sub">'+esc(c.tipo||'conta')+'</div></div></div>').join('')+'</div>');
+});
+const contaFields = [ {k:'nome', l:'Nome', req:1, foco:1}, {k:'tipo', t:'sel', l:'Tipo', opts:['conta','dinheiro','cartão','poupança','outro']} ];
+act('conta-add', () => { closeModal(); editModal({ titulo:'Nova conta', fields: contaFields, onSave: v => { dbUpsert('contas_financeiras', v); render(); } }); });
+act('conta-edit', el => { closeModal();
+  const c = byId('contas_financeiras', el.dataset.id);
+  editModal({ titulo:'Conta', fields: contaFields, vals: c,
+    onSave: v => { dbPatch('contas_financeiras', c.id, v); render(); },
+    onDelete: () => { dbDelete('contas_financeiras', c.id); render(); } }); });
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
