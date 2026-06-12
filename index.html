@@ -4659,6 +4659,145 @@ act('saldo-salvar', el => {
   if (window.checkConquistas) checkConquistas('investimento');
   render();
 });
+/* ════════════════ ETAPA 15 — REVISÃO SEMANAL GUIADA ════════════════ */
+function semanaEmRevisao() { // semana (seg–dom) cujo domingo já chegou
+  const dom = fimSemana(hoje());
+  const fim = dom <= hoje() ? dom : addDias(dom, -7);
+  return { ini: addDias(fim, -6), fim };
+}
+function revisaoPendente() {
+  const { fim } = semanaEmRevisao();
+  return !T('revisoes').some(r => r.tipo === 'semanal' && r.periodo_fim === fim);
+}
+HojeExtras.alertas.push(() => revisaoPendente()
+  ? '<div class="banner acc" data-act="nav" data-r="revisao" style="cursor:pointer">🧭 Revisão semanal pendente — ~10 min para fechar a semana com clareza →</div>' : '');
+
+function metricasSemana(ini, fim) {
+  const noPeriodo = d => d >= ini && d <= fim;
+  const tarefas = T('tarefas').filter(t => t.concluida && noPeriodo((t.concluida_em||'').slice(0,10))).length;
+  let habPoss = 0, habFeitos = 0;
+  for (const h of habitosAtivos()) {
+    if (h.tipo === 'semanal') { habPoss += h.freq_semanal || 1;
+      habFeitos += Math.min(T('habito_registros').filter(r => r.habito_id === h.id && noPeriodo(r.data) && Number(r.valor) > 0).length, h.freq_semanal || 1); }
+    else for (let d = ini; d <= fim; d = addDias(d, 1)) if (diaAtivo(h, d)) { habPoss++; if (diaFeito(h, d)) habFeitos++; }
+  }
+  const log = escritaLog();
+  let palavras = 0; for (let d = ini; d <= fim; d = addDias(d, 1)) palavras += log[d] || 0;
+  const energias = T('dias').filter(d => noPeriodo(d.data) && d.energia).map(d => d.energia);
+  const ym = mesDe(fim);
+  return {
+    tarefas, habitos_pct: habPoss ? Math.round(habFeitos / habPoss * 100) : null,
+    treinos: T('treino_sessoes').filter(s => noPeriodo(s.data)).length,
+    km: Math.round(sum(T('corridas').filter(c => noPeriodo(c.data)).map(c => c.distancia_km)) * 10) / 10,
+    paginas: sum(T('leitura_registros').filter(r => noPeriodo(r.data)).map(r => r.paginas)),
+    palavras,
+    gasto_semana: sum(T('lancamentos_financeiros').filter(l => l.tipo === 'saida' && l.pago && noPeriodo(l.data)).map(l => l.valor)),
+    gasto_mes: sum(lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor)),
+    orcamento_mes: sum(T('categorias_financeiras').filter(c => c.tipo === 'saida').map(c => c.orcamento_mensal || 0)),
+    aportes_mes: aportadoNoMes(ym),
+    energia_media: energias.length ? Math.round(sum(energias) / energias.length * 10) / 10 : null,
+    foco_min: sum(T('blocos').filter(b => b.foco && b.tempo_real_min && noPeriodo(dISO(new Date(b.inicio)))).map(b => b.tempo_real_min))
+  };
+}
+function metricasCardsHTML(mx) {
+  const kpi = (l, v, d) => '<div class="kpi"><div class="l">'+l+'</div><div class="v" style="font-size:19px">'+v+'</div>'+(d?'<div class="d muted tiny">'+d+'</div>':'')+'</div>';
+  return '<div class="grid4" style="margin-bottom:4px">'
+    + kpi('✅ tarefas', mx.tarefas) + kpi('🔁 hábitos', mx.habitos_pct != null ? mx.habitos_pct + '%' : '—')
+    + kpi('🏋️ treinos', mx.treinos) + kpi('🏃 km', fmtNum(mx.km,1))
+    + kpi('📖 páginas', mx.paginas) + kpi('✍️ palavras', fmtNum(mx.palavras))
+    + kpi('🎯 foco', fmtMin(mx.foco_min)) + kpi('⚡ energia média', mx.energia_media != null ? mx.energia_media + '/5' : '—')
+    + kpi('💸 gasto no mês', fmtBRL(mx.gasto_mes), mx.orcamento_mes ? Math.round(mx.gasto_mes / mx.orcamento_mes * 100) + '% do orçamento' : 'sem orçamento')
+    + kpi('📈 aportes no mês', fmtBRL(mx.aportes_mes), 'fora do consumo') + '</div>';
+}
+reg('revisao', {
+  titulo: 'Revisão semanal',
+  render: (params) => {
+    if (params[0] === 'historico') return revisaoHistoricoHTML();
+    const { ini, fim } = semanaEmRevisao();
+    const feita = T('revisoes').find(r => r.tipo === 'semanal' && r.periodo_fim === fim);
+    const passo = window._revPasso || 1;
+    let html = '<div class="row" style="margin-bottom:8px"><div class="h1" style="flex:1">🧭 Revisão semanal</div>'
+      + '<button class="btn small" data-act="nav" data-r="revisao/historico">Histórico</button></div>'
+      + '<p class="muted small" style="margin:0 0 12px">Semana de '+fmtDataCurta(ini)+' a '+fmtDataCurta(fim)+(feita?' · <span class="ok">já concluída ✓</span> (refazer substitui)':'')+'</p>'
+      + '<div class="steps-dots" style="justify-content:flex-start">'+[1,2,3,4].map(i => '<i class="'+(i===passo?'on':'')+'"></i>').join('')+'</div>';
+    const mx = metricasSemana(ini, fim);
+    if (passo === 1) {
+      html += '<div class="card"><div class="h2">1/4 · O retrospecto — números prontos</div>'+metricasCardsHTML(mx)+'</div>'
+        + '<button class="btn primary big" data-act="rev-prox">Continuar →</button>';
+    } else if (passo === 2) {
+      const streaks = habitosAtivos().map(h => ({ h, s: habitoStreak(h) })).filter(x => x.s.atual > 0).sort((a, b) => b.s.atual - a.s.atual).slice(0, 5);
+      const emRisco = T('metas').filter(m => !m.concluida).map(m => ({ m, p: metaProgresso(m) })).filter(x => x.p.status === 'risco' || x.p.status === 'vencida');
+      html += '<div class="card"><div class="h2">2/4 · Streaks vivos 🔥</div>'
+        + (streaks.length ? '<div class="row wrap">'+streaks.map(x => '<span class="chip">'+x.h.icone+' '+esc(x.h.nome)+' <b>'+x.s.atual+(x.h.tipo==='semanal'?'sem':'d')+'</b></span>').join('')+'</div>'
+          : '<span class="muted small">Nenhum streak ativo — recomeçar também é constância.</span>') + '</div>'
+        + '<div class="card"><div class="h2">Metas pedindo atenção ⚠️</div>'
+        + (emRisco.length ? emRisco.map(x => metaCardHTML(x.m)).join('') : '<span class="muted small">Nenhuma meta em risco. 👏</span>') + '</div>'
+        + '<button class="btn primary big" data-act="rev-prox">Continuar →</button>';
+    } else if (passo === 3) {
+      const r = window._revResp || {};
+      html += '<div class="card"><div class="h2">3/4 · Três perguntas</div>'
+        + '<div class="field"><label>O que funcionou esta semana?</label><textarea class="textarea" id="rev-q1" rows="2">'+esc(r.q1||'')+'</textarea></div>'
+        + '<div class="field"><label>O que travou ou drenou energia?</label><textarea class="textarea" id="rev-q2" rows="2">'+esc(r.q2||'')+'</textarea></div>'
+        + '<div class="field"><label>O que aprendeu / quer lembrar?</label><textarea class="textarea" id="rev-q3" rows="2">'+esc(r.q3||'')+'</textarea></div>'
+        + '<div class="field"><label>As 3 prioridades da próxima semana (viram tarefas P1 reais)</label>'
+        + [0,1,2].map(i => '<input class="input" id="rev-p'+i+'" value="'+esc((r.prioridades||[])[i]||'')+'" placeholder="prioridade '+(i+1)+'" style="margin-bottom:6px">').join('') + '</div></div>'
+        + '<button class="btn primary big" data-act="rev-prox">Continuar →</button>';
+    } else {
+      html += '<div class="card"><div class="h2">4/4 · Planejar a semana</div>'
+        + '<p class="muted small">Suas prioridades virarão tarefas P1 na segunda-feira. Reserve blocos para elas:</p>'
+        + '<div class="row wrap" style="margin-bottom:10px">'
+        + '<button class="btn" data-act="nav" data-r="agenda/semana/'+addDias(semanaEmRevisao().fim,1)+'">📅 Abrir agenda da próxima semana</button>'
+        + '<button class="btn" data-act="modelo-aplicar" data-d="'+addDias(semanaEmRevisao().fim,1)+'">📋 Aplicar modelo na segunda</button></div>'
+        + '<button class="btn primary big" data-act="rev-concluir">✓ Concluir revisão</button></div>';
+    }
+    return html;
+  }
+});
+act('rev-prox', () => {
+  if ((window._revPasso || 1) === 3) {
+    window._revResp = { q1: $('#rev-q1').value.trim(), q2: $('#rev-q2').value.trim(), q3: $('#rev-q3').value.trim(),
+      prioridades: [0,1,2].map(i => $('#rev-p'+i).value.trim()).filter(Boolean) };
+  }
+  window._revPasso = (window._revPasso || 1) + 1;
+  render();
+});
+act('rev-concluir', () => {
+  const { ini, fim } = semanaEmRevisao();
+  const resp = window._revResp || {};
+  const mx = metricasSemana(ini, fim); // métricas congeladas (regra 11)
+  const anterior = T('revisoes').find(r => r.tipo === 'semanal' && r.periodo_fim === fim);
+  if (anterior) dbDelete('revisoes', anterior.id);
+  dbUpsert('revisoes', { tipo:'semanal', periodo_inicio: ini, periodo_fim: fim, metricas: mx, respostas: resp });
+  const segunda = addDias(fim, 1);
+  (resp.prioridades || []).forEach((p, i) => dbUpsert('tarefas', { titulo: p, prioridade: 1, vencimento: segunda,
+    origem: 'revisao_semanal', ordem: i, subtarefas: [], etiquetas: [], comentarios: [], links: [],
+    abandonada: false, concluida: false }));
+  window._revPasso = 1; window._revResp = null;
+  nav('hoje');
+  toast('🧭 Semana fechada! ' + ((resp.prioridades||[]).length ? (resp.prioridades.length + ' prioridades viraram tarefas P1 de segunda.') : 'Boa semana!'), {ms:5500});
+  if (window.checkConquistas) checkConquistas('revisao');
+});
+function revisaoHistoricoHTML() {
+  const rs = ordenar(T('revisoes').filter(r => r.tipo === 'semanal'), r => r.periodo_fim, true);
+  return '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🧭 Revisões anteriores</div>'
+    + '<button class="btn small" data-act="nav" data-r="revisao">← Voltar</button></div>'
+    + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
+    + (rs.map(r => '<div class="item" data-act="rev-abrir" data-id="'+r.id+'"><span>🧭</span><div class="grow">'
+      + '<div class="ttl">'+fmtDataCurta(r.periodo_inicio)+' – '+fmtDataCurta(r.periodo_fim)+'</div>'
+      + '<div class="sub">'+(r.metricas?('✅'+r.metricas.tarefas+' · 🏋️'+r.metricas.treinos+' · 🏃'+fmtNum(r.metricas.km,1)+'km · ✍️'+fmtNum(r.metricas.palavras)):'')+'</div></div></div>').join('')
+    || '<div class="empty"><span class="em">🧭</span>Nenhuma revisão concluída ainda.</div>') + '</div></div>';
+}
+act('rev-abrir', el => {
+  const r = byId('revisoes', el.dataset.id); if (!r) return;
+  const resp = r.respostas || {};
+  modal('<div class="bx-h"><div class="h2">🧭 '+fmtDataCurta(r.periodo_inicio)+' – '+fmtDataCurta(r.periodo_fim)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + (r.metricas ? metricasCardsHTML(r.metricas) : '')
+    + (resp.q1 ? '<div class="field"><label>Funcionou</label><p class="small" style="margin:2px 0">'+esc(resp.q1)+'</p></div>' : '')
+    + (resp.q2 ? '<div class="field"><label>Travou</label><p class="small" style="margin:2px 0">'+esc(resp.q2)+'</p></div>' : '')
+    + (resp.q3 ? '<div class="field"><label>Aprendi</label><p class="small" style="margin:2px 0">'+esc(resp.q3)+'</p></div>' : '')
+    + ((resp.prioridades||[]).length ? '<div class="field"><label>Prioridades</label><div class="row wrap">'+resp.prioridades.map(p => '<span class="chip mini">'+esc(p)+'</span>').join('')+'</div></div>' : ''),
+    { wide:true });
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
