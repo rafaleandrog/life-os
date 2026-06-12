@@ -4477,6 +4477,188 @@ act('conta-edit', el => { closeModal();
   editModal({ titulo:'Conta', fields: contaFields, vals: c,
     onSave: v => { dbPatch('contas_financeiras', c.id, v); render(); },
     onDelete: () => { dbDelete('contas_financeiras', c.id); render(); } }); });
+/* ════════════════ ETAPA 14 — FINANÇAS · INVESTIMENTOS (Painel B) ════════════════ */
+const CLASSES_ATIVO = [['renda_fixa','Renda fixa'],['acoes','Ações'],['fiis','FIIs'],['cripto','Cripto'],['outros','Outros']];
+const classeLabel = c => (CLASSES_ATIVO.find(x => x[0] === c) || ['', 'Outros'])[1];
+function saldoAtualAtivo(id) {
+  const ss = ordenar(T('investimentos_saldos').filter(s => s.ativo_id === id), s => s.data, true);
+  return ss.length ? { saldo: Number(ss[0].saldo), data: ss[0].data } : null;
+}
+function patrimonioTotal() {
+  let tot = 0;
+  for (const a of T('investimentos_ativos').filter(a => a.ativo !== false)) {
+    const s = saldoAtualAtivo(a.id);
+    if (s) tot += s.saldo;
+  }
+  return tot;
+}
+const movsAtivo = id => T('investimentos_movimentos').filter(m => m.ativo_id === id);
+function rentabilidadeAtivo(id) { // regra 5: (saldo atual − total aportado + total resgatado) / total aportado
+  const aportes = sum(movsAtivo(id).filter(m => m.tipo === 'aporte').map(m => m.valor));
+  const resgates = sum(movsAtivo(id).filter(m => m.tipo === 'resgate').map(m => m.valor));
+  const s = saldoAtualAtivo(id);
+  if (!aportes || !s) return null;
+  return (s.saldo - aportes + resgates) / aportes;
+}
+function rentabilidadeGeral() {
+  const aportes = sum(T('investimentos_movimentos').filter(m => m.tipo === 'aporte').map(m => m.valor));
+  const resgates = sum(T('investimentos_movimentos').filter(m => m.tipo === 'resgate').map(m => m.valor));
+  if (!aportes) return null;
+  return (patrimonioTotal() - aportes + resgates) / aportes;
+}
+function serieMensalPatrimonio(n) {
+  const out = [];
+  const agora = new Date();
+  for (let i = (n||12) - 1; i >= 0; i--) {
+    const d = new Date(agora.getFullYear(), agora.getMonth() - i, 1);
+    const fim = dISO(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+    let tot = 0;
+    for (const a of T('investimentos_ativos')) {
+      const ss = ordenar(T('investimentos_saldos').filter(s => s.ativo_id === a.id && s.data <= fim), s => s.data, true);
+      if (ss.length) tot += Number(ss[0].saldo);
+    }
+    out.push({ x: MESES_C[d.getMonth()], y: Math.round(tot) });
+  }
+  let i0 = out.findIndex(p => p.y > 0);
+  return i0 > 0 ? out.slice(Math.max(0, i0 - 1)) : out;
+}
+
+/* ---- aporte rápido (FAB) — NUNCA entra como despesa ---- */
+act('qa-aporte', () => {
+  closeModal();
+  const ativos = T('investimentos_ativos').filter(a => a.ativo !== false);
+  if (!ativos.length) { toast('Cadastre um ativo primeiro.', {icone:'📈'}); nav('financas/investimentos'); return; }
+  modal('<div class="bx-h"><div class="h2">📈 Aporte / resgate</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="row" style="margin-bottom:12px" id="ap-tipo"><span class="chip sel" data-act="ap-tipo-sel" data-v="aporte" style="flex:1;justify-content:center">📥 Aporte</span>'
+    + '<span class="chip" data-act="ap-tipo-sel" data-v="resgate" style="flex:1;justify-content:center">📤 Resgate</span></div>'
+    + '<div class="field"><label>Valor (R$) *</label><input class="input" id="ap-valor" inputmode="decimal" autofocus placeholder="0,00" style="font-size:22px;font-weight:700"></div>'
+    + '<div class="frow"><div class="field"><label>Ativo</label><select class="select" id="ap-ativo">'
+    + ativos.map(a => '<option value="'+a.id+'">'+esc(a.nome)+'</option>').join('') + '</select></div>'
+    + '<div class="field"><label>Data</label><input class="input" type="date" id="ap-data" value="'+hoje()+'"></div></div>'
+    + '<div class="field"><label>Nota</label><input class="input" id="ap-nota" placeholder="opcional"></div>'
+    + '<div class="banner acc tiny">Aporte sai do caixa mas é patrimônio: <b>não entra nas despesas nem no orçamento</b>. O fluxo mostra "Investido no mês" como linha separada.</div>'
+    + '<div class="bx-foot"><button class="btn primary big" data-act="ap-salvar">✓ Registrar</button></div>');
+});
+act('ap-tipo-sel', el => { $$('#ap-tipo .chip').forEach(c => c.classList.remove('sel')); el.classList.add('sel'); });
+act('ap-salvar', () => {
+  const valor = parseValor($('#ap-valor').value);
+  if (!(valor > 0)) { toast('Informe o valor.'); return; }
+  const tipo = ($('#ap-tipo .chip.sel')||{dataset:{v:'aporte'}}).dataset.v;
+  const mv = dbUpsert('investimentos_movimentos', { ativo_id: $('#ap-ativo').value, tipo, valor,
+    data: $('#ap-data').value || hoje(), nota: $('#ap-nota').value.trim() || null });
+  closeModal();
+  toast((tipo==='aporte' ? '📥 Aporte de ' : '📤 Resgate de ') + fmtBRL(valor) + ' registrado ✓',
+    { undo: () => { dbDelete('investimentos_movimentos', mv.id); render(); } });
+  if (window.checkConquistas) checkConquistas('investimento');
+  render();
+});
+
+/* ---- aba Investimentos ---- */
+function investTabHTML() {
+  const ativos = T('investimentos_ativos');
+  const patr = patrimonioTotal();
+  const rg = rentabilidadeGeral();
+  const ymAtual = mesDe(hoje());
+  const aportadoAno = sum(T('investimentos_movimentos').filter(m => m.tipo === 'aporte' && anoDe(m.data) === new Date().getFullYear()).map(m => m.valor));
+  let html = '<div class="grid4">'
+    + '<div class="kpi"><div class="l">🏛️ patrimônio total</div><div class="v acc">'+fmtBRL(patr)+'</div></div>'
+    + '<div class="kpi"><div class="l">investido no mês</div><div class="v">'+fmtBRL(aportadoNoMes(ymAtual))+'</div></div>'
+    + '<div class="kpi"><div class="l">aportado no ano</div><div class="v">'+fmtBRL(aportadoAno)+'</div></div>'
+    + '<div class="kpi"><div class="l">rentabilidade simples</div><div class="v '+(rg==null?'muted':rg>=0?'ok':'err')+'">'+(rg==null?'—':(rg>=0?'+':'')+fmtNum(rg*100,1)+'%')+'</div><div class="d muted tiny">saldo vs aportado</div></div></div>'
+    + '<div class="row wrap" style="margin:2px 0 14px"><button class="btn primary" data-act="qa-aporte">+ Aporte / resgate</button>'
+    + '<button class="btn" data-act="ativo-add">+ Ativo</button></div>';
+  // meta de patrimônio
+  const metaPatr = T('metas').find(m => m.vinculo_tipo === 'patrimonio' && !m.concluida);
+  if (metaPatr) {
+    const p = metaProgresso(metaPatr);
+    const fimMeta = metaPatr.prazo || (metaPatr.ano ? metaPatr.ano + '-12-31' : null);
+    const meses = fimMeta && fimMeta > hoje() ? Math.max(1, Math.round(diffDias(hoje(), fimMeta) / 30)) : null;
+    html += '<div class="card" style="border-color:rgba(124,92,252,.5)"><div class="card-h"><div class="h2">🎯 '+esc(metaPatr.nome)+'</div>'
+      + '<button class="iconbtn" data-act="meta-edit" data-id="'+metaPatr.id+'">✏️</button></div>'
+      + '<div class="row"><div class="bar thick" style="flex:1"><i style="width:'+Math.round(p.pct*100)+'%"></i></div><b class="small">'+Math.round(p.pct*100)+'%</b></div>'
+      + '<div class="tiny muted" style="margin-top:6px">'+fmtBRL(p.atual)+' de '+fmtBRL(p.alvo)
+      + (meses && !p.atingida ? ' · ritmo necessário: <b class="warn">'+fmtBRL((p.alvo-p.atual)/meses)+'/mês</b> por '+meses+' meses' : p.atingida ? ' · 🎉 batida!' : '')+'</div></div>';
+  } else {
+    html += '<div class="card"><div class="row"><span class="muted small" style="flex:1">Defina uma meta de patrimônio ("chegar a R$ X") com ritmo de aporte calculado.</span>'
+      + '<button class="btn small" data-act="invest-meta-criar">🎯 Criar meta</button></div></div>';
+  }
+  // evolução
+  const serie = serieMensalPatrimonio(12);
+  if (serie.some(p => p.y > 0)) html += '<div class="card"><div class="h2">📈 Evolução do patrimônio</div>'
+    + svgLinha(serie, { fmt: v => 'R$' + fmtNum(v/1000,1) + 'k', cor:'var(--acc)' }) + '</div>';
+  // ativos
+  html += ativos.filter(a => a.ativo !== false).map(a => {
+    const s = saldoAtualAtivo(a.id);
+    const rent = rentabilidadeAtivo(a.id);
+    const aportado = sum(movsAtivo(a.id).filter(m => m.tipo === 'aporte').map(m => m.valor));
+    const velho = s && diffDias(s.data, hoje()) >= 60;
+    return '<div class="card"><div class="card-h"><div style="flex:1"><div class="h2" style="margin:0">'+esc(a.nome)+'</div>'
+      + '<div class="tiny muted">'+classeLabel(a.classe)+(a.instituicao?' · '+esc(a.instituicao):'')+'</div></div>'
+      + '<div class="center"><div style="font-weight:800;font-size:16px">'+(s?fmtBRL(s.saldo):'—')+'</div>'
+      + '<div class="tiny '+(velho?'warn':'muted')+'">'+(s ? (velho?'⏰ ':'')+'saldo de '+fmtData(s.data) : 'sem saldo ainda')+'</div></div>'
+      + '<button class="iconbtn" data-act="ativo-edit" data-id="'+a.id+'">✏️</button></div>'
+      + (velho ? '<div class="banner warn tiny" style="margin:2px 0 10px">Este ativo está há '+diffDias(s.data, hoje())+' dias sem atualização de saldo — que tal atualizar?</div>' : '')
+      + '<div class="row wrap tiny muted" style="margin-bottom:10px"><span>aportado: <b>'+fmtBRL(aportado)+'</b></span>'
+      + (rent != null ? '<span>· rentabilidade: <b class="'+(rent>=0?'ok':'err')+'">'+(rent>=0?'+':'')+fmtNum(rent*100,1)+'%</b></span>' : '') + '</div>'
+      + '<div class="row wrap"><button class="btn small primary" data-act="saldo-atualizar" data-id="'+a.id+'">💰 Atualizar saldo</button>'
+      + '<button class="btn small" data-act="qa-aporte">+ aporte</button></div></div>';
+  }).join('') || '<div class="card"><div class="empty"><span class="em">📈</span>Cadastre seus ativos (CDB, ações, FIIs, cripto…) e acompanhe o patrimônio crescer.</div></div>';
+  // movimentos recentes
+  const movs = ordenar(T('investimentos_movimentos'), m => m.data + (m.criado_em||''), true).slice(0, 20);
+  if (movs.length) html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Movimentos recentes</div><div class="list" style="padding:0 10px 8px">'
+    + movs.map(m => { const a = byId('investimentos_ativos', m.ativo_id);
+      return '<div class="item" style="cursor:default"><span>'+(m.tipo==='aporte'?'📥':'📤')+'</span><div class="grow">'
+        + '<div class="ttl">'+(m.tipo==='aporte'?'Aporte':'Resgate')+' · '+esc(a?a.nome:'?')+'</div>'
+        + '<div class="sub">'+fmtData(m.data)+(m.nota?' · '+esc(m.nota):'')+'</div></div>'
+        + '<b class="'+(m.tipo==='aporte'?'acc':'warn')+'">'+fmtBRL(m.valor)+'</b>'
+        + '<button class="iconbtn" data-act="mov-del" data-id="'+m.id+'">✕</button></div>'; }).join('') + '</div></div>';
+  const inativos = ativos.filter(a => a.ativo === false);
+  if (inativos.length) html += '<details class="help"><summary>📦 Ativos encerrados ('+inativos.length+')</summary><div class="row wrap" style="margin-top:8px">'
+    + inativos.map(a => '<span class="chip" data-act="ativo-edit" data-id="'+a.id+'">'+esc(a.nome)+'</span>').join('') + '</div></details>';
+  return html;
+}
+act('invest-meta-criar', () => { metaModal(null); setTimeout(() => { $('#mt-vinc').value = 'patrimonio'; $('#mt-uni').value = 'R$'; $('#mt-nome').value = 'Chegar a R$ '; $('#mt-nome').focus(); }, 80); });
+act('mov-del', el => { const m = {...byId('investimentos_movimentos', el.dataset.id)}; dbDelete('investimentos_movimentos', el.dataset.id); render();
+  toast('Movimento excluído.', {undo: () => { dbUpsert('investimentos_movimentos', m); render(); }}); });
+const ativoFields = [
+  {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Tesouro Selic 2029'},
+  {k:'classe', t:'sel', l:'Classe', meia:1, opts: CLASSES_ATIVO.map(([v,t]) => ({v,t}))},
+  {k:'instituicao', l:'Instituição', meia:1, ph:'corretora/banco'},
+  {k:'ativo', t:'chk', l:'Ativo (em carteira)', def:true}
+];
+act('ativo-add', () => editModal({ titulo:'Novo ativo', fields: ativoFields, vals:{ativo:true, classe:'renda_fixa'},
+  onSave: v => { const a = dbUpsert('investimentos_ativos', v); render(); Actions['saldo-atualizar']({dataset:{id:a.id}}); } }));
+act('ativo-edit', el => {
+  const a = byId('investimentos_ativos', el.dataset.id);
+  editModal({ titulo:'Editar ativo', fields: ativoFields, vals: a,
+    onSave: v => { dbPatch('investimentos_ativos', a.id, v); render(); },
+    onDelete: () => confirmBox('Excluir o ativo, seus movimentos e saldos? (encerrar mantém o histórico)', () => {
+      movsAtivo(a.id).forEach(m => dbDelete('investimentos_movimentos', m.id));
+      T('investimentos_saldos').filter(s => s.ativo_id === a.id).forEach(s => dbDelete('investimentos_saldos', s.id));
+      dbDelete('investimentos_ativos', a.id); render();
+    }, {perigo:1, sim:'Excluir tudo'}) });
+});
+act('saldo-atualizar', el => {
+  const a = byId('investimentos_ativos', el.dataset.id); if (!a) return;
+  const s = saldoAtualAtivo(a.id);
+  modal('<div class="bx-h"><div class="h2">💰 Saldo de '+esc(a.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + (s ? '<p class="tiny muted" style="margin-top:0">Último: '+fmtBRL(s.saldo)+' em '+fmtData(s.data)+'</p>' : '')
+    + '<div class="frow"><div class="field"><label>Saldo total hoje (R$) *</label><input class="input" id="sd-valor" inputmode="decimal" autofocus placeholder="0,00" style="font-size:20px;font-weight:700"></div>'
+    + '<div class="field"><label>Data</label><input class="input" type="date" id="sd-data" value="'+hoje()+'"></div></div>'
+    + '<div class="bx-foot"><button class="btn primary" data-act="saldo-salvar" data-id="'+a.id+'">✓ Salvar snapshot</button></div>');
+});
+act('saldo-salvar', el => {
+  const valor = parseValor($('#sd-valor').value);
+  if (!(valor >= 0) || $('#sd-valor').value === '') { toast('Informe o saldo.'); return; }
+  const data = $('#sd-data').value || hoje();
+  const existente = T('investimentos_saldos').find(s => s.ativo_id === el.dataset.id && s.data === data);
+  if (existente) dbPatch('investimentos_saldos', existente.id, { saldo: valor });
+  else dbUpsert('investimentos_saldos', { ativo_id: el.dataset.id, data, saldo: valor });
+  closeModal();
+  toast('Patrimônio atualizado: ' + fmtBRL(patrimonioTotal()) + ' 🏛️');
+  if (window.checkConquistas) checkConquistas('investimento');
+  render();
+});
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
