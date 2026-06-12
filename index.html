@@ -3101,6 +3101,183 @@ act('ex-move', el => {
   dbPatch('treino_exercicios', irmaos[i].id, {ordem: j}); dbPatch('treino_exercicios', irmaos[j].id, {ordem: i});
   closeModal(true); Actions['planilha-edit']({dataset:{id:ex.planilha_id}});
 });
+/* ════════════════ ETAPA 8 — CORRIDA + CORPO ════════════════ */
+const paceSeg = c => c.distancia_km > 0 ? c.tempo_seg / c.distancia_km : 0;
+const paceFmt = segKm => { if (!segKm || !isFinite(segKm)) return '—'; const m = Math.floor(segKm/60), s = Math.round(segKm%60); return m + ':' + pad2(s) + '/km'; };
+const TIPOS_CORRIDA = ['leve','longo','intervalado','ritmo','prova','outro'];
+
+act('qa-corrida', () => {
+  closeModal();
+  modal('<div class="bx-h"><div class="h2">🏃 Registrar corrida</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="frow"><div class="field"><label>Distância (km) *</label><input class="input" id="cr-km" type="number" step="any" inputmode="decimal" data-inp="cr-pace" autofocus></div>'
+    + '<div class="field"><label>Tempo (mm:ss ou hh:mm:ss) *</label><input class="input" id="cr-tempo" placeholder="52:30" data-inp="cr-pace"></div></div>'
+    + '<div class="banner acc" id="cr-pace-out" style="margin-bottom:12px">Pace: —</div>'
+    + '<div class="frow"><div class="field"><label>Data</label><input class="input" type="date" id="cr-data" value="'+hoje()+'"></div>'
+    + '<div class="field"><label>Tipo</label><select class="select" id="cr-tipo">'+TIPOS_CORRIDA.map(t => '<option>'+t+'</option>').join('')+'</select></div></div>'
+    + '<div class="field"><label>Percepção de esforço (1 fácil – 10 máximo)</label><div class="row"><input type="range" min="1" max="10" value="5" id="cr-perc" style="flex:1;accent-color:var(--acc)" data-inp="cr-perc-out"><b id="cr-perc-v">5</b></div></div>'
+    + '<div class="field"><label>Nota</label><input class="input" id="cr-nota" placeholder="como foi?"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="corrida-salvar">✓ Salvar corrida</button></div>');
+});
+act('cr-pace', () => {
+  const km = Number($('#cr-km').value), seg = parseTempo($('#cr-tempo').value);
+  $('#cr-pace-out').textContent = (km > 0 && seg > 0) ? 'Pace: ' + paceFmt(seg/km) + ' · ' + fmtDur(seg) + ' para ' + fmtNum(km,2) + ' km' : 'Pace: —';
+});
+act('cr-perc-out', el => { $('#cr-perc-v').textContent = el.value; });
+act('corrida-salvar', () => {
+  const km = Number($('#cr-km').value), seg = parseTempo($('#cr-tempo').value);
+  if (!(km > 0) || !(seg > 0)) { toast('Preencha distância e tempo.', {icone:'🏃'}); return; }
+  const antes = recordesCorrida();
+  const c = dbUpsert('corridas', { data: $('#cr-data').value || hoje(), distancia_km: km, tempo_seg: seg,
+    percepcao: Number($('#cr-perc').value) || null, tipo: $('#cr-tipo').value, nota: $('#cr-nota').value.trim() || null });
+  autoHabito('corrida', km);
+  closeModal();
+  toast('🏃 ' + fmtNum(km,2) + ' km @ ' + paceFmt(seg/km) + ' registrados ✓', { undo: () => { dbDelete('corridas', c.id); render(); } });
+  const dep = recordesCorrida();
+  const novos = [];
+  if (dep.maiorKm > antes.maiorKm) novos.push('maior distância: '+fmtNum(dep.maiorKm,2)+'km');
+  if (antes.melhorPace && dep.melhorPace < antes.melhorPace) novos.push('melhor pace: '+paceFmt(dep.melhorPace));
+  if (novos.length) setTimeout(() => toast('🏆 Recorde! ' + novos.join(' · '), {ms:6000}), 700);
+  if (window.checkConquistas) checkConquistas('corrida');
+  render();
+});
+function recordesCorrida() {
+  const cs = T('corridas');
+  const out = { maiorKm: 0, melhorPace: null, melhorPace5: null, maisKmMes: 0, maisKmSemana: 0, total: 0 };
+  const porMes = {}, porSem = {};
+  for (const c of cs) {
+    const km = Number(c.distancia_km) || 0;
+    out.total += km;
+    if (km > out.maiorKm) out.maiorKm = km;
+    const p = paceSeg(c);
+    if (km >= 1 && p > 0 && (out.melhorPace === null || p < out.melhorPace)) out.melhorPace = p;
+    if (km >= 5 && p > 0 && (out.melhorPace5 === null || p < out.melhorPace5)) out.melhorPace5 = p;
+    porMes[mesDe(c.data)] = (porMes[mesDe(c.data)] || 0) + km;
+    porSem[inicioSemana(c.data)] = (porSem[inicioSemana(c.data)] || 0) + km;
+  }
+  for (const m in porMes) if (porMes[m] > out.maisKmMes) out.maisKmMes = porMes[m];
+  for (const s in porSem) if (porSem[s] > out.maisKmSemana) out.maisKmSemana = porSem[s];
+  return out;
+}
+
+/* ---- CORPO ---- */
+const MEDIDAS = [['cintura','Cintura'],['quadril','Quadril'],['peito','Peito'],['braco','Braço'],['coxa','Coxa']];
+act('qa-peso', () => {
+  closeModal();
+  const ult = ordenar(T('corpo_registros'), r => r.data, true)[0];
+  modal('<div class="bx-h"><div class="h2">⚖️ Peso e medidas</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="frow"><div class="field"><label>Peso (kg)</label><input class="input" id="cp-peso" type="number" step="any" inputmode="decimal" autofocus placeholder="'+(ult&&ult.peso_kg?fmtNum(ult.peso_kg,1):'')+'"></div>'
+    + '<div class="field"><label>Data</label><input class="input" type="date" id="cp-data" value="'+hoje()+'"></div></div>'
+    + '<details class="help"><summary>Medidas (cm, opcionais)</summary><div class="frow" style="flex-wrap:wrap;margin-top:8px">'
+    + MEDIDAS.map(([k,l]) => '<div class="field" style="min-width:100px"><label>'+l+'</label><input class="input" type="number" step="any" id="cp-'+k+'" placeholder="'+(ult&&ult.medidas&&ult.medidas[k]?ult.medidas[k]:'')+'"></div>').join('')
+    + '</div></details>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="corpo-salvar">✓ Salvar</button></div>');
+});
+act('corpo-salvar', () => {
+  const peso = $('#cp-peso').value === '' ? null : Number($('#cp-peso').value);
+  const medidas = {};
+  let temMedida = false;
+  MEDIDAS.forEach(([k]) => { const v = $('#cp-'+k).value; if (v !== '') { medidas[k] = Number(v); temMedida = true; } });
+  if (peso == null && !temMedida) { toast('Preencha pelo menos o peso ou uma medida.'); return; }
+  const r = dbUpsert('corpo_registros', { data: $('#cp-data').value || hoje(), peso_kg: peso, medidas: temMedida ? medidas : null });
+  closeModal();
+  toast('Registro corporal salvo ✓', {icone:'📏', undo: () => { dbDelete('corpo_registros', r.id); render(); }});
+  render();
+});
+
+/* ---- página CORRIDA (abas Corrida | Corpo) ---- */
+reg('corrida', {
+  titulo: 'Corrida',
+  render: (params) => {
+    const aba = params[0] === 'corpo' ? 'corpo' : 'corrida';
+    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🏃 Corrida & Corpo</div>'
+      + '<div class="seg"><button class="'+(aba==='corrida'?'on':'')+'" data-act="nav" data-r="corrida">🏃 Corrida</button>'
+      + '<button class="'+(aba==='corpo'?'on':'')+'" data-act="nav" data-r="corrida/corpo">📏 Corpo</button></div></div>';
+    return html + (aba === 'corrida' ? corridaTabHTML() : corpoTabHTML());
+  }
+});
+function corridaTabHTML() {
+  const cs = ordenar(T('corridas'), c => c.data + (c.criado_em||''), true);
+  const rec = recordesCorrida();
+  const anoAtual = new Date().getFullYear();
+  const kmAno = sum(cs.filter(c => anoDe(c.data) === anoAtual).map(c => c.distancia_km));
+  let html = '<button class="btn primary" data-act="qa-corrida" style="margin-bottom:14px">+ Registrar corrida</button>';
+  html += '<div class="grid4">'
+    + '<div class="kpi"><div class="l">km no ano</div><div class="v">'+fmtNum(kmAno,1)+'</div></div>'
+    + '<div class="kpi"><div class="l">🏆 melhor pace</div><div class="v" style="font-size:18px">'+paceFmt(rec.melhorPace)+'</div><div class="d muted tiny">≥5km: '+paceFmt(rec.melhorPace5)+'</div></div>'
+    + '<div class="kpi"><div class="l">🏆 maior distância</div><div class="v">'+fmtNum(rec.maiorKm,1)+' km</div></div>'
+    + '<div class="kpi"><div class="l">🏆 melhor mês</div><div class="v">'+fmtNum(rec.maisKmMes,0)+' km</div></div></div>';
+  if (cs.length) {
+    const ultimas = ordenar(cs.slice(0, 20), c => c.data);
+    html += '<div class="card"><div class="h2">⏱️ Pace no tempo</div>'
+      + svgLinha(ultimas.map(c => ({ x: fmtDataCurta(c.data), y: Math.round(paceSeg(c)) })), { fmt: v => paceFmt(v), cor:'var(--p3)' })
+      + '<div class="tiny muted">menor = mais rápido</div></div>';
+    const semanas = [];
+    for (let i = 11; i >= 0; i--) {
+      const s = addDias(inicioSemana(hoje()), -7*i);
+      semanas.push({ x: fmtDataCurta(s), y: Math.round(sum(cs.filter(c => inicioSemana(c.data) === s).map(c => c.distancia_km))*10)/10 });
+    }
+    html += '<div class="card"><div class="h2">📊 Volume semanal (12 semanas)</div>' + svgBarras(semanas, { fmt: v => v+'km' }) + '</div>';
+    const meses = [];
+    for (let m = 0; m < 12; m++) {
+      const ym = anoAtual + '-' + pad2(m+1);
+      meses.push({ x: MESES_C[m], y: Math.round(sum(cs.filter(c => mesDe(c.data) === ym).map(c => c.distancia_km))) });
+    }
+    html += '<div class="card"><div class="h2">📈 km por mês em '+anoAtual+'</div>' + svgBarras(meses, { fmt: v => v }) + '</div>';
+  }
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Histórico</div><div class="list" style="padding:0 10px 8px">'
+    + (cs.slice(0, 30).map(c => '<div class="item" data-act="corrida-edit" data-id="'+c.id+'"><span>🏃</span><div class="grow">'
+      + '<div class="ttl">'+fmtNum(c.distancia_km,2)+' km · '+paceFmt(paceSeg(c))+'</div>'
+      + '<div class="sub">'+fmtData(c.data)+' · '+fmtDur(c.tempo_seg)+' · '+esc(c.tipo||'')+(c.percepcao?' · esforço '+c.percepcao+'/10':'')+(c.nota?' · '+esc(c.nota):'')+'</div></div></div>').join('')
+    || '<div class="empty"><span class="em">🏃</span>Primeira corrida ainda não registrada.</div>') + '</div></div>';
+  return html;
+}
+act('corrida-edit', el => {
+  const c = byId('corridas', el.dataset.id); if (!c) return;
+  editModal({ titulo:'Editar corrida', fields: [
+      {k:'data', t:'date', l:'Data', meia:1},
+      {k:'distancia_km', t:'num', l:'Distância (km)', meia:1, req:1},
+      {k:'tempo', l:'Tempo (mm:ss)', meia:1, req:1},
+      {k:'tipo', t:'sel', l:'Tipo', meia:1, opts: TIPOS_CORRIDA},
+      {k:'percepcao', t:'num', l:'Percepção 1–10', meia:1},
+      {k:'nota', l:'Nota'}
+    ], vals: {...c, tempo: fmtDur(c.tempo_seg)},
+    onSave: v => { const seg = parseTempo(v.tempo); if (!(seg>0) || !(v.distancia_km>0)) { toast('Tempo/distância inválidos.'); return; }
+      dbPatch('corridas', c.id, { data: v.data, distancia_km: v.distancia_km, tempo_seg: seg, tipo: v.tipo, percepcao: v.percepcao, nota: v.nota }); render(); },
+    onDelete: () => { const bkp = {...c}; dbDelete('corridas', c.id); render();
+      toast('Corrida excluída.', {undo: () => { dbUpsert('corridas', bkp); render(); }}); } });
+});
+function corpoTabHTML() {
+  const rs = ordenar(T('corpo_registros'), r => r.data);
+  const comPeso = rs.filter(r => r.peso_kg != null);
+  const ult = rs[rs.length-1];
+  let html = '<button class="btn primary" data-act="qa-peso" style="margin-bottom:14px">+ Registrar peso/medidas</button>';
+  if (comPeso.length) {
+    const atual = comPeso[comPeso.length-1], primeiro = comPeso[0];
+    html += '<div class="grid3">'
+      + '<div class="kpi"><div class="l">peso atual</div><div class="v">'+fmtNum(atual.peso_kg,1)+' kg</div><div class="d muted tiny">'+fmtData(atual.data)+'</div></div>'
+      + '<div class="kpi"><div class="l">variação total</div><div class="v '+(atual.peso_kg-primeiro.peso_kg<=0?'ok':'warn')+'">'+(atual.peso_kg-primeiro.peso_kg>0?'+':'')+fmtNum(atual.peso_kg-primeiro.peso_kg,1)+' kg</div></div>'
+      + '<div class="kpi"><div class="l">registros</div><div class="v">'+rs.length+'</div></div></div>'
+      + '<div class="card"><div class="h2">⚖️ Evolução do peso</div>'
+      + svgLinha(comPeso.slice(-30).map(r => ({ x: fmtDataCurta(r.data), y: Number(r.peso_kg) })), { fmt: v => fmtNum(v,1)+'kg', cor:'var(--ok)' }) + '</div>';
+  }
+  if (ult && ult.medidas) {
+    const ant = [...rs].reverse().find(r => r !== ult && r.medidas);
+    html += '<div class="card"><div class="h2">📏 Últimas medidas <span class="tiny muted">('+fmtData(ult.data)+')</span></div><div class="row wrap">'
+      + MEDIDAS.filter(([k]) => ult.medidas[k] != null).map(([k,l]) => {
+        const d = ant && ant.medidas && ant.medidas[k] != null ? ult.medidas[k] - ant.medidas[k] : null;
+        return '<div class="kpi" style="min-width:110px"><div class="l">'+l+'</div><div class="v" style="font-size:18px">'+fmtNum(ult.medidas[k],1)+' cm</div>'
+          + (d !== null ? '<div class="d '+(d<=0?'ok':'warn')+'">'+(d>0?'+':'')+fmtNum(d,1)+'</div>' : '') + '</div>'; }).join('') + '</div></div>';
+  }
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Histórico</div><div class="list" style="padding:0 10px 8px">'
+    + ([...rs].reverse().slice(0, 20).map(r => '<div class="item" style="cursor:default"><span>📏</span><div class="grow">'
+      + '<div class="ttl">'+(r.peso_kg!=null?fmtNum(r.peso_kg,1)+' kg':'medidas')+'</div><div class="sub">'+fmtData(r.data)
+      + (r.medidas ? ' · ' + MEDIDAS.filter(([k]) => r.medidas[k]!=null).map(([k,l]) => l+' '+r.medidas[k]).join(', ') : '') + '</div></div>'
+      + '<button class="iconbtn" data-act="corpo-del" data-id="'+r.id+'">✕</button></div>').join('')
+    || '<div class="empty"><span class="em">📏</span>Nenhum registro corporal.</div>') + '</div></div>';
+  return html;
+}
+act('corpo-del', el => { const r = {...byId('corpo_registros', el.dataset.id)}; dbDelete('corpo_registros', el.dataset.id); render();
+  toast('Registro excluído.', {undo: () => { dbUpsert('corpo_registros', r); render(); }}); });
 /* ==FIM_ETAPAS== */
 
 /* ============ BOOT ============ */
