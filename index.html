@@ -358,6 +358,16 @@ details.help summary{cursor:pointer;font-weight:700;font-size:13.5px}
 </style>
 </head>
 <body>
+   <button id="login-google"
+style="
+position:fixed;
+top:16px;
+right:16px;
+z-index:9999;
+padding:10px 14px;
+border-radius:8px;">
+Entrar com Google
+</button>
 <div id="app">
   <aside id="sidebar"></aside>
   <header id="topbar"></header>
@@ -5058,6 +5068,32 @@ function boot() {
   }
 }
 boot();
+</script>
+   <script>
+async function iniciar(){
+
+const {
+data:{session}
+}=await window.supabaseClient.auth.getSession()
+
+if(session){
+document.getElementById('login-google').style.display='none'
+return
+}
+
+document
+.getElementById('login-google')
+.onclick=async()=>{
+
+await window.supabaseClient.auth.signInWithOAuth({
+provider:'google'
+})
+
+}
+
+}
+
+iniciar()
 </script>
 </body>
 </html>
