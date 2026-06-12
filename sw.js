@@ -4,8 +4,19 @@
    (Supabase, extração de artigos). Regra 18 do spec. */
 'use strict';
 
-const VERSION = 'lifeos-v4.1.0';
-const CORE = ['./', './index.html', './manifest.webmanifest'];
+const VERSION = 'lifeos-v4.1.2';
+const CORE = [
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './assets/styles/main.css',
+  './assets/services/supabase.js',
+  './assets/services/auth.js',
+  './assets/state/store.js',
+  './assets/components/ui.js',
+  './assets/components/router.js',
+  './assets/components/app.js'
+];
 
 // Hosts de DADOS — nunca interceptar/cachear
 const DATA_HOSTS = ['supabase.co', 'supabase.in', 'r.jina.ai'];
