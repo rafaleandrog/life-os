@@ -372,9 +372,15 @@ async function flush(forcar) {
   const me = usuarioAtual();
   let transitorio = false;
   if (me && me.id) {
-    // PAIS antes de FILHOS — ordena uma cópia por dependência (estável p/ empates)
+    // Ordem: todos os UPSERTS primeiro (pai→filho), depois os DELETES (filho→pai).
+    // Assim a repontagem de filhos é gravada antes de apagar pais duplicados (sem FK/cascade indevido).
     const ordenada = S.queue.map((it, i) => ({ it, i }))
-      .sort((a, b) => (tableRank(a.it.t) - tableRank(b.it.t)) || (a.i - b.i))
+      .sort((a, b) => {
+        const da = a.it.op === 'del' ? 1 : 0, db = b.it.op === 'del' ? 1 : 0;
+        if (da !== db) return da - db;
+        const rk = da ? (tableRank(b.it.t) - tableRank(a.it.t)) : (tableRank(a.it.t) - tableRank(b.it.t));
+        return rk || (a.i - b.i);
+      })
       .map(x => x.it);
     laco:
     for (const it of ordenada) {
@@ -440,6 +446,12 @@ async function pullAll(silencioso) {
   if (S.queue.length) return false; // não sobrescrever com pendências locais
   const novo = {};
   for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t);
+  // dedup defensivo por id no que veio da nuvem (cache nunca recebe id repetido)
+  for (const t of Object.keys(TABLES)) {
+    const pk = TABLES[t], m = new Map();
+    for (const r of novo[t]) if (r[pk] != null) m.set(r[pk], r);
+    if (m.size !== novo[t].length) novo[t] = Array.from(m.values());
+  }
   const totalNuvem = Object.values(novo).reduce((a, arr) => a + arr.length, 0);
   const totalLocal = Object.values(S.data).reduce((a, arr) => a + arr.length, 0);
   if (!totalNuvem && totalLocal) return 'vazio'; // nuvem vazia p/ esta conta: NÃO apagar dados locais
@@ -457,6 +469,69 @@ async function fullPush() { // conectar depois: envia tudo que existe localmente
     for (let i = 0; i < rows.length; i += 200) enqueue('up', t, rows.slice(i, i + 200));
   }
   await flush();
+}
+
+/* Consolida duplicatas de PAIS por chave de negócio (nome), repontando os filhos
+   para o registro canônico (o mais antigo) e apagando os excedentes no banco.
+   Corrige bancos que já acumularam áreas/categorias/etc. repetidas. Retorna nº removido. */
+const DEDUP_PLANOS = [
+  { t:'areas', chave:r=>r.nome, filhos:[['projetos','area_id'],['tarefas','area_id'],['habitos','area_id'],['metas','area_id'],['livros','area_id'],['textos','area_id'],['blocos','area_id']] },
+  { t:'categorias_financeiras', chave:r=>r.nome, filhos:[['lancamentos_financeiros','categoria_id']] },
+  { t:'contas_financeiras', chave:r=>r.nome, filhos:[['lancamentos_financeiros','conta_id']] },
+  { t:'etiquetas', chave:r=>r.nome, filhos:[] }, // referenciadas por nome (text[]), sem repontar
+  { t:'projetos', chave:r=>(r.area_id||'')+'|'+r.nome, filhos:[['secoes','projeto_id'],['tarefas','projeto_id'],['blocos','projeto_id']] },
+  { t:'secoes', chave:r=>(r.projeto_id||'')+'|'+r.nome, filhos:[['tarefas','secao_id']] },
+  { t:'treino_planilhas', chave:r=>r.nome, filhos:[['treino_exercicios','planilha_id'],['treino_sessoes','planilha_id']] },
+  { t:'investimentos_ativos', chave:r=>r.nome, filhos:[['investimentos_movimentos','ativo_id'],['investimentos_saldos','ativo_id']] }
+];
+function dedupRemoto() {
+  let removidos = 0;
+  for (const p of DEDUP_PLANOS) {
+    const arr = T(p.t); if (arr.length < 2) continue;
+    const pk = TABLES[p.t];
+    const ordenado = [...arr].sort((a,b) => String(a.criado_em||'').localeCompare(String(b.criado_em||'')));
+    const canon = new Map();      // chave → id canônico (1º/mais antigo)
+    const remap = {};             // idDuplicado → idCanônico
+    for (const r of ordenado) {
+      const k = p.chave(r), id = r[pk];
+      if (!canon.has(k)) canon.set(k, id);
+      else if (canon.get(k) !== id) remap[id] = canon.get(k);
+    }
+    const dups = Object.keys(remap);
+    if (!dups.length) continue;
+    // 1) reponta filhos para o id canônico (enfileira update)
+    for (const [ct, campo] of p.filhos) {
+      for (const c of T(ct)) if (remap[c[campo]] !== undefined) { c[campo] = remap[c[campo]]; enqueue('up', ct, [c]); }
+    }
+    // 2) remove duplicatas do cache local
+    S.data[p.t] = arr.filter(r => remap[r[pk]] === undefined);
+    // 3) apaga as duplicatas no banco (flush envia DELETES depois dos UPDATES)
+    for (const id of dups) { enqueue('del', p.t, id); removidos++; }
+  }
+  if (removidos) saveLocal();
+  return removidos;
+}
+
+/* Reset seguro: descarta TODO o estado local (fila + cache + erros), relê o banco
+   limpo e reconstrói o cache a partir dele. Para quando o estado local corromper. */
+async function reconstruirDoBanco() {
+  if (!CFG.url || !CFG.key || !usuarioAutenticado()) { toast('Entre com o Google primeiro.', {icone:'🔐'}); return; }
+  S.queue = []; S.deadQueue = []; saveQueue(); saveDead();
+  S.syncErr = null; S.syncPausado = false; S.retry = 0;
+  if (S.retryTimer) { clearTimeout(S.retryTimer); S.retryTimer = null; }
+  S.data = tabelasVazias(); saveLocal();
+  FLAGS.seeded = true; saveFlags();            // já há conta na nuvem: nunca re-semear por cima
+  const novo = {};
+  for (const t of Object.keys(TABLES)) {
+    const pk = TABLES[t], m = new Map();
+    for (const r of await pullTable(t)) if (r[pk] != null) m.set(r[pk], r); // dedup por id
+    novo[t] = Array.from(m.values());
+  }
+  S.data = novo; S.lastPull = nowISO(); saveLocal();
+  const limpos = dedupRemoto();                // consolida pais repetidos por nome e reponta filhos
+  if (limpos) await flush();                    // grava repontagem + apaga duplicatas no banco
+  render();
+  return limpos;
 }
 function syncStatus() {
   if (!CFG.url || !CFG.key) return 'off';
@@ -494,24 +569,30 @@ async function sincronizarNuvemInicial(silencioso) {
     atualizarSyncUI();
     return false;
   }
-  // banco ainda sem proteção por usuário? guia a migração e não tenta sincronizar
-  const chk = await verificarTabelas().catch(() => null);
-  if (chk && (chk.faltando.length || chk.precisaMigrar)) { atualizarSyncUI(); modalMigracao(chk); render(); return false; }
-  await flush();
-  const ok = await pullAll(true);
-  let precisaRender = (ok === true); // só re-renderiza quando os dados realmente mudaram (anti-piscar)
-  if (ok === 'vazio') { // nuvem vazia para esta conta e há dados locais → envia tudo (idempotente)
-    await fullPush();
-    if (!S.queue.length && !silencioso) toast('Seus dados deste dispositivo foram enviados para a sua conta ✓', { icone:'☁️', ms:5500 });
-  } else if ((ok === true || ok === 'igual') && !T('areas').length) {
-    seedData();
+  if (S.sincronizando) return false;   // MUTEX: nunca rodar dois ciclos ao mesmo tempo
+  S.sincronizando = true;              // (era a causa do seed triplicado no 1º login)
+  try {
+    // banco ainda sem proteção por usuário? guia a migração e não tenta sincronizar
+    const chk = await verificarTabelas().catch(() => null);
+    if (chk && (chk.faltando.length || chk.precisaMigrar)) { atualizarSyncUI(); modalMigracao(chk); render(); return false; }
     await flush();
-    precisaRender = true;
+    const ok = await pullAll(true);
+    let precisaRender = (ok === true); // só re-renderiza quando os dados realmente mudaram (anti-piscar)
+    if (ok === 'vazio') { // nuvem vazia para esta conta e há dados locais → envia tudo (idempotente)
+      await fullPush();
+      if (!S.queue.length && !silencioso) toast('Seus dados deste dispositivo foram enviados para a sua conta ✓', { icone:'☁️', ms:5500 });
+    } else if ((ok === true || ok === 'igual') && !FLAGS.seeded && !T('areas').length) {
+      seedData(); // só semeia se a nuvem estiver realmente vazia e nunca semeado antes
+      await flush();
+      precisaRender = true;
+    }
+    if (!silencioso && ok === true) toast('Sincronizado ✓', { icone:'🔄' });
+    // re-render de background: preserva o scroll e não "pisca" (sem fade)
+    if (precisaRender) render({ manterScroll: true, semFade: true }); else atualizarSyncUI();
+    return ok;
+  } finally {
+    S.sincronizando = false;
   }
-  if (!silencioso && ok === true) toast('Sincronizado ✓', { icone:'🔄' });
-  // re-render de background: preserva o scroll e não "pisca" (sem fade)
-  if (precisaRender) render({ manterScroll: true, semFade: true }); else atualizarSyncUI();
-  return ok;
 }
 window.LifeOSAfterAuthChange = state => {
   if (state && state.user) sincronizarNuvemInicial(true).catch(e => { S.syncErr = e.msg || String(e); atualizarSyncUI(); });
@@ -613,26 +694,37 @@ async function copiarTexto(t, msg) {
 act('copiar-sql', () => copiarTexto(sqlSetup(), 'SQL copiado! Cole no SQL Editor do Supabase e clique em Run.'));
 
 /* ---- Dados de exemplo (primeiro acesso) ---- */
+/* UUID determinístico a partir de uma string — ids estáveis para os DADOS DE EXEMPLO,
+   garantindo que o seed seja idempotente por id (reenvios = atualização, nunca duplicata). */
+function detUUID(seed) {
+  const s = 'lifeos:' + seed; let x = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 0x01000193) >>> 0; }
+  let hex = '';
+  while (hex.length < 32) { x = Math.imul(x ^ (x >>> 15), 0x2c1b3c6d) >>> 0; x = Math.imul(x ^ (x >>> 13), 0x297a2d39) >>> 0; x ^= x >>> 16; hex += ('00000000' + (x >>> 0).toString(16)).slice(-8); }
+  hex = hex.slice(0, 32);
+  return hex.slice(0,8)+'-'+hex.slice(8,12)+'-4'+hex.slice(13,16)+'-8'+hex.slice(17,20)+'-'+hex.slice(20,32);
+}
 function seedData() {
-  if (T('areas').length) return;
-  const aP = dbUpsert('areas', {nome:'Pessoal',  cor:'#7C5CFC', icone:'🏠', ordem:0});
-  const aT = dbUpsert('areas', {nome:'Trabalho', cor:'#5CC8FC', icone:'💼', ordem:1});
-  const aS = dbUpsert('areas', {nome:'Saúde',    cor:'#3DDC97', icone:'🏃', ordem:2});
-  const aM = dbUpsert('areas', {nome:'Mente',    cor:'#FFB454', icone:'📚', ordem:3});
-  const aF = dbUpsert('areas', {nome:'Finanças', cor:'#F472B6', icone:'💰', ordem:4});
-  dbUpsert('etiquetas', {nome:'urgente', cor:'#FF5C7A'});
-  dbUpsert('etiquetas', {nome:'casa', cor:'#3DDC97'});
-  dbUpsert('etiquetas', {nome:'rápido', cor:'#5CC8FC'});
-  dbUpsert('categorias_financeiras', {nome:'Salário', tipo:'entrada', cor:'#3DDC97'});
-  dbUpsert('categorias_financeiras', {nome:'Alimentação', tipo:'saida', cor:'#FFB454', orcamento_mensal:800});
-  dbUpsert('categorias_financeiras', {nome:'Moradia', tipo:'saida', cor:'#5CC8FC', orcamento_mensal:1500});
-  dbUpsert('categorias_financeiras', {nome:'Transporte', tipo:'saida', cor:'#C084FC', orcamento_mensal:300});
-  dbUpsert('categorias_financeiras', {nome:'Lazer', tipo:'saida', cor:'#F472B6', orcamento_mensal:250});
-  dbUpsert('categorias_financeiras', {nome:'Assinaturas', tipo:'saida', cor:'#FF5C7A', orcamento_mensal:120});
-  dbUpsert('contas_financeiras', {nome:'Conta principal', tipo:'conta'});
-  dbUpsert('contas_financeiras', {nome:'Carteira', tipo:'dinheiro'});
-  const proj = dbUpsert('projetos', {area_id:aP.id, nome:'Começar no Life OS', status:'ativo'});
-  const sec = dbUpsert('secoes', {projeto_id:proj.id, nome:'Primeiros passos', ordem:0});
+  if (FLAGS.seeded || T('areas').length) return;   // semeia UMA única vez por dispositivo
+  FLAGS.seeded = true; saveFlags();
+  const aP = dbUpsert('areas', {id:detUUID('area:pessoal'),  nome:'Pessoal',  cor:'#7C5CFC', icone:'🏠', ordem:0});
+  const aT = dbUpsert('areas', {id:detUUID('area:trabalho'), nome:'Trabalho', cor:'#5CC8FC', icone:'💼', ordem:1});
+  const aS = dbUpsert('areas', {id:detUUID('area:saude'),    nome:'Saúde',    cor:'#3DDC97', icone:'🏃', ordem:2});
+  const aM = dbUpsert('areas', {id:detUUID('area:mente'),    nome:'Mente',    cor:'#FFB454', icone:'📚', ordem:3});
+  const aF = dbUpsert('areas', {id:detUUID('area:financas'), nome:'Finanças', cor:'#F472B6', icone:'💰', ordem:4});
+  dbUpsert('etiquetas', {id:detUUID('etq:urgente'), nome:'urgente', cor:'#FF5C7A'});
+  dbUpsert('etiquetas', {id:detUUID('etq:casa'), nome:'casa', cor:'#3DDC97'});
+  dbUpsert('etiquetas', {id:detUUID('etq:rapido'), nome:'rápido', cor:'#5CC8FC'});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:salario'), nome:'Salário', tipo:'entrada', cor:'#3DDC97'});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:alimentacao'), nome:'Alimentação', tipo:'saida', cor:'#FFB454', orcamento_mensal:800});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:moradia'), nome:'Moradia', tipo:'saida', cor:'#5CC8FC', orcamento_mensal:1500});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:transporte'), nome:'Transporte', tipo:'saida', cor:'#C084FC', orcamento_mensal:300});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:lazer'), nome:'Lazer', tipo:'saida', cor:'#F472B6', orcamento_mensal:250});
+  dbUpsert('categorias_financeiras', {id:detUUID('cat:assinaturas'), nome:'Assinaturas', tipo:'saida', cor:'#FF5C7A', orcamento_mensal:120});
+  dbUpsert('contas_financeiras', {id:detUUID('conta:principal'), nome:'Conta principal', tipo:'conta'});
+  dbUpsert('contas_financeiras', {id:detUUID('conta:carteira'), nome:'Carteira', tipo:'dinheiro'});
+  const proj = dbUpsert('projetos', {id:detUUID('proj:comecar'), area_id:aP.id, nome:'Começar no Life OS', status:'ativo'});
+  const sec = dbUpsert('secoes', {id:detUUID('sec:primeiros'), projeto_id:proj.id, nome:'Primeiros passos', ordem:0});
   dbUpsert('tarefas', {titulo:'Explorar a tela Hoje', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:2, estimativa_min:10, ordem:0});
   dbUpsert('tarefas', {titulo:'Criar meu primeiro hábito', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:3, estimativa_min:5, ordem:1});
   dbUpsert('tarefas', {titulo:'Fazer um backup (Config → Exportar)', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:addDias(hoje(), 7), prioridade:4, estimativa_min:5, ordem:2});
@@ -950,7 +1042,7 @@ reg('config', {
       + '<p class="small muted" style="margin:0 0 10px">Projeto Supabase já configurado: <b>'+esc((CFG.url||'').replace(/^https:\/\//,'').split('.')[0]||'Life OS')+'</b>. Não é necessário colar URL nem chave pública.</p>'
       + '<div class="row wrap">'
       + '<button class="btn primary" data-act="nav" data-r="saude">🩺 Saúde do Sistema</button>'
-      + (CFG.url ? '<button class="btn" data-act="cfg-pull">⬇️ Recarregar da nuvem</button><button class="btn" data-act="sync-agora">⬆️ Sincronizar agora</button>' : '')
+      + (CFG.url ? '<button class="btn" data-act="cfg-pull">⬇️ Recarregar da nuvem</button><button class="btn" data-act="sync-agora">⬆️ Sincronizar agora</button><button class="btn" data-act="cfg-rebuild">🛠️ Reconstruir do banco</button>' : '')
       + '<button class="btn ghost" data-act="copiar-sql">📋 Copiar SQL</button></div></div>'
     + '<div class="card"><div class="card-h"><div class="h2">🎛️ Preferências</div></div><div id="cfg-prefs">'
       + formHTML(prefsFields(), prefsVals()) + '</div>'
@@ -1007,6 +1099,12 @@ act('cfg-pull', () => confirmBox('Recarregar tudo da nuvem? Alterações locais 
   try { const ok = await pullAll(); if (ok) render(); else toast('Há pendências na fila — envie antes (Saúde do Sistema).', {icone:'⚠️'}); }
   catch (e) { toast(e.msg || String(e), {icone:'❌'}); }
 }));
+act('cfg-rebuild', () => confirmBox('Reconstruir do banco? Isto APAGA o estado local deste dispositivo (fila + cache) e relê tudo da sua conta no Supabase, consolidando duplicatas. Use quando algo ficar inconsistente. Seus dados na nuvem são preservados.', async () => {
+  try {
+    const limpos = await reconstruirDoBanco();
+    toast(limpos ? ('Reconstruído ✓ ' + limpos + ' duplicata(s) consolidada(s).') : 'Reconstruído do banco ✓', {icone:'🛠️', ms:5000});
+  } catch (e) { toast('Falha ao reconstruir: ' + (e.msg || String(e)), {icone:'❌'}); }
+}, {sim:'Reconstruir'}));
 act('pin-set', () => {
   modal('<div class="bx-h"><div class="h2">Definir PIN</div></div>'
     + '<div class="field"><label>PIN (4–6 dígitos)</label><input class="input" id="pin-novo" inputmode="numeric" maxlength="6" autofocus style="text-align:center;font-size:20px;letter-spacing:6px"></div>'

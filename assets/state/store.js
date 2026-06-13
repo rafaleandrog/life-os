@@ -104,7 +104,7 @@ const COLS = {
 const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags', dead:'lifeos.fila_erros' };
 const appSupabaseConfig = () => window.LifeOSSupabase ? { url: window.LifeOSSupabase.url, key: window.LifeOSSupabase.anonKey } : {};
 function tabelasVazias(){ return Object.fromEntries(Object.keys(TABLES).map(t => [t, []])); }
-const S = { data: tabelasVazias(), queue: [], deadQueue: [], flushing: false,
+const S = { data: tabelasVazias(), queue: [], deadQueue: [], flushing: false, sincronizando: false,
   syncErr: null, syncPausado: false, retry: 0, retryTimer: null, lastPull: null };
 let CFG = {};
 let FLAGS = {};
@@ -117,8 +117,19 @@ function loadLocal() {
     const d = JSON.parse(localStorage.getItem(LSK.data) || 'null');
     if (d) for (const t of Object.keys(TABLES)) S.data[t] = Array.isArray(d[t]) ? d[t] : [];
   } catch(_) {}
+  dedupPorId(); // consolida qualquer id repetido herdado de cache corrompido
   try { S.queue = JSON.parse(localStorage.getItem(LSK.queue) || '[]'); } catch(_) { S.queue = []; }
   try { S.deadQueue = JSON.parse(localStorage.getItem(LSK.dead) || '[]'); } catch(_) { S.deadQueue = []; }
+}
+/* Deduplicação defensiva: nunca manter dois registros com a MESMA chave primária
+   no cache local (realimentaria o loop). Mantém a última ocorrência. */
+function dedupPorId() {
+  for (const t of Object.keys(TABLES)) {
+    const arr = S.data[t]; if (!Array.isArray(arr) || arr.length < 2) continue;
+    const pk = TABLES[t], vistos = new Map();
+    for (const r of arr) { const k = r[pk]; if (k != null) vistos.set(k, r); }
+    if (vistos.size !== arr.length) S.data[t] = Array.from(vistos.values());
+  }
 }
 const saveLocal = debounce(() => { try { localStorage.setItem(LSK.data, JSON.stringify(S.data)); } catch(e) { toast('Atenção: armazenamento local cheio.', {icone:'⚠️'}); } }, 250);
 const saveQueue = () => { try { localStorage.setItem(LSK.queue, JSON.stringify(S.queue)); } catch(_) {} };
