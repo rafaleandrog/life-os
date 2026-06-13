@@ -315,6 +315,16 @@ async function flush() {
     FLAGS.lastSync = nowISO(); saveFlags();
   } catch (e) {
     S.syncErr = e.msg || String(e);
+    // Não falhar em silêncio: mostra o erro real (ex.: bloqueio por RLS) em pt-BR.
+    // Throttle de 8s para não repetir a mesma notificação a cada item da fila.
+    const agora = Date.now();
+    if (!flush._ultimoToast || agora - flush._ultimoToast > 8000) {
+      flush._ultimoToast = agora;
+      const dica = e.tipo === 'auth'
+        ? ' Entre novamente com o Google em Config.'
+        : (e.tipo === 'tabela' ? ' Abra a Saúde do Sistema e rode o SQL.' : '');
+      toast('Não salvou na nuvem: ' + S.syncErr + dica + ' (seus dados estão guardados localmente na fila)', { icone:'⚠️', ms:7000 });
+    }
   }
   S.flushing = false; atualizarSyncUI();
 }

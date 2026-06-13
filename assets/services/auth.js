@@ -27,10 +27,36 @@ function updateAuthSession(session) {
 }
 
 function getOAuthRedirectUrl() {
-  const url = new URL('.', window.location.href);
-  url.hash = '';
-  url.search = '';
-  return url.href;
+  // Sempre a própria URL atual do app (origin + pathname), nunca escrita à mão —
+  // assim o redirect bate exatamente com o Redirect URL cadastrado no Supabase.
+  return window.location.origin + window.location.pathname;
+}
+
+// Detecta o retorno do OAuth (#access_token=...&refresh_token=...) e, caso o SDK
+// ainda não tenha consumido, completa a sessão manualmente. Em seguida limpa o
+// hash da URL com history.replaceState para não confundir o roteador por hash.
+async function consumeOAuthRedirect() {
+  const hash = window.location.hash || '';
+  if (hash.indexOf('access_token=') === -1) return;
+  const client = window.supabaseClient;
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  const access_token = params.get('access_token');
+  const refresh_token = params.get('refresh_token');
+  try {
+    if (client && client.auth) {
+      // detectSessionInUrl normalmente já tratou; se não, garantimos via setSession
+      const { data } = await client.auth.getSession();
+      if ((!data || !data.session) && access_token && refresh_token) {
+        await client.auth.setSession({ access_token, refresh_token });
+      }
+    }
+  } catch (error) {
+    console.error('Falha ao completar o login OAuth:', error);
+  } finally {
+    // Limpa o hash preservando o restante da URL (volta a ficar limpa)
+    const clean = window.location.origin + window.location.pathname + window.location.search;
+    try { history.replaceState(null, '', clean); } catch (_) { window.location.hash = ''; }
+  }
 }
 
 async function loginGoogle() {
@@ -100,6 +126,7 @@ async function initAuth() {
     client.auth.onAuthStateChange((_event, session) => updateAuthSession(session));
   }
 
+  await consumeOAuthRedirect();
   await restoreSession();
 }
 
@@ -109,5 +136,6 @@ window.LifeOSAuth = {
   loginGoogle,
   logout,
   restoreSession,
-  getOAuthRedirectUrl
+  getOAuthRedirectUrl,
+  consumeOAuthRedirect
 };
