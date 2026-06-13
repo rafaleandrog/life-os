@@ -9,19 +9,24 @@ function rotaAtual() {
   return { nome: nome || 'hoje', params };
 }
 let _renderizando = false;
-function render() {
+// opts.manterScroll: não volta o scroll ao topo (sincronização em background)
+// opts.semFade: sem animação de entrada (evita "piscar" no refresh em background)
+function render(opts) {
   if (_renderizando) return; _renderizando = true;
+  const manterScroll = !!(opts && opts.manterScroll);
+  const semFade = !!(opts && opts.semFade);
+  const sy = manterScroll ? (window.scrollY || window.pageYOffset || 0) : 0;
   try {
     const r = rotaAtual();
     const v = Views[r.nome] || Views.hoje;
-    $('#main').innerHTML = '<div class="fadein">' + v.render(r.params) + '</div>';
+    $('#main').innerHTML = (semFade ? '<div>' : '<div class="fadein">') + v.render(r.params) + '</div>';
     if (v.mount) v.mount(r.params);
     renderNav(r.nome);
     if (window.renderTimerPill) renderTimerPill();
-    window.scrollTo(0, 0);
+    window.scrollTo(0, manterScroll ? sy : 0);
   } finally { _renderizando = false; }
 }
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => render()); // navegação por hash sempre volta ao topo
 
 /* ============ NAVEGAÇÃO / LAYOUT ============ */
 const MENU = [

@@ -331,8 +331,23 @@ function sanearLinha(t, row) {
   }
   return { row: saida };
 }
-function paraQuarentena(it, motivo) {
-  S.deadQueue.push({ op: it.op, t: it.t, rows: it.rows, id: it.id, motivo, quando: nowISO() });
+/* Mapeia o objeto local para o formato EXATO da tabela: só as colunas existentes,
+   sempre o mesmo conjunto (ausentes → null), sem campos extras. Acrescenta user_id.
+   Resolve o 400 "All object keys must match" e o 400 "column does not exist". */
+function normalizar(t, row, userId) {
+  const cols = COLS[t];
+  const out = {};
+  if (!cols) { Object.assign(out, row); }
+  else for (const c of cols) { const v = row[c]; out[c] = (v === undefined ? null : v); }
+  if (userId != null) out.user_id = userId;
+  return out;
+}
+function logFalha(t, op, payload, e) {
+  try { console.error('[Life OS] Falha de sincronização', { tabela: t, operacao: op, status: e && e.status, motivo: e && e.msg, payload }); } catch (_) {}
+}
+function removerDaFila(it) { const j = S.queue.indexOf(it); if (j >= 0) S.queue.splice(j, 1); saveQueue(); }
+function paraQuarentena(it, motivo, payload) {
+  S.deadQueue.push({ op: it.op, t: it.t, rows: it.rows, id: it.id, motivo, payload: payload || null, quando: nowISO() });
   if (S.deadQueue.length > 200) S.deadQueue = S.deadQueue.slice(-200);
   saveDead();
 }
@@ -361,32 +376,43 @@ async function flush(forcar) {
     const ordenada = S.queue.map((it, i) => ({ it, i }))
       .sort((a, b) => (tableRank(a.it.t) - tableRank(b.it.t)) || (a.i - b.i))
       .map(x => x.it);
+    laco:
     for (const it of ordenada) {
       if (S.queue.indexOf(it) < 0) continue;
-      try {
-        if (it.op === 'up') {
-          const oc = ON_CONFLICT[it.t] || TABLES[it.t];
-          const enviar = [];
-          for (const r of it.rows) {
-            const s = sanearLinha(it.t, r);
-            if (s.descartar) { paraQuarentena({ op:'up', t:it.t, rows:[r] }, s.motivo); continue; }
-            enviar.push({ ...s.row, user_id: me.id });   // cada linha pertence à conta logada (RLS)
-          }
-          if (enviar.length) await sb('POST', it.t + '?on_conflict=' + oc, enviar, { Prefer: 'resolution=merge-duplicates,return=minimal' });
-        } else {
-          await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id));
+      if (it.op === 'del') {
+        try { await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id)); removerDaFila(it); }
+        catch (e) {
+          S.syncErr = e.msg || String(e);
+          if (e.tipo === 'rede' || e.tipo === 'servidor') { transitorio = true; notificarFalhaSync(e); break laco; }
+          if (e.tipo === 'auth' || e.tipo === 'tabela') { S.syncPausado = true; notificarFalhaSync(e); break laco; }
+          logFalha(it.t, 'del', { id: it.id }, e);
+          paraQuarentena({ op:'del', t:it.t, id:it.id }, e.msg || ('erro ' + (e.status || '')), { id: it.id });
+          removerDaFila(it); notificarFalhaSync(e, it);
         }
-        const j = S.queue.indexOf(it); if (j >= 0) S.queue.splice(j, 1);
-        saveQueue();
-      } catch (e) {
-        S.syncErr = e.msg || String(e);
-        if (e.tipo === 'rede' || e.tipo === 'servidor') { transitorio = true; notificarFalhaSync(e); break; }   // tenta de novo (backoff)
-        if (e.tipo === 'auth' || e.tipo === 'tabela') { S.syncPausado = true; notificarFalhaSync(e); break; }     // problema global: pausa
-        // erro de dados (FK 409, 400, 422…): item venenoso → quarentena e segue, sem travar a fila
-        const j = S.queue.indexOf(it); if (j >= 0) S.queue.splice(j, 1);
-        paraQuarentena(it, e.msg || ('erro ' + (e.status || ''))); saveQueue();
-        notificarFalhaSync(e, it);
+        continue;
       }
+      // 'up' — UM registro por requisição, normalizado (à prova de "All object keys must match")
+      const oc = ON_CONFLICT[it.t] || TABLES[it.t];
+      const restantes = it.rows.slice();
+      while (restantes.length) {
+        const r = restantes[0];
+        const s = sanearLinha(it.t, r);
+        if (s.descartar) { paraQuarentena({ op:'up', t:it.t, rows:[r] }, s.motivo, normalizar(it.t, r, me.id)); restantes.shift(); continue; }
+        const payload = normalizar(it.t, s.row, me.id);   // cada linha pertence à conta logada (RLS)
+        try {
+          await sb('POST', it.t + '?on_conflict=' + oc, [payload], { Prefer: 'resolution=merge-duplicates,return=minimal' });
+          restantes.shift();
+        } catch (e) {
+          S.syncErr = e.msg || String(e);
+          if (e.tipo === 'rede' || e.tipo === 'servidor') { transitorio = true; it.rows = restantes; saveQueue(); notificarFalhaSync(e); break laco; }
+          if (e.tipo === 'auth' || e.tipo === 'tabela') { S.syncPausado = true; it.rows = restantes; saveQueue(); notificarFalhaSync(e); break laco; }
+          // erro de dados desta linha (400/409/422…): isola SÓ ela na quarentena e segue
+          logFalha(it.t, 'up', payload, e);
+          paraQuarentena({ op:'up', t:it.t, rows:[r] }, e.msg || ('erro ' + (e.status || '')), payload);
+          notificarFalhaSync(e, it); restantes.shift();
+        }
+      }
+      if (S.queue.indexOf(it) >= 0) { if (restantes.length) { it.rows = restantes; saveQueue(); } else removerDaFila(it); }
     }
   }
   S.flushing = false;
@@ -442,7 +468,9 @@ function syncStatus() {
 }
 function atualizarSyncUI() {
   const st = syncStatus();
-  $$('.sync-dot').forEach(d => d.className = 'sync-dot ' + st);
+  const tip = S.deadQueue.length ? (S.deadQueue.length + ' item(ns) recusado(s). Último: ' + (S.syncErr || '—'))
+    : (S.syncErr ? 'Sinc.: ' + S.syncErr : 'estado da sincronização');
+  $$('.sync-dot').forEach(d => { d.className = 'sync-dot ' + st; d.title = tip; });
   const l = $('#synclabel'); if (l) l.textContent = syncLabel();
 }
 function usuarioAutenticado() {
@@ -481,7 +509,8 @@ async function sincronizarNuvemInicial(silencioso) {
     precisaRender = true;
   }
   if (!silencioso && ok === true) toast('Sincronizado ✓', { icone:'🔄' });
-  if (precisaRender) render(); else atualizarSyncUI();
+  // re-render de background: preserva o scroll e não "pisca" (sem fade)
+  if (precisaRender) render({ manterScroll: true, semFade: true }); else atualizarSyncUI();
   return ok;
 }
 window.LifeOSAfterAuthChange = state => {
@@ -848,7 +877,9 @@ async function rodarSaude() {
   if (S.deadQueue.length) {
     const itens = S.deadQueue.map((d, i) => {
       const qtd = d.op === 'up' ? (d.rows ? d.rows.length : 1) + ' registro(s)' : 'exclusão';
-      return '<div class="row wrap" style="gap:6px;padding:6px 0;border-top:1px solid var(--bd2)">'
+      let pl = ''; try { pl = d.payload ? JSON.stringify(d.payload) : ''; } catch (_) {}
+      const tip = (d.op + ' em ' + d.t + (pl ? ' — payload: ' + pl : '')).slice(0, 600);
+      return '<div class="row wrap" style="gap:6px;padding:6px 0;border-top:1px solid var(--bd2)" title="' + esc(tip) + '">'
         + '<div class="grow"><b>' + esc(rotuloTabela(d.t)) + '</b> — ' + esc(qtd) + '<div class="small muted">' + esc(d.motivo || 'recusado pelo banco') + '</div></div>'
         + '<button class="btn small" data-act="dead-requeue" data-i="' + i + '">Reenviar</button>'
         + '<button class="btn small" data-act="dead-descartar" data-i="' + i + '">Descartar</button></div>';

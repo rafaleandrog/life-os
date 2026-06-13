@@ -4,7 +4,7 @@
    (Supabase, extração de artigos). Regra 18 do spec. */
 'use strict';
 
-const VERSION = 'lifeos-v4.2.2';
+const VERSION = 'lifeos-v4.2.3';
 const CORE = [
   './',
   './index.html',
