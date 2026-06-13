@@ -290,43 +290,113 @@ function enqueue(op, t, payload) {
     S.queue.push({ op:'del', t, id: payload });
   }
   saveQueue();
+  // Uma ação nova do usuário merece tentativa limpa: sai da pausa e zera o backoff.
+  S.syncPausado = false; S.retry = 0;
   scheduleFlush();
   atualizarSyncUI();
 }
 const scheduleFlush = debounce(() => flush(), 900);
-async function flush() {
-  if (!CFG.url || !CFG.key || !usuarioAutenticado() || S.flushing || !S.queue.length) { atualizarSyncUI(); return; }
+
+/* Rótulos amigáveis das tabelas (mensagens de erro em pt-BR) */
+const TABELA_ROTULO = { areas:'área', projetos:'projeto', secoes:'seção', tarefas:'tarefa',
+  habitos:'hábito', habito_registros:'registro de hábito', metas:'meta', meta_registros:'registro de meta',
+  lancamentos_financeiros:'lançamento', investimentos_ativos:'ativo', investimentos_movimentos:'movimento',
+  investimentos_saldos:'saldo', treino_planilhas:'planilha de treino', treino_sessoes:'sessão de treino',
+  treino_registros:'registro de treino', corridas:'corrida', corpo_registros:'medida corporal',
+  livros:'livro', artigos:'artigo', leitura_notas:'nota de leitura', textos:'texto', blocos:'bloco' };
+const rotuloTabela = t => TABELA_ROTULO[t] || t;
+
+/* Backoff anti-piscar: 2s, 5s, 15s; depois pausa e espera ação do usuário. */
+const RETRY_BACKOFF = [2000, 5000, 15000];
+function agendarRetry() {
+  if (S.retryTimer) return;
+  if (S.retry >= RETRY_BACKOFF.length) { S.syncPausado = true; S.retry = 0; atualizarSyncUI(); return; }
+  const ms = RETRY_BACKOFF[S.retry];
+  S.retryTimer = setTimeout(() => { S.retryTimer = null; S.retry++; flush(true); }, ms);
+}
+
+/* Saneia FKs: vínculo opcional órfão → null; vínculo obrigatório órfão → descarta a linha.
+   Como o flush envia PAIS antes de FILHOS, um pai existente localmente já estará no banco. */
+function sanearLinha(t, row) {
+  const refs = FK_REFS[t];
+  if (!refs) return { row };
+  let saida = row;
+  for (const [campo, paiTab, obrig] of refs) {
+    const pid = row[campo];
+    if (pid == null || pid === '') continue;
+    if (byId(paiTab, pid)) continue;            // pai existe localmente → enviado antes → ok
+    if (obrig) return { descartar: true, motivo: campo + ' aponta para ' + rotuloTabela(paiTab) + ' inexistente' };
+    if (saida === row) saida = { ...row };
+    saida[campo] = null;                          // vínculo opcional órfão → nulo
+  }
+  return { row: saida };
+}
+function paraQuarentena(it, motivo) {
+  S.deadQueue.push({ op: it.op, t: it.t, rows: it.rows, id: it.id, motivo, quando: nowISO() });
+  if (S.deadQueue.length > 200) S.deadQueue = S.deadQueue.slice(-200);
+  saveDead();
+}
+function notificarFalhaSync(e, it) {
+  const agora = Date.now();
+  if (flush._ultimoToast && agora - flush._ultimoToast < 8000) return;
+  flush._ultimoToast = agora;
+  let msg, dica = '';
+  if (it) { msg = '1 registro de "' + rotuloTabela(it.t) + '" foi recusado pelo banco: ' + (e.msg || ('erro ' + (e.status || ''))); dica = ' Abra a Saúde do Sistema para descartar ou reenviar.'; }
+  else if (e.tipo === 'auth') { msg = 'Sincronização pausada: ' + e.msg; dica = ' Entre de novo com o Google em Config.'; }
+  else if (e.tipo === 'tabela') { msg = 'Sincronização pausada: ' + e.msg; dica = ' Rode o SQL na Saúde do Sistema.'; }
+  else { msg = 'Sem conexão com o Supabase agora.'; dica = ' Vou tentar de novo automaticamente.'; }
+  toast(msg + dica, { icone:'⚠️', ms:7000 });
+}
+
+async function flush(forcar) {
+  if (S.flushing) return;
+  if (S.syncPausado && !forcar) { atualizarSyncUI(); return; }   // não retenta em loop: espera o usuário
+  if (!CFG.url || !CFG.key || !usuarioAutenticado() || !S.queue.length) { atualizarSyncUI(); return; }
+  if (S.retryTimer) { clearTimeout(S.retryTimer); S.retryTimer = null; }
   S.flushing = true; atualizarSyncUI();
-  try {
-    const me = usuarioAtual();
-    while (S.queue.length) {
-      const it = S.queue[0];
-      if (!me || !me.id) break; // sessão caiu no meio — pendências ficam na fila
-      if (it.op === 'up') {
-        const oc = ON_CONFLICT[it.t] || TABLES[it.t];
-        const rows = it.rows.map(r => ({ ...r, user_id: me.id })); // cada linha pertence à conta logada (RLS)
-        await sb('POST', it.t + '?on_conflict=' + oc, rows, { Prefer: 'resolution=merge-duplicates,return=minimal' });
-      } else {
-        await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id));
+  const me = usuarioAtual();
+  let transitorio = false;
+  if (me && me.id) {
+    // PAIS antes de FILHOS — ordena uma cópia por dependência (estável p/ empates)
+    const ordenada = S.queue.map((it, i) => ({ it, i }))
+      .sort((a, b) => (tableRank(a.it.t) - tableRank(b.it.t)) || (a.i - b.i))
+      .map(x => x.it);
+    for (const it of ordenada) {
+      if (S.queue.indexOf(it) < 0) continue;
+      try {
+        if (it.op === 'up') {
+          const oc = ON_CONFLICT[it.t] || TABLES[it.t];
+          const enviar = [];
+          for (const r of it.rows) {
+            const s = sanearLinha(it.t, r);
+            if (s.descartar) { paraQuarentena({ op:'up', t:it.t, rows:[r] }, s.motivo); continue; }
+            enviar.push({ ...s.row, user_id: me.id });   // cada linha pertence à conta logada (RLS)
+          }
+          if (enviar.length) await sb('POST', it.t + '?on_conflict=' + oc, enviar, { Prefer: 'resolution=merge-duplicates,return=minimal' });
+        } else {
+          await sb('DELETE', it.t + '?' + TABLES[it.t] + '=eq.' + encodeURIComponent(it.id));
+        }
+        const j = S.queue.indexOf(it); if (j >= 0) S.queue.splice(j, 1);
+        saveQueue();
+      } catch (e) {
+        S.syncErr = e.msg || String(e);
+        if (e.tipo === 'rede' || e.tipo === 'servidor') { transitorio = true; notificarFalhaSync(e); break; }   // tenta de novo (backoff)
+        if (e.tipo === 'auth' || e.tipo === 'tabela') { S.syncPausado = true; notificarFalhaSync(e); break; }     // problema global: pausa
+        // erro de dados (FK 409, 400, 422…): item venenoso → quarentena e segue, sem travar a fila
+        const j = S.queue.indexOf(it); if (j >= 0) S.queue.splice(j, 1);
+        paraQuarentena(it, e.msg || ('erro ' + (e.status || ''))); saveQueue();
+        notificarFalhaSync(e, it);
       }
-      S.queue.shift(); saveQueue();
-    }
-    S.syncErr = null;
-    FLAGS.lastSync = nowISO(); saveFlags();
-  } catch (e) {
-    S.syncErr = e.msg || String(e);
-    // Não falhar em silêncio: mostra o erro real (ex.: bloqueio por RLS) em pt-BR.
-    // Throttle de 8s para não repetir a mesma notificação a cada item da fila.
-    const agora = Date.now();
-    if (!flush._ultimoToast || agora - flush._ultimoToast > 8000) {
-      flush._ultimoToast = agora;
-      const dica = e.tipo === 'auth'
-        ? ' Entre novamente com o Google em Config.'
-        : (e.tipo === 'tabela' ? ' Abra a Saúde do Sistema e rode o SQL.' : '');
-      toast('Não salvou na nuvem: ' + S.syncErr + dica + ' (seus dados estão guardados localmente na fila)', { icone:'⚠️', ms:7000 });
     }
   }
-  S.flushing = false; atualizarSyncUI();
+  S.flushing = false;
+  if (!transitorio && !S.syncPausado && !S.queue.length) {
+    if (!S.deadQueue.length) { S.syncErr = null; FLAGS.lastSync = nowISO(); saveFlags(); }
+    S.retry = 0;
+  } else if (transitorio && !S.syncPausado) {
+    agendarRetry();
+  }
+  atualizarSyncUI();
 }
 async function pullTable(t) {
   let out = [], from = 0; const page = 1000;
@@ -347,8 +417,10 @@ async function pullAll(silencioso) {
   const totalNuvem = Object.values(novo).reduce((a, arr) => a + arr.length, 0);
   const totalLocal = Object.values(S.data).reduce((a, arr) => a + arr.length, 0);
   if (!totalNuvem && totalLocal) return 'vazio'; // nuvem vazia p/ esta conta: NÃO apagar dados locais
-  S.data = novo; saveLocal();
   S.lastPull = nowISO(); S.syncErr = null;
+  const mudou = JSON.stringify(novo) !== JSON.stringify(S.data);
+  if (!mudou) { atualizarSyncUI(); return 'igual'; } // nuvem == local → não re-renderiza (sem piscar)
+  S.data = novo; saveLocal();
   if (!silencioso) toast('Sincronizado ✓', { icone:'🔄' });
   atualizarSyncUI();
   return true;
@@ -363,7 +435,8 @@ async function fullPush() { // conectar depois: envia tudo que existe localmente
 function syncStatus() {
   if (!CFG.url || !CFG.key) return 'off';
   if (window.LifeOSAuth && window.LifeOSAuth.state && window.LifeOSAuth.state.ready && !window.LifeOSAuth.state.user) return 'auth';
-  if (S.syncErr) return 'err';
+  if (S.syncPausado) return 'pausado';            // backoff esgotado: espera ação do usuário
+  if (S.deadQueue.length) return 'err';           // itens recusados aguardando descarte/reenvio
   if (S.flushing || S.queue.length) return 'pend';
   return 'ok';
 }
@@ -398,15 +471,17 @@ async function sincronizarNuvemInicial(silencioso) {
   if (chk && (chk.faltando.length || chk.precisaMigrar)) { atualizarSyncUI(); modalMigracao(chk); render(); return false; }
   await flush();
   const ok = await pullAll(true);
+  let precisaRender = (ok === true); // só re-renderiza quando os dados realmente mudaram (anti-piscar)
   if (ok === 'vazio') { // nuvem vazia para esta conta e há dados locais → envia tudo (idempotente)
     await fullPush();
     if (!S.queue.length && !silencioso) toast('Seus dados deste dispositivo foram enviados para a sua conta ✓', { icone:'☁️', ms:5500 });
-  } else if (ok && !T('areas').length) {
+  } else if ((ok === true || ok === 'igual') && !T('areas').length) {
     seedData();
     await flush();
+    precisaRender = true;
   }
   if (!silencioso && ok === true) toast('Sincronizado ✓', { icone:'🔄' });
-  render();
+  if (precisaRender) render(); else atualizarSyncUI();
   return ok;
 }
 window.LifeOSAfterAuthChange = state => {
@@ -761,11 +836,27 @@ async function rodarSaude() {
       html += linha('ok', 'Proteção por usuário (RLS)', 'Cada registro é gravado e lido apenas pela sua conta (' + esc(usuarioAtual().email||'') + ').');
     }
   }
+  if (S.syncPausado) {
+    html += linha('err', 'Sincronização pausada', 'Tentei algumas vezes sem sucesso e parei para não ficar reenviando em loop. ' + (S.syncErr ? 'Motivo: ' + esc(S.syncErr) : '') ,
+      '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="sync-tentar">Tentar de novo agora</button></div>');
+  }
   const fila = S.queue.length;
   html += linha(fila ? 'warn' : 'ok', 'Fila offline', fila
-    ? fila + ' alterações aguardando envio.' + (S.syncErr ? ' Último erro: ' + esc(S.syncErr) : '')
+    ? fila + ' alterações aguardando envio.' + (S.syncErr && !S.syncPausado ? ' Último erro: ' + esc(S.syncErr) : '')
     : 'Nada pendente. Última sincronização: ' + (FLAGS.lastSync ? fmtData(FLAGS.lastSync.slice(0,10)) + ' ' + FLAGS.lastSync.slice(11,16) : '—'),
-    fila ? '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="sync-agora">Enviar agora</button></div>' : '');
+    fila && !S.syncPausado ? '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="sync-agora">Enviar agora</button></div>' : '');
+  if (S.deadQueue.length) {
+    const itens = S.deadQueue.map((d, i) => {
+      const qtd = d.op === 'up' ? (d.rows ? d.rows.length : 1) + ' registro(s)' : 'exclusão';
+      return '<div class="row wrap" style="gap:6px;padding:6px 0;border-top:1px solid var(--bd2)">'
+        + '<div class="grow"><b>' + esc(rotuloTabela(d.t)) + '</b> — ' + esc(qtd) + '<div class="small muted">' + esc(d.motivo || 'recusado pelo banco') + '</div></div>'
+        + '<button class="btn small" data-act="dead-requeue" data-i="' + i + '">Reenviar</button>'
+        + '<button class="btn small" data-act="dead-descartar" data-i="' + i + '">Descartar</button></div>';
+    }).join('');
+    html += linha('err', S.deadQueue.length + ' registro(s) não salvos na nuvem',
+      'O banco recusou estes itens (ex.: vínculo inválido). Eles seguem guardados localmente. Reenvie depois de corrigir, ou descarte:',
+      itens + '<div class="row" style="margin-top:8px"><button class="btn small" data-act="dead-requeue-todos">Reenviar todos</button><button class="btn small" data-act="dead-descartar-todos">Descartar todos</button></div>');
+  }
   const ue = FLAGS.ultimoExport;
   const dias = ue ? diffDias(ue.slice(0,10), hoje()) : null;
   html += linha(!ue || dias > 30 ? 'warn' : 'ok', 'Backup', ue ? 'Último export: ' + fmtData(ue.slice(0,10)) + (dias > 30 ? ' — recomendado exportar 1×/mês.' : '.') : 'Nenhum backup ainda — exporte 1×/mês em Config → Dados.');
@@ -779,13 +870,30 @@ act('sync-agora', async () => {
   else toast(S.syncErr || 'Ainda há pendências.', {icone:'⚠️'});
   rodarSaude();
 });
+act('sync-tentar', async () => {       // retomar após pausa do backoff
+  S.syncPausado = false; S.retry = 0; S.syncErr = null;
+  await sincronizarNuvemInicial(false);
+  if (S.syncPausado) toast(S.syncErr || 'Ainda não consegui sincronizar.', {icone:'⚠️'});
+  else if (!S.queue.length && !S.deadQueue.length) toast('Tudo sincronizado ✓', {icone:'✅'});
+  rodarSaude();
+});
+function reenfileirarMorto(d) {        // devolve um item da quarentena para a fila
+  if (d.op === 'up' && d.rows) enqueue('up', d.t, d.rows);
+  else if (d.op === 'del') enqueue('del', d.t, d.id);
+}
+act('dead-descartar', el => { const i = +el.dataset.i; S.deadQueue.splice(i, 1); saveDead(); atualizarSyncUI(); rodarSaude(); toast('Item descartado.', {icone:'🗑️'}); });
+act('dead-descartar-todos', () => confirmBox('Descartar todos os ' + S.deadQueue.length + ' registros recusados? Eles serão removidos da fila e não voltarão.', () => {
+  S.deadQueue = []; saveDead(); atualizarSyncUI(); rodarSaude(); toast('Fila de erros limpa.', {icone:'🗑️'}); }, {perigo:1, sim:'Descartar'}));
+act('dead-requeue', async el => { const i = +el.dataset.i; const [d] = S.deadQueue.splice(i, 1); saveDead(); if (d) reenfileirarMorto(d); await flush(true); rodarSaude(); });
+act('dead-requeue-todos', async () => { const itens = S.deadQueue.slice(); S.deadQueue = []; saveDead(); itens.forEach(reenfileirarMorto); await flush(true); rodarSaude();
+  toast(S.deadQueue.length ? 'Alguns ainda foram recusados — veja os detalhes.' : 'Reenviados ✓', {icone: S.deadQueue.length ? '⚠️' : '✅'}); });
 
 /* ---- CONFIG ---- */
 reg('config', {
   titulo: 'Config',
   render: () => {
     const st = syncStatus();
-    const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● Erro: '+esc(S.syncErr||'')+'</span>', auth:'<span class="warn">● Aguardando login Google</span>', off:'<span class="muted">● Supabase indisponível</span>'}[st];
+    const stTxt = {ok:'<span class="ok">● Sincronizado</span>', pend:'<span class="warn">● Sincronizando ('+S.queue.length+' pendentes)</span>', err:'<span class="err">● '+S.deadQueue.length+' item(ns) recusado(s) — ver Saúde</span>', pausado:'<span class="err">● Sincronização pausada — ver Saúde</span>', auth:'<span class="warn">● Aguardando login Google</span>', off:'<span class="muted">● Supabase indisponível</span>'}[st];
     const u = usuarioAtual();
     const appUrl = (() => { const x = new URL('.', location.href); x.hash=''; x.search=''; return x.href; })();
     const contaCard = '<div class="card"><div class="card-h"><div class="h2">👤 Conta (login Google)</div></div>'

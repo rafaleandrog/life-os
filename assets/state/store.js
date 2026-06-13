@@ -17,11 +17,55 @@ const TABLES = {
 const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data',
   etiquetas:'user_id,nome', dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
 
+/* ---- Ordem de dependência: PAIS antes de FILHOS (evita violar FK no flush) ---- */
+const TABLE_ORDER = [
+  // raízes (sem dependências) primeiro
+  'areas','etiquetas','filtros','categorias_financeiras','contas_financeiras',
+  'investimentos_ativos','treino_planilhas','artigos','rotina_modelos',
+  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias',
+  // dependem de uma raiz
+  'projetos','habitos','metas','livros','textos',
+  // dependem de nível 2
+  'secoes','habito_registros','meta_registros','lancamentos_financeiros',
+  'investimentos_movimentos','investimentos_saldos','treino_exercicios','treino_sessoes',
+  'leitura_notas','leitura_registros',
+  // dependem de nível 3
+  'tarefas','treino_registros',
+  // dependem de nível 4
+  'blocos'
+];
+const tableRank = t => { const i = TABLE_ORDER.indexOf(t); return i < 0 ? 500 : i; };
+
+/* ---- Chaves estrangeiras: tabela → [[campo, tabela_pai, obrigatorio]] ----
+   obrigatorio=true  → linha não existe sem o pai; se o pai sumiu, a linha é descartada.
+   obrigatorio=false → vínculo opcional; se o pai sumiu, o campo vira null (não quebra a FK). */
+const FK_REFS = {
+  projetos:[['area_id','areas',true]],
+  secoes:[['projeto_id','projetos',true]],
+  tarefas:[['area_id','areas',false],['projeto_id','projetos',false],['secao_id','secoes',false]],
+  habitos:[['area_id','areas',false]],
+  habito_registros:[['habito_id','habitos',true]],
+  blocos:[['area_id','areas',false],['projeto_id','projetos',false],['tarefa_id','tarefas',false]],
+  metas:[['area_id','areas',false]],
+  meta_registros:[['meta_id','metas',true]],
+  lancamentos_financeiros:[['categoria_id','categorias_financeiras',false],['conta_id','contas_financeiras',false]],
+  investimentos_movimentos:[['ativo_id','investimentos_ativos',true]],
+  investimentos_saldos:[['ativo_id','investimentos_ativos',true]],
+  treino_exercicios:[['planilha_id','treino_planilhas',true]],
+  treino_sessoes:[['planilha_id','treino_planilhas',false]],
+  treino_registros:[['sessao_id','treino_sessoes',true],['exercicio_id','treino_exercicios',false]],
+  livros:[['area_id','areas',false]],
+  leitura_notas:[['livro_id','livros',false],['artigo_id','artigos',false]],
+  leitura_registros:[['livro_id','livros',true]],
+  textos:[['area_id','areas',false]]
+};
+
 /* ---- Estado local (offline-first, regra 12) ---- */
-const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags' };
+const LSK = { data:'lifeos.dados', queue:'lifeos.fila', cfg:'lifeos.supabase', flags:'lifeos.flags', dead:'lifeos.fila_erros' };
 const appSupabaseConfig = () => window.LifeOSSupabase ? { url: window.LifeOSSupabase.url, key: window.LifeOSSupabase.anonKey } : {};
 function tabelasVazias(){ return Object.fromEntries(Object.keys(TABLES).map(t => [t, []])); }
-const S = { data: tabelasVazias(), queue: [], flushing: false, syncErr: null, lastPull: null };
+const S = { data: tabelasVazias(), queue: [], deadQueue: [], flushing: false,
+  syncErr: null, syncPausado: false, retry: 0, retryTimer: null, lastPull: null };
 let CFG = {};
 let FLAGS = {};
 function loadLocal() {
@@ -34,9 +78,11 @@ function loadLocal() {
     if (d) for (const t of Object.keys(TABLES)) S.data[t] = Array.isArray(d[t]) ? d[t] : [];
   } catch(_) {}
   try { S.queue = JSON.parse(localStorage.getItem(LSK.queue) || '[]'); } catch(_) { S.queue = []; }
+  try { S.deadQueue = JSON.parse(localStorage.getItem(LSK.dead) || '[]'); } catch(_) { S.deadQueue = []; }
 }
 const saveLocal = debounce(() => { try { localStorage.setItem(LSK.data, JSON.stringify(S.data)); } catch(e) { toast('Atenção: armazenamento local cheio.', {icone:'⚠️'}); } }, 250);
 const saveQueue = () => { try { localStorage.setItem(LSK.queue, JSON.stringify(S.queue)); } catch(_) {} };
+const saveDead = () => { try { localStorage.setItem(LSK.dead, JSON.stringify(S.deadQueue)); } catch(_) {} };
 const saveFlags = () => localStorage.setItem(LSK.flags, JSON.stringify(FLAGS));
 const saveCfg = () => localStorage.setItem(LSK.cfg, JSON.stringify(CFG));
 
