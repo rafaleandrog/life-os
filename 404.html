@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E0F13">
+<title>Life OS</title>
+<script>
+/* Fallback de roteamento do GitHub Pages.
+   O GitHub Pages serve este 404 para qualquer caminho que não seja exatamente um
+   arquivo existente. Para que o retorno do login OAuth (que volta com
+   #access_token=...&refresh_token=... no hash) não quebre, redirecionamos para a
+   raiz do app PRESERVANDO o hash e a query string. */
+(function () {
+  // Base do app: tudo até o nome do repositório (ex.: /life-os/)
+  var path = window.location.pathname;
+  var base = path.replace(/\/[^\/]*$/, '/'); // remove o último segmento
+  // Em projeto GitHub Pages a base é /<repo>/; garante barra final
+  if (base === '' ) base = '/';
+  var destino = window.location.origin + base + window.location.search + window.location.hash;
+  window.location.replace(destino);
+})();
+</script>
+</head>
+<body>
+<noscript>Redirecionando para o Life OS… <a href="/life-os/">Abrir o app</a></noscript>
+</body>
+</html>
