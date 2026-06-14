@@ -1311,13 +1311,13 @@ function parseNL(txt) {
   let s = ' ' + String(txt || '') + ' ';
   const toks = [];
   const eat = (re, fn) => { const m = s.match(re); if (m) { s = s.replace(re, ' '); fn(m); } return !!m; };
-  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoNovo:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
+  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoDesconhecido:null, estimativa_min:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
   // #projeto — só VINCULA a projeto existente (criar projeto é só pelo formulário, com área obrigatória)
   eat(/#([\p{L}\d_-]+)/u, m => {
     const nome = m[1];
     const p = T('projetos').find(x => norm(x.nome).startsWith(norm(nome)));
     if (p) { out.projeto_id = p.id; toks.push({tipo:'proj', label:'# '+(p.icone||'📁')+' '+p.nome, raw:m[0]}); }
-    else { toks.push({tipo:'proj', label:'# '+nome+' — projeto não existe', raw:m[0]}); }
+    else { out.projetoDesconhecido = nome; toks.push({tipo:'proj', label:'# '+nome+' — criar?', raw:m[0]}); }
   });
   // @etiquetas (várias)
   for (let g = 0; g < 5; g++) {
@@ -1330,6 +1330,8 @@ function parseNL(txt) {
   }
   // prioridade
   eat(/\bp([1-4])\b/i, m => { out.prioridade = Number(m[1]); toks.push({tipo:'pri', label:'P'+m[1], raw:m[0]}); });
+  // duração estimada (QUANTO TEMPO leva): d5, d15, d30, d60, d90… (minutos) — distinto de 9h/14h (QUANDO ocorre)
+  eat(/\bd(\d{1,3})\b/i, m => { out.estimativa_min = Number(m[1]); toks.push({tipo:'dur', label:'⏳ '+fmtMin(Number(m[1])), raw:m[0]}); });
   // recorrências (antes das datas)
   const dowAlt = '(?:segunda|ter[cç]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)?';
   eat(/\btodo dia (\d{1,2})\b/i, m => { out.recorrencia = {tipo:'mensal', dia:Number(m[1])}; toks.push({tipo:'rec', label:'🔁 todo dia '+m[1], raw:m[0]}); });
@@ -1414,37 +1416,101 @@ const recLabel = r => !r ? '' : r.tipo === 'diaria' ? 'todo dia' : r.tipo === 'i
 /* ---- Quick add (registro ≤ 5s) ---- */
 function quickAddHTML(ctx) {
   window._qaCtx = ctx || {};
-  return '<div class="qa-box"><form data-sub="qa-sub">'
-    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h #casa @contas p2')+'">'
+  return '<div class="qa-box"><form data-sub="qa-sub"><div class="qa-inwrap">'
+    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h d30 #casa @contas p2')+'">'
+    + '<div class="qa-ac" id="qa-ac" hidden></div></div>'
     + '</form><div class="qa-tokens" id="qa-toks"></div></div>';
 }
 act('qa-parse', el => {
   const p = parseNL(el.value);
-  const cls = {data:'dt', hora:'hr', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
-  $('#qa-toks').innerHTML = p.tokens.map((t,i) =>
-    '<span class="tok '+cls[t.tipo]+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
+  const cls = {data:'dt', hora:'hr', dur:'dur', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
+  $('#qa-toks').innerHTML = p.tokens.map(t =>
+    '<span class="tok '+(cls[t.tipo]||'')+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
+  acAtualizar(el);
 });
 act('qa-tok-rm', el => { const inp = $('#qa-inp'); inp.value = inp.value.replace(el.dataset.raw, ' ').replace(/\s+/g,' '); Actions['qa-parse'](inp); inp.focus(); });
 act('qa-sub', () => {
   const inp = $('#qa-inp'); const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
-  criarTarefaParseada(p, window._qaCtx || {});
-  window._qaRefoco = true;
-  render();
+  acFechar();
+  const concluir = () => { criarTarefaParseada(p, window._qaCtx || {}); window._qaRefoco = true; render(); };
+  if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
+
+/* ---- Autocomplete de # (projetos) e @ (etiquetas) — Tab/Enter completa, ↑/↓ navega ---- */
+function acAtualizar(inp) {
+  const ac = $('#qa-ac'); if (!ac) return;
+  const pos = inp.selectionStart != null ? inp.selectionStart : inp.value.length;
+  const m = inp.value.slice(0, pos).match(/([#@])([\p{L}\d_-]*)$/u);
+  if (!m) { acFechar(); return; }
+  const tipo = m[1], frag = m[2];
+  let itens;
+  if (tipo === '#') itens = ordenar(T('projetos').filter(p => p.status !== 'arquivado' && norm(p.nome).includes(norm(frag))), p => p.nome)
+    .slice(0, 6).map(p => ({ valor: p.nome, html: projIconeHTML(p) + ' ' + esc(p.nome) + ' <span class="muted tiny">' + esc((areaDe(p.area_id) || {}).nome || '') + '</span>' }));
+  else itens = ordenar(T('etiquetas').filter(e => norm(e.nome).includes(norm(frag))), e => e.nome)
+    .slice(0, 6).map(e => ({ valor: e.nome, html: '<span class="dot" style="background:' + (e.cor || '#9AA0B0') + '"></span> @' + esc(e.nome) }));
+  if (!itens.length) { acFechar(); return; }
+  window._ac = { aberto: true, tipo, start: pos - m[0].length, len: m[0].length, itens, idx: 0 };
+  acRender();
+}
+function acRender() {
+  const ac = $('#qa-ac'), st = window._ac; if (!ac || !st || !st.aberto) return;
+  ac.innerHTML = st.itens.map((it, i) => '<div class="qa-ac-item' + (i === st.idx ? ' on' : '') + '" data-act="qa-ac-pick" data-i="' + i + '">' + it.html + '</div>').join('');
+  ac.hidden = false;
+}
+function acFechar() { const ac = $('#qa-ac'); if (ac) { ac.hidden = true; ac.innerHTML = ''; } if (window._ac) window._ac.aberto = false; }
+function acCompletar(inp, i) {
+  const st = window._ac; if (!st || !st.aberto) return false;
+  const it = st.itens[i == null ? st.idx : i]; if (!it) return false;
+  const v = inp.value;
+  inp.value = v.slice(0, st.start) + st.tipo + it.valor + ' ' + v.slice(st.start + st.len);
+  const caret = st.start + st.tipo.length + it.valor.length + 1;
+  acFechar();
+  try { inp.setSelectionRange(caret, caret); } catch (_) {}
+  Actions['qa-parse'](inp); inp.focus();
+  return true;
+}
+act('qa-ac-pick', el => acCompletar($('#qa-inp'), Number(el.dataset.i)));
+document.addEventListener('keydown', e => {
+  if (!e.target || e.target.id !== 'qa-inp') return;
+  const st = window._ac; if (!st || !st.aberto) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); st.idx = (st.idx + 1) % st.itens.length; acRender(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); st.idx = (st.idx - 1 + st.itens.length) % st.itens.length; acRender(); }
+  else if (e.key === 'Tab' || e.key === 'Enter') { if (acCompletar(e.target)) { e.preventDefault(); e.stopPropagation(); } }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); acFechar(); }
+}, true);
+document.addEventListener('click', e => { if (window._ac && window._ac.aberto && !e.target.closest('#qa-ac') && e.target.id !== 'qa-inp') acFechar(); });
+function ofereceCriarProjeto(p, depois) {
+  const nome = p.projetoDesconhecido;
+  modal('<div class="bx-h"><div class="h2">Projeto não existe</div></div>'
+    + '<p class="muted">O projeto <b>' + esc(nome) + '</b> não existe. O que deseja fazer?</p>'
+    + '<div class="bx-foot" style="flex-wrap:wrap;gap:8px">'
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button>'
+    + '<button class="btn" data-act="qa-semproj">Criar sem projeto</button>'
+    + '<button class="btn primary" data-act="qa-criaproj">Criar projeto</button></div>');
+  Actions['qa-semproj'] = () => { closeModal(); p.projeto_id = null; p.projetoDesconhecido = null; depois(); };
+  Actions['qa-criaproj'] = () => { closeModal();
+    editModal({ titulo:'Novo projeto', fields: resolveOpts(projFields), vals:{ nome: ucfirst(nome), icone:'📁', status:'ativo' },
+      onSave: v => { const np = dbUpsert('projetos', v); p.projeto_id = np.id; p.projetoDesconhecido = null; depois(); } });
+  };
+}
 function criarTarefaParseada(p, ctx) {
   for (const en of p.etiquetasNovas) dbUpsert('etiquetas', {nome: en, cor:'#9AA0B0'});
   const projeto_id = p.projeto_id || ctx.projeto_id || null;
   const proj = byId('projetos', projeto_id);
+  // Etapa E: com o dia já planejado, a tarefa entra no bloco ATIVO agora (que inclua o projeto),
+  // senão no PRÓXIMO bloco a começar. ctx.bloco_id força (ex.: criada dentro de um bloco).
+  const bloco_id = ctx.bloco_id !== undefined ? ctx.bloco_id : blocoParaTarefaNova({ projeto_id });
   const t = dbUpsert('tarefas', {
     titulo: p.titulo, descricao: null,
-    area_id: ctx.area_id || (proj ? proj.area_id : null),
+    area_id: proj ? proj.area_id : (ctx.area_id || null), // área herdada do projeto escolhido
     projeto_id, secao_id: p.projeto_id ? null : (ctx.secao_id || null),
     vencimento: p.vencimento || ctx.def_venc || null,
-    hora: p.hora, prioridade: p.prioridade, estimativa_min: null,
+    hora: p.hora, prioridade: p.prioridade,
+    estimativa_min: (p.estimativa_min != null ? p.estimativa_min : 5), // toda tarefa tem duração; padrão 5min
     recorrencia: p.recorrencia, subtarefas: [], etiquetas: p.etiquetas,
     comentarios: [], links: [], ordem: Date.now() % 100000, origem: ctx.origem || null,
-    abandonada: false, concluida: false, concluida_em: null
+    abandonada: false, concluida: false, concluida_em: null, bloco_id: bloco_id || null
   });
   toast('Tarefa criada ✓', {icone:'✅', undo: () => { dbDelete('tarefas', t.id); render(); }});
   return t;
@@ -1475,6 +1541,7 @@ function taskItemHTML(t, o={}) {
     + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+salvando+'</div>'
     + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
     + (o.rollover ? '<button class="btn small" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
+    + (o.blocoMenu ? '<button class="btn small" data-act="task-bloco-menu" data-id="'+t.id+'" title="mover/tirar do dia">⋯</button>' : '')
     + '</div>';
 }
 const tarefasPendentes = () => T('tarefas').filter(t => !t.concluida && !t.abandonada);
@@ -1940,15 +2007,16 @@ act('qa-tarefa', () => {
   closeModal();
   modal('<div class="bx-h"><div class="h2">✅ Nova tarefa</div><button class="iconbtn" data-act="m-close">✕</button></div>'
     + quickAddHTML({ph:'ex.: Reunião sexta 14:30 #trabalho @urgente p1'})
-    + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>toda segunda 7h</kbd> <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
+    + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>d30</kbd> (duração) <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
     + '<div class="bx-foot"><button class="btn primary" data-act="qa-sub-modal">Criar tarefa</button></div>',
     { onMount: ov => setTimeout(() => { const i = ov.querySelector('#qa-inp'); if (i) i.focus(); }, 80) });
 });
 act('qa-sub-modal', () => {
   const inp = $('#qa-inp'); const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
-  criarTarefaParseada(p, {});
-  closeModal(); render();
+  acFechar();
+  const concluir = () => { criarTarefaParseada(p, {}); closeModal(); render(); };
+  if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
 /* ════════════════ ETAPA 4 — HÁBITOS (3 tipos, streaks, heatmap, fonte_auto) ════════════════ */
 const regDoDia = (h, data) => T('habito_registros').find(r => r.habito_id === h.id && r.data === (data || hoje()));
@@ -2151,10 +2219,11 @@ function capacidadeDia(data) {
   data = data || hoje();
   const janela = Math.max(1, Number(getCfg('janela_util', 8))) * 60;
   const bs = blocosDoDia(data);
-  const comBloco = new Set(bs.map(b => b.tarefa_id).filter(Boolean));
+  const comBloco = new Set(bs.map(b => b.tarefa_id).filter(Boolean));   // blocos antigos (1 tarefa)
+  for (const t of T('tarefas')) if (t.bloco_id) comBloco.add(t.id);     // tarefas em blocos de planejamento
   let min = 0;
   for (const t of tarefasPendentes().filter(t => t.vencimento === data)) if (!comBloco.has(t.id)) min += Number(t.estimativa_min) || 0;
-  for (const b of bs) min += blocoMin(b);
+  for (const b of bs) min += ehBlocoPlano(b) ? blocoRealMin(b) : blocoMin(b); // blocos de plano esticam pelo conteúdo
   return { min, janela, pct: min / janela };
 }
 function capacidadeHTML(data) {
@@ -2168,6 +2237,130 @@ function capacidadeHTML(data) {
     + '</div>';
 }
 
+/* ════════ BLOCOS DE PLANEJAMENTO (modelo novo: janela + projetos + várias tarefas) ════════ */
+const ehBlocoPlano = b => Array.isArray(b.projetos_incluidos) && b.projetos_incluidos.length > 0;
+const blocosPlano = data => blocosDoDia(data || hoje()).filter(ehBlocoPlano)
+  .sort((a, b) => (a.ordem||0) - (b.ordem||0) || String(a.inicio).localeCompare(String(b.inicio)));
+const tarefasDoBloco = b => ordenar(T('tarefas').filter(t => t.bloco_id === b.id && !t.abandonada), ordTarefa);
+const estMin = t => Number(t.estimativa_min) || 5;            // toda tarefa tem duração (padrão 5)
+const blocoPrevistoMin = b => Math.max(0, (new Date(b.fim) - new Date(b.inicio)) / 60000);
+const blocoSomaMin = b => sum(tarefasDoBloco(b).map(estMin));  // tempo real = soma das durações das tarefas
+const blocoEsticou = b => blocoSomaMin(b) > blocoPrevistoMin(b) + 0.5;
+const blocoRealMin = b => Math.max(blocoPrevistoMin(b), blocoSomaMin(b));
+/* tarefas elegíveis para um bloco: pendentes/atrasadas dos projetos escolhidos,
+   ainda sem bloco (ou já neste), por prioridade e depois menor duração */
+function tarefasElegiveis(projIds, blocoAtual) {
+  const set = new Set(projIds || []);
+  return T('tarefas').filter(t => !t.concluida && !t.abandonada && set.has(t.projeto_id) && (!t.bloco_id || t.bloco_id === blocoAtual))
+    .sort((a, b) => (a.prioridade||4) - (b.prioridade||4) || estMin(a) - estMin(b) || String(a.vencimento||'9999').localeCompare(String(b.vencimento||'9999')));
+}
+function selecionarAteCaber(elegiveis, capMin) { // enche até caber; garante ao menos a 1ª (estouro permitido)
+  const sel = []; let soma = 0;
+  for (const t of elegiveis) { const d = estMin(t); if (!sel.length || soma + d <= capMin) { sel.push(t); soma += d; } }
+  return sel;
+}
+/* início/fim EFETIVOS com esticamento (estouro) e empurrão dos blocos seguintes */
+function blocosPlanoEsticados(data) {
+  const bs = blocosPlano(data); let prevFim = 0; const out = [];
+  for (const b of bs) {
+    let ini = new Date(b.inicio).getTime();
+    if (prevFim && ini < prevFim) ini = prevFim;          // empurra para depois do bloco anterior
+    const fim = ini + blocoRealMin(b) * 60000;
+    out.push({ b, iniMs: ini, fimMs: fim, esticou: blocoEsticou(b) });
+    prevFim = fim;
+  }
+  return out;
+}
+function apagarBloco(id) { // remove o bloco e solta as tarefas (bloco_id = null) — sem erro
+  for (const t of T('tarefas').filter(t => t.bloco_id === id)) dbPatch('tarefas', t.id, { bloco_id: null });
+  dbDelete('blocos', id);
+}
+/* virada do dia: tarefas de blocos de dias anteriores soltam o bloco_id (viram atrasadas soltas).
+   Os blocos em si ficam como histórico. */
+function limparBlocosVencidos() {
+  const blocoData = {}; for (const b of T('blocos')) blocoData[b.id] = dISO(new Date(b.inicio));
+  for (const t of T('tarefas')) if (t.bloco_id && blocoData[t.bloco_id] && blocoData[t.bloco_id] < hoje()) dbPatch('tarefas', t.id, { bloco_id: null });
+}
+/* bloco do dia adequado para uma tarefa nova: o ATIVO agora (que inclua o projeto), senão o PRÓXIMO a começar */
+function blocoParaTarefaNova(t) {
+  if (!t.projeto_id) return null;
+  const cands = blocosPlano(hoje()).filter(b => (b.projetos_incluidos||[]).includes(t.projeto_id));
+  if (!cands.length) return null;
+  const agora = Date.now();
+  const ativo = cands.find(b => new Date(b.inicio).getTime() <= agora && agora < blocoRealMin(b)*60000 + new Date(b.inicio).getTime());
+  if (ativo) return ativo.id;
+  const futuros = cands.filter(b => new Date(b.inicio).getTime() > agora).sort((a,b)=>new Date(a.inicio)-new Date(b.inicio));
+  return (futuros[0] || cands[0]).id;
+}
+BootHooks.push(() => { if (FLAGS.onboarded) { try { limparBlocosVencidos(); } catch(_){} } });
+
+const hhmm = ms => { const d = new Date(ms); return pad2(d.getHours())+':'+pad2(d.getMinutes()); };
+function corDoBloco(b) { const p = byId('projetos', (b.projetos_incluidos||[])[0]); return p ? corArea(p.area_id) : 'var(--acc)'; }
+
+/* ---- tela Hoje: tarefas agrupadas por bloco + grupo "Sem bloco" (Etapa C) ---- */
+function hojeTarefasHTML() {
+  const blocos = blocosPlanoEsticados(hoje());
+  let html = '';
+  for (const { b, iniMs, fimMs, esticou } of blocos) {
+    const ts = tarefasDoBloco(b);
+    const done = ts.filter(t => t.concluida).length;
+    const cor = corDoBloco(b);
+    html += '<div class="card pad0" style="margin-bottom:10px">'
+      + '<div class="bloco-head" data-act="bloco-resumo" data-id="'+b.id+'"><span class="bloco-dot" style="background:'+cor+'"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(b.titulo)+'</div><div class="sub">'+hhmm(iniMs)+'–'+hhmm(fimMs)
+      + (esticou?' · <span class="warn">esticou</span>':'')+' · '+done+'/'+ts.length+' · '+fmtMin(blocoSomaMin(b))+'</div></div>'
+      + '<span class="muted">›</span></div>'
+      + '<div class="list" style="padding:0 10px 8px">'
+      + (ts.length ? ts.map(t => taskItemHTML(t, {blocoMenu:true})).join('') : '<div class="tiny muted" style="padding:8px">Bloco sem tarefas.</div>')
+      + '</div></div>';
+  }
+  const semBloco = ordenar(tarefasPendentes().filter(t => t.vencimento === hoje() && !t.bloco_id), ordTarefa);
+  html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">✅ Tarefas de hoje'+(blocos.length?' — sem bloco':'')+'</div>'
+    + '<div class="list hoje-tarefas" style="padding:0 10px 8px">'
+    + (semBloco.map(t => taskItemHTML(t, {drag:true})).join('')
+       || '<div class="empty" style="padding:18px"><span class="em">'+(blocos.length?'✅':'🌤️')+'</span>'
+          + (blocos.length?'Tudo em blocos. Some algo acima se faltar.':'Dia limpo. Adicione acima ou use “Planejar o dia”.')+'</div>')
+    + '</div></div>';
+  return html;
+}
+/* ---- KPI velocímetro por bloco (Etapa D) ---- */
+function gaugeHTML(pct, label, sub, cor) {
+  pct = clamp(pct, 0, 1); const c = Math.PI * 26, off = c * (1 - pct);
+  return '<div class="gauge"><svg viewBox="0 0 64 40" width="76" height="46">'
+    + '<path d="M6 34 A26 26 0 0 1 58 34" fill="none" stroke="var(--border)" stroke-width="7" stroke-linecap="round"/>'
+    + '<path d="M6 34 A26 26 0 0 1 58 34" fill="none" stroke="'+cor+'" stroke-width="7" stroke-linecap="round" stroke-dasharray="'+c+'" stroke-dashoffset="'+off+'"/>'
+    + '<text x="32" y="31" text-anchor="middle" font-size="13" font-weight="800" fill="var(--txt)">'+Math.round(pct*100)+'%</text></svg>'
+    + '<div class="gl">'+esc(label)+'</div><div class="gs muted tiny">'+esc(sub)+'</div></div>';
+}
+function blocoGaugesHTML() {
+  const bs = blocosPlano(hoje()); if (!bs.length) return '';
+  return '<div class="gauges">' + bs.map(b => { const ts = tarefasDoBloco(b); const done = ts.filter(t => t.concluida).length;
+    return gaugeHTML(ts.length ? done/ts.length : 0, b.titulo, done+'/'+ts.length+' feitas', corDoBloco(b)); }).join('') + '</div>';
+}
+/* ---- ações de bloco/tarefa ---- */
+act('bloco-resumo', el => {
+  const b = byId('blocos', el.dataset.id); if (!b) return;
+  const ts = tarefasDoBloco(b);
+  const projs = (b.projetos_incluidos||[]).map(id => byId('projetos', id)).filter(Boolean);
+  modal('<div class="bx-h"><div class="h2">🧱 '+esc(b.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="small muted" style="margin-top:0">'+horaDe(b.inicio)+'–'+horaDe(b.fim)+' · previsto '+fmtMin(blocoPrevistoMin(b))+' · tarefas '+fmtMin(blocoSomaMin(b))+(blocoEsticou(b)?' <span class="warn">(estica)</span>':'')+'</p>'
+    + (projs.length ? '<div class="row wrap" style="gap:6px;margin-bottom:8px">'+projs.map(p => '<span class="chip">'+projIconeHTML(p)+' '+esc(p.nome)+'</span>').join('')+'</div>' : '')
+    + '<div class="list">'+(ts.length ? ts.map(t => taskItemHTML(t, {blocoMenu:true})).join('') : '<div class="tiny muted" style="padding:8px">Sem tarefas.</div>')+'</div>'
+    + '<div class="bx-foot"><button class="btn danger" data-act="bloco-apagar" data-id="'+b.id+'">🗑️ Apagar bloco</button><span class="sp"></span><button class="btn" data-act="m-close">Fechar</button></div>');
+});
+act('bloco-apagar', el => confirmBox('Apagar este bloco? As tarefas voltam a ficar soltas (não são apagadas).', () => { apagarBloco(el.dataset.id); closeModal(true); render(); toast('Bloco apagado; tarefas soltas.', {icone:'🗑️'}); }, {perigo:1, sim:'Apagar'}));
+act('task-bloco-menu', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t) return;
+  const outros = blocosPlano(hoje()).filter(b => b.id !== t.bloco_id);
+  modal('<div class="bx-h"><div class="h2">Mover "'+esc(t.titulo)+'"</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="fabmenu">'
+    + (outros.length ? outros.map(b => '<button data-act="task-mover-bloco" data-id="'+t.id+'" data-b="'+b.id+'"><span class="em">🧱</span>'+esc(b.titulo)+' <span class="muted tiny">'+horaDe(b.inicio)+'</span></button>').join('') : '<div class="tiny muted" style="padding:6px">Não há outro bloco hoje.</div>')
+    + '<button data-act="task-tirar-dia" data-id="'+t.id+'"><span class="em">📤</span>Tirar do dia (vira solta)</button>'
+    + '</div>');
+});
+act('task-mover-bloco', el => { dbPatch('tarefas', el.dataset.id, { bloco_id: el.dataset.b }); closeModal(); render(); });
+act('task-tirar-dia', el => { dbPatch('tarefas', el.dataset.id, { bloco_id: null }); closeModal(); render(); toast('Tarefa tirada do dia.', {icone:'📤'}); });
+
 /* ---- agenda do dia (05h–24h) ---- */
 const H_INI = 5, H_FIM = 24, PXH = 52;
 function agendaDiaHTML(data) {
@@ -2175,7 +2368,17 @@ function agendaDiaHTML(data) {
   let horas = '';
   for (let h = H_INI; h < H_FIM; h++) horas += '<div class="tl-hour" data-act="bloco-novo-hora" data-data="'+data+'" data-h="'+h+'"><span class="hh">'+pad2(h)+'h</span></div>';
   let evs = '';
-  for (const b of blocosDoDia(data)) {
+  // blocos de PLANEJAMENTO: posição/altura com esticamento e empurrão; clique = resumo
+  for (const { b, iniMs, fimMs, esticou } of blocosPlanoEsticados(data)) {
+    const di = new Date(iniMs);
+    const top = (di.getHours() - H_INI) * PXH + di.getMinutes() * PXH / 60;
+    const alt = Math.max(20, (fimMs - iniMs) / 36e5 * PXH - 2);
+    const cor = corDoBloco(b); const ts = tarefasDoBloco(b);
+    evs += '<div class="tl-ev" data-act="bloco-resumo" data-id="'+b.id+'" style="top:'+top+'px;height:'+alt+'px;background:'+cor+'1f;border-color:'+cor+'66;color:'+cor+'">'
+      + '🧱 '+esc(b.titulo)+'<div class="t">'+hhmm(iniMs)+'–'+hhmm(fimMs)+(esticou?' · esticou':'')+' · '+ts.filter(t=>t.concluida).length+'/'+ts.length+'</div></div>';
+  }
+  // blocos ANTIGOS (1 tarefa / rotina / timer): desenho original; clique = editar
+  for (const b of blocosDoDia(data).filter(b => !ehBlocoPlano(b))) {
     const ini = new Date(b.inicio), fim = new Date(b.fim);
     const top = (ini.getHours() - H_INI) * PXH + ini.getMinutes() * PXH / 60;
     const alt = Math.max(20, (fim - ini) / 36e5 * PXH - 2);
@@ -2385,7 +2588,7 @@ reg('hoje', {
     const nome = getCfg('nome','');
     const saud = (h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite') + (nome ? ', ' + esc(nome) : '') + '!';
     const pend = tarefasPendentes();
-    const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+    const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje() && !t.bloco_id), t => t.vencimento);
     const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
     const habPend = habitosAtivos().filter(hb => (hb.tipo === 'semanal' ? !regDoDia(hb) : (diaAtivo(hb, hoje()) && !diaFeito(hb, hoje())))).length;
     const cap = capacidadeDia();
@@ -2395,7 +2598,7 @@ reg('hoje', {
       + ' · '+habPend+' hábito'+(habPend===1?'':'s')+' pendente'+(habPend===1?'':'s')+' · '+fmtMin(cap.min)+' planejadas</p>';
     for (const fn of HojeExtras.alertas) { try { html += fn() || ''; } catch(e) {} }
     if (window.ritualBotoesHTML) html += ritualBotoesHTML();
-    html += capacidadeHTML();
+    html += capacidadeHTML() + blocoGaugesHTML();
     if (window.insightDoDiaHTML) { try { html += insightDoDiaHTML() || ''; } catch(e) {} }
     html += '<div class="row wrap" style="margin-bottom:14px">'
       + '<button class="btn" data-act="qa-treino">🏋️ Treino de hoje</button>'
@@ -2407,8 +2610,7 @@ reg('hoje', {
     if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas — decida o destino</span></div><div class="list" style="padding:0 10px 8px">'
       + atrasadas.slice(0, 6).map(t => taskItemHTML(t, {rollover:true})).join('')
       + (atrasadas.length > 6 ? '<div class="tiny muted center" style="padding:6px">+'+(atrasadas.length-6)+' na visão Tarefas</div>' : '') + '</div></div>';
-    html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">✅ Tarefas de hoje</div><div class="list hoje-tarefas" style="padding:0 10px 8px">'
-      + (deHoje.map(t => taskItemHTML(t, {drag:true})).join('') || '<div class="empty" style="padding:18px"><span class="em">🌤️</span>Dia limpo. Adicione acima ou planeje com o ritual.</div>') + '</div></div>'
+    html += hojeTarefasHTML()
       + '<div class="card"><div class="h3">🔁 Hábitos de hoje</div>'+(habitoChipsHTML() || '<span class="muted small">Nenhum hábito ativo.</span>')+'</div>'
       + timerCardHTML();
     for (const fn of HojeExtras.cartoes) { try { html += fn() || ''; } catch(e) {} }
@@ -2448,11 +2650,109 @@ function ritualBotoesHTML() {
     + '<button class="btn '+(d.planejado?'ok':'primary')+'" data-act="ritual-planejar" style="flex:1">'+(d.planejado?'✓ Dia planejado':'▶ Planejar o dia')+'</button>'
     + '<button class="btn '+(d.encerrado?'ok':'')+'" data-act="ritual-encerrar" style="flex:1">'+(d.encerrado?'✓ Dia encerrado':'◼ Encerrar o dia')+'</button></div>';
 }
-/* ---- Planejar (manhã, ~2 min) ---- */
-act('ritual-planejar', () => {
+/* ---- Planejar o dia — ASSISTENTE DE BLOCOS (Etapa B) ---- */
+const diffMinHHMM = (a, b) => { const [ah,am]=a.split(':').map(Number), [bh,bm]=b.split(':').map(Number); return (bh*60+bm)-(ah*60+am); };
+function tituloBloco(blk, i) {
+  const nomes = (blk.projetos||[]).map(id => (byId('projetos', id)||{}).nome).filter(Boolean);
+  return nomes.length ? nomes.slice(0,2).join(' + ') + (nomes.length>2 ? ' +'+(nomes.length-2) : '') : 'Bloco '+(i+1);
+}
+function planejarDia() {
+  window._plan = { blocos: blocosPlano(hoje()).map(b => ({
+    id: b.id, inicio: horaDe(b.inicio), fim: horaDe(b.fim),
+    projetos: [...(b.projetos_incluidos||[])], tarefaIds: tarefasDoBloco(b).map(t => t.id)
+  })) };
+  modal('<div id="plan-box"></div>', { onMount: () => planDraw(), fixo: true });
+}
+function planDraw() {
+  const box = $('#plan-box'); if (!box) return;
+  const P = window._plan;
+  const projs = ordenar(T('projetos').filter(p => p.status !== 'arquivado'), p => p.nome);
+  let totalMin = 0;
+  const cards = P.blocos.map((blk, i) => {
+    const capMin = Math.max(0, diffMinHHMM(blk.inicio, blk.fim));
+    const somaMin = sum(blk.tarefaIds.map(id => { const t = byId('tarefas', id); return t ? estMin(t) : 0; }));
+    totalMin += Math.max(capMin, somaMin);
+    const estouro = somaMin > capMin + 0.5;
+    const projChips = projs.length
+      ? projs.map(p => '<span class="chip'+(blk.projetos.includes(p.id)?' sel':'')+'" data-act="plan-proj" data-i="'+i+'" data-p="'+p.id+'">'+projIconeHTML(p)+' '+esc(p.nome)+'</span>').join('')
+      : '<span class="tiny muted">Crie projetos primeiro (em Tarefas).</span>';
+    const eleg = tarefasElegiveis(blk.projetos, blk.id);
+    const elegIds = new Set(eleg.map(t => t.id));
+    const extras = blk.tarefaIds.filter(id => !elegIds.has(id)).map(id => byId('tarefas', id)).filter(Boolean);
+    const lista = eleg.concat(extras);
+    const tHtml = blk.projetos.length
+      ? (lista.length ? lista.map(t => '<div class="item" data-act="plan-task" data-i="'+i+'" data-id="'+t.id+'" style="padding:6px 4px;cursor:pointer">'
+          + '<span class="check p'+(t.prioridade||4)+(blk.tarefaIds.includes(t.id)?' ck':'')+'" style="border-radius:6px"></span>'
+          + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">⏳ '+fmtMin(estMin(t))
+          + (byId('projetos',t.projeto_id) ? ' · '+projLabelHTML(byId('projetos',t.projeto_id)) : '')
+          + (t.vencimento && t.vencimento < hoje() ? ' · <span class="err">atrasada</span>' : '')+'</div></div></div>').join('')
+        : '<div class="tiny muted" style="padding:6px">Nenhuma tarefa pendente nesses projetos.</div>')
+      : '<div class="tiny muted" style="padding:6px">Escolha projeto(s) para o sistema sugerir tarefas.</div>';
+    return '<div class="card" style="margin-bottom:10px"><div class="row" style="gap:6px;align-items:center;flex-wrap:wrap">'
+      + '<input class="input" type="time" value="'+blk.inicio+'" data-chg="plan-set-ini" data-i="'+i+'" style="width:auto;padding:6px 8px">'
+      + '<span class="muted">→</span><input class="input" type="time" value="'+blk.fim+'" data-chg="plan-set-fim" data-i="'+i+'" style="width:auto;padding:6px 8px">'
+      + '<span class="sp"></span><span class="small '+(estouro?'warn':'muted')+'">'+fmtMin(somaMin)+' / '+fmtMin(capMin)+(estouro?' ⚠️ estica':'')+'</span>'
+      + '<button class="iconbtn" data-act="plan-del" data-i="'+i+'" title="remover bloco">🗑️</button></div>'
+      + '<div class="row wrap" style="margin:8px 0 4px;gap:6px">'+projChips+'</div>'
+      + '<div class="list">'+tHtml+'</div></div>';
+  }).join('');
+  const totH = totalMin/60;
+  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="muted small" style="margin-top:0">Crie blocos de tempo e escolha de quais <b>projetos</b> entram tarefas. O sistema seleciona por prioridade e menor duração; você ajusta à vontade. Estouro é permitido (o bloco estica).</p>'
+    + (cards || '<div class="empty"><span class="em">🧱</span>Nenhum bloco ainda. Adicione o primeiro abaixo.</div>')
+    + '<div class="row" style="margin:6px 0;align-items:center"><button class="btn" data-act="plan-add">➕ Adicionar bloco</button><span class="sp"></span>'
+    + '<span class="small '+(totH>8?'warn':'muted')+'">Total do dia: '+fmtMin(totalMin)+(totH>8?' ⚠️ acima de 8h':'')+'</span></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary big" data-act="plan-concluir">✓ Concluir planejamento</button></div>';
+}
+act('plan-add', () => {
+  const P = window._plan; let ini;
+  if (P.blocos.length) ini = P.blocos[P.blocos.length-1].fim;
+  else { const n = new Date(); ini = pad2(Math.min(22, Math.max(H_INI, n.getHours() + (n.getMinutes()>0?1:0)))) + ':00'; }
+  const fim = pad2(Math.min(23, Number(ini.slice(0,2)) + 2)) + ':' + ini.slice(3);
+  P.blocos.push({ id:null, inicio: ini, fim, projetos: [], tarefaIds: [] });
+  planDraw();
+});
+act('plan-del', el => { window._plan.blocos.splice(Number(el.dataset.i), 1); planDraw(); });
+act('plan-set-ini', el => { window._plan.blocos[Number(el.dataset.i)].inicio = el.value; planDraw(); });
+act('plan-set-fim', el => { window._plan.blocos[Number(el.dataset.i)].fim = el.value; planDraw(); });
+act('plan-proj', el => {
+  const blk = window._plan.blocos[Number(el.dataset.i)], pid = el.dataset.p;
+  const k = blk.projetos.indexOf(pid);
+  if (k < 0) blk.projetos.push(pid); else blk.projetos.splice(k, 1);
+  // re-seleciona automaticamente as tarefas que cabem dos projetos atuais
+  blk.tarefaIds = selecionarAteCaber(tarefasElegiveis(blk.projetos, blk.id), Math.max(0, diffMinHHMM(blk.inicio, blk.fim))).map(t => t.id);
+  planDraw();
+});
+act('plan-task', el => {
+  const blk = window._plan.blocos[Number(el.dataset.i)], id = el.dataset.id;
+  const k = blk.tarefaIds.indexOf(id);
+  if (k < 0) blk.tarefaIds.push(id); else blk.tarefaIds.splice(k, 1);
+  planDraw();
+});
+act('plan-concluir', () => {
+  const P = window._plan;
+  const idsAntes = new Set(blocosPlano(hoje()).map(b => b.id));
+  const mantidos = new Set();
+  P.blocos.forEach((blk, i) => {
+    if (diffMinHHMM(blk.inicio, blk.fim) <= 0) return; // janela inválida: ignora
+    const b = dbUpsert('blocos', { id: blk.id || undefined, titulo: tituloBloco(blk, i),
+      inicio: isoLocal(hoje(), blk.inicio), fim: isoLocal(hoje(), blk.fim),
+      projetos_incluidos: [...blk.projetos], ordem: i, tarefa_id: null, area_id: null, foco: false });
+    blk.id = b.id; mantidos.add(b.id);
+    for (const t of T('tarefas').filter(t => t.bloco_id === b.id && !blk.tarefaIds.includes(t.id))) dbPatch('tarefas', t.id, { bloco_id: null });
+    for (const id of blk.tarefaIds) { const t = byId('tarefas', id); if (t && t.bloco_id !== b.id) dbPatch('tarefas', id, { bloco_id: b.id }); }
+  });
+  for (const id of idsAntes) if (!mantidos.has(id)) apagarBloco(id); // blocos removidos no assistente
+  dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
+  closeModal(true); render();
+  toast(mantidos.size ? ('Dia planejado em '+mantidos.size+' bloco(s) ✓') : 'Planejamento limpo.', {icone:'🧱', ms:4000});
+});
+/* ---- Planejar (ritual antigo de 3 passos — desativado, mantido p/ referência) ---- */
+act('ritual-planejar', () => planejarDia());
+function _ritualPlanejarAntigo() {
   window._ritPasso = tarefasPendentes().some(t => t.vencimento && t.vencimento < hoje()) ? 1 : 2;
   modal('<div id="rit-box"></div>', { onMount: () => ritDraw(), fixo: true });
-});
+}
 function ritDraw() {
   const box = $('#rit-box'); if (!box) return;
   const passo = window._ritPasso;

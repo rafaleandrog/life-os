@@ -289,7 +289,20 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 .tok.dt{background:var(--ok-soft);color:var(--ok)} .tok.hr{background:rgba(92,200,252,.14);color:var(--p3)}
 .tok.rec{background:var(--acc-soft);color:var(--acc)} .tok.proj{background:var(--warn-soft);color:var(--warn)}
 .tok.tag{background:rgba(92,200,252,.14);color:var(--p3)} .tok.pri{background:var(--err-soft);color:var(--err)}
+.tok.dur{background:rgba(192,132,252,.16);color:#c084fc}
 .tok button{border:none;background:none;color:inherit;cursor:pointer;padding:0;font-size:11px;opacity:.7}
+.qa-inwrap{position:relative}
+.qa-ac{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:55;background:var(--elev);
+  border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.45);overflow:hidden auto;max-height:260px}
+.qa-ac-item{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qa-ac-item.on,.qa-ac-item:hover{background:rgba(124,92,252,.18)}
+.bloco-head{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer}
+.bloco-head:hover{background:rgba(255,255,255,.03)}
+.bloco-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.gauges{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px;justify-content:center}
+.gauge{display:flex;flex-direction:column;align-items:center;width:92px;text-align:center}
+.gauge .gl{font-size:11.5px;font-weight:700;margin-top:2px;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gauge .gs{font-size:10.5px}
 
 /* ---------- Diversos ---------- */
 .areachip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:7px;font-size:11.5px;font-weight:700}
@@ -311,7 +324,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 .saving{display:inline-block;margin-left:6px;font-size:11px;color:var(--txt2);opacity:.7;animation:girar 1s linear infinite;vertical-align:middle}
 @keyframes girar{to{transform:rotate(360deg)}}
 #feedback-fab{position:fixed;right:18px;bottom:86px;width:46px;height:46px;border-radius:50%;z-index:43;
-  background:var(--card2,#171922);color:#fff;font-size:22px;border:1px solid var(--bd);cursor:pointer;
+  background:var(--elev);color:#fff;font-size:22px;border:1px solid var(--border);cursor:pointer;
   box-shadow:0 4px 14px rgba(0,0,0,.45);display:grid;place-items:center;transition:transform .15s}
 #feedback-fab:hover{transform:scale(1.08)}
 @media(min-width:900px){#feedback-fab{right:28px;bottom:96px}}
