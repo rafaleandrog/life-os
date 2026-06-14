@@ -664,6 +664,11 @@ function fldHTML(f, v) {
     case 'stars': return '<div class="field"><label>'+esc(f.l)+'</label><div class="stars" data-stars="'+f.k+'" data-val="'+(val||0)+'">'
       + [1,2,3,4,5].map(n => '<span data-act="fld-star" data-v="'+n+'" class="'+(n<=(val||0)?'on':'')+'">★</span>').join('')+'</div></div>';
     case 'range': inp = '<div class="row"><input type="range" name="'+f.k+'" min="'+(f.min||1)+'" max="'+(f.max||5)+'" value="'+(val||f.min||1)+'" style="flex:1;accent-color:var(--acc)" data-inp="fld-range"><b data-rangeval>'+(val||f.min||1)+'</b></div>'; break;
+    case 'seg': { const def0 = f.opts && f.opts[0] && (f.opts[0].v !== undefined ? f.opts[0].v : f.opts[0]); const cur = val !== '' ? val : def0;
+      return '<div class="field'+(f.meia?' meia':'')+'"><label>'+esc(f.l)+(f.req?' *':'')+'</label><div class="seg" data-seg="'+f.k+'" data-val="'+esc(cur)+'">'
+        + (f.opts||[]).map(o => { const ov = o.v !== undefined ? o.v : o, ot = o.t !== undefined ? o.t : o;
+            return '<button type="button" class="seg-b'+(String(ov)===String(cur)?' on':'')+'" data-act="fld-seg" data-v="'+esc(ov)+'">'+esc(ot)+'</button>'; }).join('')
+        + '</div></div>'; }
   }
   return '<div class="field'+(f.meia?' meia':'')+'"><label>'+esc(f.l)+(f.req?' *':'')+'</label>'+inp+(f.dica?'<span class="tiny muted">'+esc(f.dica)+'</span>':'')+'</div>';
 }
@@ -672,6 +677,8 @@ act('fld-cor', el => { const box = el.closest('[data-cor]'); box.dataset.val = e
 act('fld-star', el => { const box = el.closest('[data-stars]'); const v = Number(el.dataset.v);
   box.dataset.val = v; box.querySelectorAll('span').forEach((s,i) => s.classList.toggle('on', i < v)); });
 act('fld-range', el => { el.parentElement.querySelector('[data-rangeval]').textContent = el.value; });
+act('fld-seg', el => { const box = el.closest('[data-seg]'); box.dataset.val = el.dataset.v;
+  box.querySelectorAll('.seg-b').forEach(b => b.classList.toggle('on', b.dataset.v === el.dataset.v)); });
 function formHTML(fields, vals) {
   vals = vals || {};
   let out = '', meia = [];
@@ -689,6 +696,7 @@ function lerForm(box, fields) {
   for (const f of fields) {
     if (f.t === 'cor') { o[f.k] = box.querySelector('[data-cor="'+f.k+'"]').dataset.val; continue; }
     if (f.t === 'stars') { o[f.k] = Number(box.querySelector('[data-stars="'+f.k+'"]').dataset.val) || null; continue; }
+    if (f.t === 'seg') { const sb = box.querySelector('[data-seg="'+f.k+'"]'); o[f.k] = sb ? sb.dataset.val : null; continue; }
     const el = box.querySelector('[name="'+f.k+'"]'); if (!el) continue;
     let v;
     if (f.t === 'chk') v = el.checked;
@@ -1155,23 +1163,33 @@ act('cfg-rebuild', () => confirmBox('Reconstruir do banco? Isto APAGA o estado l
 
 /* ============ BUGS E SUGESTÕES (coleta + export CSV) ============ */
 const FEEDBACK_STATUS = { aberto:{l:'aberto', c:'var(--warn)'}, implementado:{l:'implementado', c:'var(--ok)'}, descartado:{l:'descartado', c:'var(--txt2)'} };
+const FEEDBACK_TIPOS = [{v:'bug', t:'🐞 Bug'}, {v:'sugestao', t:'💡 Sugestão'}];
+// telas para o assunto: "Geral" + as telas do menu (mesma fonte da navegação)
+const telasFeedback = () => [{v:'geral', t:'🧭 Geral'}].concat((typeof MENU !== 'undefined' ? MENU : []).map(([r, em, l]) => ({ v:r, t:em+' '+l })));
+const tipoLabel = v => (FEEDBACK_TIPOS.find(o => o.v === v) || {}).t || '🐞 Bug';
+const telaLabel = v => (telasFeedback().find(o => o.v === v) || {}).t || (v || '🧭 Geral');
 act('feedback-open', () => editModal({
-  titulo:'🐛 Bug ou sugestão',
+  titulo:'Registrar bug ou sugestão',
   salvar:'Registrar',
   fields:[
     {k:'titulo', l:'Título', req:1, foco:1, ph:'Resumo curto'},
+    {k:'tipo', t:'seg', l:'Tipo', def:'bug', opts: FEEDBACK_TIPOS},
+    {k:'assunto', t:'sel', l:'Tela / assunto', def:'geral', opts: telasFeedback()},
     {k:'problema', t:'ta', l:'(i) Qual é o problema?', rows:3, ph:'O que está errado, confuso ou faltando'},
     {k:'solucao', t:'ta', l:'(ii) Qual solução você sugere?', rows:3, ph:'Como deveria funcionar'}
   ],
-  onSave: v => { dbUpsert('feedback', { titulo:v.titulo, problema:v.problema||'', solucao:v.solucao||'', status:'aberto' });
+  onSave: v => { dbUpsert('feedback', { titulo:v.titulo, tipo:v.tipo||'bug', assunto:v.assunto||'geral', problema:v.problema||'', solucao:v.solucao||'', status:'aberto' });
     toast('Registrado ✓ Obrigado!', {icone:'🐛'}); render(); }
 }));
 function feedbackCardHTML() {
   const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
   const linha = f => {
     const st = FEEDBACK_STATUS[f.status] || FEEDBACK_STATUS.aberto;
+    const corTipo = f.tipo === 'sugestao' ? 'var(--p3)' : 'var(--err)';
     return '<div class="item" style="align-items:flex-start">'
       + '<div class="grow"><div class="ttl">'+esc(f.titulo)+' <span class="tag" style="background:'+st.c+'22;color:'+st.c+'">'+st.l+'</span></div>'
+      + '<div class="row wrap" style="gap:5px;margin:3px 0 2px"><span class="tag" style="background:'+corTipo+'22;color:'+corTipo+'">'+esc(tipoLabel(f.tipo))+'</span>'
+      + '<span class="tag" style="background:var(--elev);color:var(--txt2)">'+esc(telaLabel(f.assunto))+'</span></div>'
       + (f.problema ? '<div class="sub"><b>Problema:</b> '+esc(f.problema)+'</div>' : '')
       + (f.solucao ? '<div class="sub"><b>Sugestão:</b> '+esc(f.solucao)+'</div>' : '')
       + '<div class="row wrap" style="margin-top:6px">'
@@ -1192,9 +1210,11 @@ act('feedback-export', () => {
   const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
   if (!itens.length) { toast('Nada para exportar.', {icone:'📭'}); return; }
   const cel = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
-  const cols = [['titulo','Título'],['problema','Problema'],['solucao','Sugestão'],['status','Status'],['criado_em','Criado em']];
+  const cols = [['titulo','Título'],['tipo','Tipo'],['assunto','Tela/Assunto'],['problema','Problema'],['solucao','Sugestão'],['status','Status'],['criado_em','Criado em']];
+  const val = (f, k) => k === 'criado_em' ? String(f.criado_em||'').slice(0,16).replace('T',' ')
+    : k === 'tipo' ? tipoLabel(f.tipo) : k === 'assunto' ? telaLabel(f.assunto) : f[k];
   const csv = '﻿' + cols.map(c => cel(c[1])).join(';') + '\r\n'
-    + itens.map(f => cols.map(c => cel(c[0] === 'criado_em' ? String(f.criado_em||'').slice(0,16).replace('T',' ') : f[c[0]])).join(';')).join('\r\n');
+    + itens.map(f => cols.map(c => cel(val(f, c[0]))).join(';')).join('\r\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'lifeos-bugs-sugestoes-' + hoje() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
