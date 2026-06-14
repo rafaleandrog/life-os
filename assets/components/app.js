@@ -15,6 +15,7 @@ create table if not exists projetos (
   id uuid primary key default gen_random_uuid(),
   area_id uuid references areas(id) on delete cascade,
   nome text not null, status text default 'ativo',
+  icone text default '📁',
   prazo date, criado_em timestamptz default now());
 
 create table if not exists secoes (
@@ -238,7 +239,15 @@ create table if not exists conquistas (
   desbloqueada_em timestamptz default now());
 
 -- ===== CONFIGURAÇÕES =====
-create table if not exists configuracoes (chave text primary key, valor jsonb);`;
+create table if not exists configuracoes (chave text primary key, valor jsonb);
+
+-- ===== BUGS E SUGESTÕES =====
+create table if not exists feedback (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null,
+  problema text, solucao text,
+  status text default 'aberto',
+  criado_em timestamptz default now());`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
@@ -425,6 +434,8 @@ async function flush(forcar) {
   if (!transitorio && !S.syncPausado && !S.queue.length) {
     if (!S.deadQueue.length) { S.syncErr = null; FLAGS.lastSync = nowISO(); saveFlags(); }
     S.retry = 0;
+    // confirmado: limpa os indicadores "salvando" sem piscar nem mexer no scroll
+    if (typeof document !== 'undefined' && document.querySelector && document.querySelector('.task .saving')) render({ manterScroll:true, semFade:true });
   } else if (transitorio && !S.syncPausado) {
     agendarRetry();
   }
@@ -440,12 +451,39 @@ async function pullTable(t) {
   }
   return out;
 }
+/* Conjunto de ids com escrita PENDENTE (na fila ou em quarentena) por tabela.
+   Usado para (a) não deixar o servidor remover otimistas da UI e (b) marcar "salvando". */
+function idsPendentes(t) {
+  const pk = TABLES[t], set = new Set();
+  for (const it of S.queue) if (it.op === 'up' && it.t === t && it.rows) for (const r of it.rows) set.add(r[pk]);
+  for (const it of S.deadQueue) if (it.op === 'up' && it.t === t && it.rows) for (const r of it.rows) set.add(r[pk]);
+  return set;
+}
+const estaPendente = (t, id) => {
+  for (const it of S.queue) if (it.op === 'up' && it.t === t && it.rows && it.rows.some(r => r[TABLES[t]] === id)) return true;
+  return false;
+};
+/* Mescla as operações ainda pendentes (fila) e os recusados (quarentena) POR CIMA do
+   snapshot do servidor — assim um item otimista criado antes/durante o pull nunca some. */
+function mesclarPendentes(novo) {
+  const sobre = (t, rows) => {
+    const pk = TABLES[t]; const arr = novo[t] || (novo[t] = []);
+    for (const r of rows) { const i = arr.findIndex(x => x[pk] === r[pk]); if (i >= 0) arr[i] = r; else arr.push(r); }
+  };
+  for (const it of S.queue) {
+    if (it.op === 'up' && it.rows) sobre(it.t, it.rows);
+    else if (it.op === 'del' && novo[it.t]) novo[it.t] = novo[it.t].filter(x => x[TABLES[it.t]] !== it.id);
+  }
+  // recusados (não salvos) continuam visíveis localmente para o usuário resolver
+  for (const it of S.deadQueue) if (it.op === 'up' && it.rows) sobre(it.t, it.rows);
+}
 async function pullAll(silencioso) {
   if (!CFG.url || !CFG.key || !usuarioAutenticado()) return false;
   await flush();
-  if (S.queue.length) return false; // não sobrescrever com pendências locais
+  if (!navigator.onLine) return false; // offline: não lê; pendências ficam na fila
   const novo = {};
-  for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t);
+  try { for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t); }
+  catch (e) { S.syncErr = e.msg || String(e); atualizarSyncUI(); return false; } // blip de rede: não sobrescreve
   // dedup defensivo por id no que veio da nuvem (cache nunca recebe id repetido)
   for (const t of Object.keys(TABLES)) {
     const pk = TABLES[t], m = new Map();
@@ -454,7 +492,9 @@ async function pullAll(silencioso) {
   }
   const totalNuvem = Object.values(novo).reduce((a, arr) => a + arr.length, 0);
   const totalLocal = Object.values(S.data).reduce((a, arr) => a + arr.length, 0);
-  if (!totalNuvem && totalLocal) return 'vazio'; // nuvem vazia p/ esta conta: NÃO apagar dados locais
+  if (!totalNuvem && totalLocal && !S.queue.length && !S.deadQueue.length) return 'vazio'; // nuvem vazia p/ esta conta
+  // RECONCILIAÇÃO: nunca remover da UI um item ainda pendente/otimista (criado antes ou DURANTE o pull)
+  mesclarPendentes(novo);
   S.lastPull = nowISO(); S.syncErr = null;
   const mudou = JSON.stringify(novo) !== JSON.stringify(S.data);
   if (!mudou) { atualizarSyncUI(); return 'igual'; } // nuvem == local → não re-renderiza (sem piscar)
@@ -684,7 +724,10 @@ function areaChipHTML(id) {
   return '<span class="areachip" style="background:'+a.cor+'22;color:'+a.cor+'">'+a.icone+' '+esc(a.nome)+'</span>';
 }
 const optsAreas = (semVazio) => (semVazio ? [] : [{v:'',t:'— sem área —'}]).concat(ordenar(T('areas'), a => a.ordem||0).map(a => ({v:a.id, t:a.icone+' '+a.nome})));
-const optsProjetos = () => [{v:'',t:'— caixa de entrada —'}].concat(ordenar(T('projetos').filter(p=>p.status!=='arquivado'), p => p.nome).map(p => ({v:p.id, t:p.nome})));
+const optsProjetos = () => [{v:'',t:'— caixa de entrada —'}].concat(ordenar(T('projetos').filter(p=>p.status!=='arquivado'), p => p.nome).map(p => ({v:p.id, t:(p.icone||'📁')+' '+p.nome})));
+// emoji do projeto na COR da área a que ele pertence (vínculo visual claro)
+function projIconeHTML(p) { return p ? '<span style="color:'+corArea(p.area_id)+'">'+(p.icone||'📁')+'</span>' : ''; }
+function projLabelHTML(p) { return p ? projIconeHTML(p)+' '+esc(p.nome) : ''; }
 
 async function copiarTexto(t, msg) {
   try { await navigator.clipboard.writeText(t); }
@@ -838,6 +881,9 @@ function sqlSetup() {
       + '\ncreate policy ' + t + '_own on ' + t + ' for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());\n';
   }
   s += `
+-- colunas novas em tabelas já existentes (idempotente)
+alter table projetos add column if not exists icone text default '📁';
+
 -- chaves únicas passam a valer por usuário
 alter table etiquetas drop constraint if exists etiquetas_nome_key;
 create unique index if not exists etiquetas_user_nome on etiquetas(user_id, nome);
@@ -1064,6 +1110,7 @@ reg('config', {
       + '<div class="row wrap"><button class="btn primary" data-act="exportar">⬇️ Exportar JSON</button>'
       + '<button class="btn" data-act="importar">⬆️ Importar JSON</button>'
       + '<button class="btn danger" data-act="apagar-local">🗑️ Apagar dados locais</button></div></div>'
+    + feedbackCardHTML()
     + '<div class="card"><div class="h3">Sobre</div><p class="small muted" style="margin:0">Life OS Pessoal v4.2 (login Google + dados por usuário) · estrutura modular · custo R$ 0,00 · seus dados, suas regras.</p></div>';
   }
 });
@@ -1105,6 +1152,55 @@ act('cfg-rebuild', () => confirmBox('Reconstruir do banco? Isto APAGA o estado l
     toast(limpos ? ('Reconstruído ✓ ' + limpos + ' duplicata(s) consolidada(s).') : 'Reconstruído do banco ✓', {icone:'🛠️', ms:5000});
   } catch (e) { toast('Falha ao reconstruir: ' + (e.msg || String(e)), {icone:'❌'}); }
 }, {sim:'Reconstruir'}));
+
+/* ============ BUGS E SUGESTÕES (coleta + export CSV) ============ */
+const FEEDBACK_STATUS = { aberto:{l:'aberto', c:'var(--warn)'}, implementado:{l:'implementado', c:'var(--ok)'}, descartado:{l:'descartado', c:'var(--txt2)'} };
+act('feedback-open', () => editModal({
+  titulo:'🐛 Bug ou sugestão',
+  salvar:'Registrar',
+  fields:[
+    {k:'titulo', l:'Título', req:1, foco:1, ph:'Resumo curto'},
+    {k:'problema', t:'ta', l:'(i) Qual é o problema?', rows:3, ph:'O que está errado, confuso ou faltando'},
+    {k:'solucao', t:'ta', l:'(ii) Qual solução você sugere?', rows:3, ph:'Como deveria funcionar'}
+  ],
+  onSave: v => { dbUpsert('feedback', { titulo:v.titulo, problema:v.problema||'', solucao:v.solucao||'', status:'aberto' });
+    toast('Registrado ✓ Obrigado!', {icone:'🐛'}); render(); }
+}));
+function feedbackCardHTML() {
+  const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
+  const linha = f => {
+    const st = FEEDBACK_STATUS[f.status] || FEEDBACK_STATUS.aberto;
+    return '<div class="item" style="align-items:flex-start">'
+      + '<div class="grow"><div class="ttl">'+esc(f.titulo)+' <span class="tag" style="background:'+st.c+'22;color:'+st.c+'">'+st.l+'</span></div>'
+      + (f.problema ? '<div class="sub"><b>Problema:</b> '+esc(f.problema)+'</div>' : '')
+      + (f.solucao ? '<div class="sub"><b>Sugestão:</b> '+esc(f.solucao)+'</div>' : '')
+      + '<div class="row wrap" style="margin-top:6px">'
+      + '<button class="btn small" data-act="feedback-status" data-id="'+f.id+'" data-s="'+(f.status==='implementado'?'aberto':'implementado')+'">'+(f.status==='implementado'?'↩︎ Reabrir':'✅ Implementado')+'</button>'
+      + '<button class="btn small" data-act="feedback-status" data-id="'+f.id+'" data-s="descartado">🗂️ Descartar</button>'
+      + '<button class="btn small danger" data-act="feedback-del" data-id="'+f.id+'">🗑️ Excluir</button>'
+      + '</div></div></div>';
+  };
+  return '<div class="card"><div class="card-h"><div class="h2">🐛 Bugs e sugestões</div>'
+    + (itens.length ? '<button class="btn small" data-act="feedback-export">⬇️ Exportar CSV</button>' : '') + '</div>'
+    + '<p class="small muted" style="margin:0 0 10px">Use o botão 🐛 flutuante para registrar. Marque <b>Implementado</b> conforme resolver e exporte em CSV para colar numa IA.</p>'
+    + (itens.length ? '<div class="list">'+itens.map(linha).join('')+'</div>'
+        : '<div class="empty"><span class="em">🐛</span>Nenhum registro ainda.</div>') + '</div>';
+}
+act('feedback-status', el => { dbPatch('feedback', el.dataset.id, { status: el.dataset.s }); render(); });
+act('feedback-del', el => confirmBox('Excluir este registro de bug/sugestão?', () => { dbDelete('feedback', el.dataset.id); render(); toast('Removido.', {icone:'🗑️'}); }, {perigo:1, sim:'Excluir'}));
+act('feedback-export', () => {
+  const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
+  if (!itens.length) { toast('Nada para exportar.', {icone:'📭'}); return; }
+  const cel = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
+  const cols = [['titulo','Título'],['problema','Problema'],['solucao','Sugestão'],['status','Status'],['criado_em','Criado em']];
+  const csv = '﻿' + cols.map(c => cel(c[1])).join(';') + '\r\n'
+    + itens.map(f => cols.map(c => cel(c[0] === 'criado_em' ? String(f.criado_em||'').slice(0,16).replace('T',' ') : f[c[0]])).join(';')).join('\r\n');
+  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'lifeos-bugs-sugestoes-' + hoje() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  toast('CSV exportado ✓', {icone:'📄'});
+});
 act('pin-set', () => {
   modal('<div class="bx-h"><div class="h2">Definir PIN</div></div>'
     + '<div class="field"><label>PIN (4–6 dígitos)</label><input class="input" id="pin-novo" inputmode="numeric" maxlength="6" autofocus style="text-align:center;font-size:20px;letter-spacing:6px"></div>'
@@ -1216,12 +1312,12 @@ function parseNL(txt) {
   const toks = [];
   const eat = (re, fn) => { const m = s.match(re); if (m) { s = s.replace(re, ' '); fn(m); } return !!m; };
   const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoNovo:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
-  // #projeto
+  // #projeto — só VINCULA a projeto existente (criar projeto é só pelo formulário, com área obrigatória)
   eat(/#([\p{L}\d_-]+)/u, m => {
     const nome = m[1];
     const p = T('projetos').find(x => norm(x.nome).startsWith(norm(nome)));
-    if (p) { out.projeto_id = p.id; toks.push({tipo:'proj', label:'# '+p.nome, raw:m[0]}); }
-    else { out.projetoNovo = nome; toks.push({tipo:'proj', label:'# '+nome+' (novo)', raw:m[0]}); }
+    if (p) { out.projeto_id = p.id; toks.push({tipo:'proj', label:'# '+(p.icone||'📁')+' '+p.nome, raw:m[0]}); }
+    else { toks.push({tipo:'proj', label:'# '+nome+' — projeto não existe', raw:m[0]}); }
   });
   // @etiquetas (várias)
   for (let g = 0; g < 5; g++) {
@@ -1337,7 +1433,6 @@ act('qa-sub', () => {
   render();
 });
 function criarTarefaParseada(p, ctx) {
-  if (p.projetoNovo) { const np = dbUpsert('projetos', {nome: ucfirst(p.projetoNovo), status:'ativo', area_id: ctx.area_id||null}); p.projeto_id = np.id; toast('Projeto "'+esc(np.nome)+'" criado.', {icone:'📁'}); }
   for (const en of p.etiquetasNovas) dbUpsert('etiquetas', {nome: en, cor:'#9AA0B0'});
   const projeto_id = p.projeto_id || ctx.projeto_id || null;
   const proj = byId('projetos', projeto_id);
@@ -1367,16 +1462,17 @@ function taskItemHTML(t, o={}) {
   const sub = [
     vencHTML(t),
     t.recorrencia ? '<span class="acc">🔁 '+esc(recLabel(t.recorrencia))+'</span>' : '',
-    (!o.semProjeto && proj) ? '<span>📁 '+esc(proj.nome)+'</span>' : '',
+    (!o.semProjeto && proj) ? '<span>'+projLabelHTML(proj)+'</span>' : '',
     (t.etiquetas||[]).map(e => '<span class="tag" style="background:'+etiquetaCor(e)+'22;color:'+etiquetaCor(e)+'">@'+esc(e)+'</span>').join(''),
     (t.subtarefas||[]).length ? '<span>☑ '+(t.subtarefas.filter(s=>s.feito).length)+'/'+t.subtarefas.length+'</span>' : '',
     (t.comentarios||[]).length ? '<span>💬 '+t.comentarios.length+'</span>' : '',
     (t.links||[]).length ? '<span>🔗 '+t.links.length+'</span>' : '',
     t.estimativa_min ? '<span>⏳ '+fmtMin(t.estimativa_min)+'</span>' : ''
   ].filter(Boolean).join(' ');
+  const salvando = estaPendente('tarefas', t.id) ? '<span class="saving" title="salvando…">⟳</span>' : '';
   return '<div class="item task'+(t.concluida?' done':'')+'" data-tid="'+t.id+'" '+(o.drag?'draggable="true"':'')+'>'
     + '<button class="check p'+(t.prioridade||4)+(t.concluida?' ck':'')+'" data-act="task-toggle" data-id="'+t.id+'"></button>'
-    + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+'</div>'
+    + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+salvando+'</div>'
     + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
     + (o.rollover ? '<button class="btn small" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
     + '</div>';
@@ -1587,7 +1683,7 @@ function tarAsideHTML(vista) {
     const projs = T('projetos').filter(p => (a ? p.area_id === a.id : !p.area_id) && p.status !== 'arquivado');
     if (!projs.length) continue;
     if (a) html += '<div class="tiny" style="padding:6px 12px 0;color:'+a.cor+';font-weight:700">'+a.icone+' '+esc(a.nome).toUpperCase()+'</div>';
-    html += projs.map(p => li('projeto/'+p.id,'📁',esc(p.nome), pend.filter(t=>t.projeto_id===p.id).length)).join('');
+    html += projs.map(p => li('projeto/'+p.id, projIconeHTML(p), esc(p.nome), pend.filter(t=>t.projeto_id===p.id).length)).join('');
   }
   const tagsUsadas = ordenar(T('etiquetas'), e => e.nome);
   if (tagsUsadas.length) {
@@ -1602,7 +1698,7 @@ function tarVistasMobileHTML(vista) {
 }
 act('tar-projetos-sheet', () => {
   modal('<div class="bx-h"><div class="h2">Projetos</div><button class="btn small" data-act="proj-add">+ Novo</button></div><div class="list">'
-    + T('projetos').filter(p => p.status !== 'arquivado').map(p => '<div class="item" data-act="nav-close" data-r="tarefas/projeto/'+p.id+'"><span>📁</span><div class="grow"><div class="ttl">'+esc(p.nome)+'</div><div class="sub">'+(areaDe(p.area_id)?areaChipHTML(p.area_id):'')+'</div></div></div>').join('')
+    + T('projetos').filter(p => p.status !== 'arquivado').map(p => '<div class="item" data-act="nav-close" data-r="tarefas/projeto/'+p.id+'"><span>'+projIconeHTML(p)+'</span><div class="grow"><div class="ttl">'+esc(p.nome)+'</div><div class="sub">'+(areaDe(p.area_id)?areaChipHTML(p.area_id):'')+'</div></div></div>').join('')
     + '</div>');
 });
 act('tar-mais-sheet', () => {
@@ -1677,7 +1773,7 @@ function vistaProjetoHTML(pid) {
   const feitas = todas.filter(t => t.concluida).length;
   const pct = todas.length ? Math.round(feitas/todas.length*100) : 0;
   const secs = ordenar(T('secoes').filter(s => s.projeto_id === pid), s => s.ordem||0);
-  let html = '<div class="row" style="margin-bottom:6px"><div class="h1" style="flex:1">📁 '+esc(p.nome)+'</div>'
+  let html = '<div class="row" style="margin-bottom:6px"><div class="h1" style="flex:1">'+projLabelHTML(p)+'</div>'
     + '<button class="btn small" data-act="proj-edit" data-id="'+pid+'">✏️</button>'
     + '<button class="btn small" data-act="sec-add" data-id="'+pid+'">+ Seção</button></div>'
     + '<div class="row" style="margin-bottom:10px">'+areaChipHTML(p.area_id)
@@ -1761,7 +1857,8 @@ act('filtro-del', el => { const f = {...byId('filtros', el.dataset.id)}; dbDelet
 /* ---- projetos / seções CRUD ---- */
 const projFields = [
   {k:'nome', l:'Nome', req:1, foco:1},
-  {k:'area_id', t:'sel', l:'Área', opts: () => optsAreas()},
+  {k:'icone', l:'Emoji do projeto', meia:1, def:'📁'},
+  {k:'area_id', t:'sel', l:'Área da vida (obrigatória)', meia:1, req:1, opts: () => optsAreas(true)},
   {k:'status', t:'sel', l:'Status', meia:1, opts:[['ativo','ativo'],['pausado','pausado'],['concluido','concluído'],['arquivado','arquivado']].map(([v,t])=>({v,t}))},
   {k:'prazo', t:'date', l:'Prazo', meia:1}
 ];

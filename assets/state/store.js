@@ -12,7 +12,7 @@ const TABLES = {
   treino_planilhas:'id', treino_exercicios:'id', treino_sessoes:'id', treino_registros:'id',
   corridas:'id', corpo_registros:'id',
   livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
-  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave'
+  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id'
 };
 const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data',
   etiquetas:'user_id,nome', dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
@@ -22,7 +22,7 @@ const TABLE_ORDER = [
   // raízes (sem dependências) primeiro
   'areas','etiquetas','filtros','categorias_financeiras','contas_financeiras',
   'investimentos_ativos','treino_planilhas','artigos','rotina_modelos',
-  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias',
+  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias','feedback',
   // dependem de uma raiz
   'projetos','habitos','metas','livros','textos',
   // dependem de nível 2
@@ -66,7 +66,7 @@ const FK_REFS = {
    (evita 400 "column ... does not exist"). user_id é acrescentado no flush. */
 const COLS = {
   areas:['id','nome','cor','icone','ordem','criado_em'],
-  projetos:['id','area_id','nome','status','prazo','criado_em'],
+  projetos:['id','area_id','nome','icone','status','prazo','criado_em'],
   secoes:['id','projeto_id','nome','ordem'],
   etiquetas:['id','nome','cor'],
   tarefas:['id','titulo','descricao','area_id','projeto_id','secao_id','vencimento','hora','prioridade','estimativa_min','recorrencia','subtarefas','etiquetas','comentarios','links','ordem','origem','abandonada','concluida','concluida_em','criado_em'],
@@ -97,7 +97,8 @@ const COLS = {
   textos:['id','titulo','conteudo','status','tags','area_id','palavras','criado_em','atualizado_em'],
   revisoes:['id','tipo','periodo_inicio','periodo_fim','metricas','respostas','criado_em'],
   conquistas:['codigo','desbloqueada_em'],
-  configuracoes:['chave','valor']
+  configuracoes:['chave','valor'],
+  feedback:['id','titulo','problema','solucao','status','criado_em']
 };
 
 /* ---- Estado local (offline-first, regra 12) ---- */
@@ -144,7 +145,7 @@ const ordenar = (arr, fn, desc) => [...arr].sort((a, b) => { const x = fn(a), y 
 function dbUpsert(t, row) {
   const pk = TABLES[t];
   if (row[pk] === undefined || row[pk] === null) row[pk] = pk === 'id' ? uid() : row[pk];
-  if (!row.criado_em && ['areas','projetos','tarefas','habitos','lancamentos_financeiros','investimentos_ativos','investimentos_movimentos','treino_planilhas','treino_sessoes','corridas','livros','artigos','leitura_notas','textos','revisoes','metas'].includes(t)) row.criado_em = nowISO();
+  if (!row.criado_em && ['areas','projetos','tarefas','habitos','lancamentos_financeiros','investimentos_ativos','investimentos_movimentos','treino_planilhas','treino_sessoes','corridas','livros','artigos','leitura_notas','textos','revisoes','metas','feedback'].includes(t)) row.criado_em = nowISO();
   const arr = T(t);
   const i = arr.findIndex(r => r[pk] === row[pk]);
   if (i < 0) arr.push(row); else arr[i] = row;
