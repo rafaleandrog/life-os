@@ -1311,13 +1311,13 @@ function parseNL(txt) {
   let s = ' ' + String(txt || '') + ' ';
   const toks = [];
   const eat = (re, fn) => { const m = s.match(re); if (m) { s = s.replace(re, ' '); fn(m); } return !!m; };
-  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoNovo:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
+  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoDesconhecido:null, estimativa_min:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
   // #projeto — só VINCULA a projeto existente (criar projeto é só pelo formulário, com área obrigatória)
   eat(/#([\p{L}\d_-]+)/u, m => {
     const nome = m[1];
     const p = T('projetos').find(x => norm(x.nome).startsWith(norm(nome)));
     if (p) { out.projeto_id = p.id; toks.push({tipo:'proj', label:'# '+(p.icone||'📁')+' '+p.nome, raw:m[0]}); }
-    else { toks.push({tipo:'proj', label:'# '+nome+' — projeto não existe', raw:m[0]}); }
+    else { out.projetoDesconhecido = nome; toks.push({tipo:'proj', label:'# '+nome+' — criar?', raw:m[0]}); }
   });
   // @etiquetas (várias)
   for (let g = 0; g < 5; g++) {
@@ -1330,6 +1330,8 @@ function parseNL(txt) {
   }
   // prioridade
   eat(/\bp([1-4])\b/i, m => { out.prioridade = Number(m[1]); toks.push({tipo:'pri', label:'P'+m[1], raw:m[0]}); });
+  // duração estimada (QUANTO TEMPO leva): d5, d15, d30, d60, d90… (minutos) — distinto de 9h/14h (QUANDO ocorre)
+  eat(/\bd(\d{1,3})\b/i, m => { out.estimativa_min = Number(m[1]); toks.push({tipo:'dur', label:'⏳ '+fmtMin(Number(m[1])), raw:m[0]}); });
   // recorrências (antes das datas)
   const dowAlt = '(?:segunda|ter[cç]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)?';
   eat(/\btodo dia (\d{1,2})\b/i, m => { out.recorrencia = {tipo:'mensal', dia:Number(m[1])}; toks.push({tipo:'rec', label:'🔁 todo dia '+m[1], raw:m[0]}); });
@@ -1414,34 +1416,95 @@ const recLabel = r => !r ? '' : r.tipo === 'diaria' ? 'todo dia' : r.tipo === 'i
 /* ---- Quick add (registro ≤ 5s) ---- */
 function quickAddHTML(ctx) {
   window._qaCtx = ctx || {};
-  return '<div class="qa-box"><form data-sub="qa-sub">'
-    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h #casa @contas p2')+'">'
+  return '<div class="qa-box"><form data-sub="qa-sub"><div class="qa-inwrap">'
+    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h d30 #casa @contas p2')+'">'
+    + '<div class="qa-ac" id="qa-ac" hidden></div></div>'
     + '</form><div class="qa-tokens" id="qa-toks"></div></div>';
 }
 act('qa-parse', el => {
   const p = parseNL(el.value);
-  const cls = {data:'dt', hora:'hr', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
-  $('#qa-toks').innerHTML = p.tokens.map((t,i) =>
-    '<span class="tok '+cls[t.tipo]+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
+  const cls = {data:'dt', hora:'hr', dur:'dur', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
+  $('#qa-toks').innerHTML = p.tokens.map(t =>
+    '<span class="tok '+(cls[t.tipo]||'')+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
+  acAtualizar(el);
 });
 act('qa-tok-rm', el => { const inp = $('#qa-inp'); inp.value = inp.value.replace(el.dataset.raw, ' ').replace(/\s+/g,' '); Actions['qa-parse'](inp); inp.focus(); });
 act('qa-sub', () => {
   const inp = $('#qa-inp'); const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
-  criarTarefaParseada(p, window._qaCtx || {});
-  window._qaRefoco = true;
-  render();
+  acFechar();
+  const concluir = () => { criarTarefaParseada(p, window._qaCtx || {}); window._qaRefoco = true; render(); };
+  if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
+
+/* ---- Autocomplete de # (projetos) e @ (etiquetas) — Tab/Enter completa, ↑/↓ navega ---- */
+function acAtualizar(inp) {
+  const ac = $('#qa-ac'); if (!ac) return;
+  const pos = inp.selectionStart != null ? inp.selectionStart : inp.value.length;
+  const m = inp.value.slice(0, pos).match(/([#@])([\p{L}\d_-]*)$/u);
+  if (!m) { acFechar(); return; }
+  const tipo = m[1], frag = m[2];
+  let itens;
+  if (tipo === '#') itens = ordenar(T('projetos').filter(p => p.status !== 'arquivado' && norm(p.nome).includes(norm(frag))), p => p.nome)
+    .slice(0, 6).map(p => ({ valor: p.nome, html: projIconeHTML(p) + ' ' + esc(p.nome) + ' <span class="muted tiny">' + esc((areaDe(p.area_id) || {}).nome || '') + '</span>' }));
+  else itens = ordenar(T('etiquetas').filter(e => norm(e.nome).includes(norm(frag))), e => e.nome)
+    .slice(0, 6).map(e => ({ valor: e.nome, html: '<span class="dot" style="background:' + (e.cor || '#9AA0B0') + '"></span> @' + esc(e.nome) }));
+  if (!itens.length) { acFechar(); return; }
+  window._ac = { aberto: true, tipo, start: pos - m[0].length, len: m[0].length, itens, idx: 0 };
+  acRender();
+}
+function acRender() {
+  const ac = $('#qa-ac'), st = window._ac; if (!ac || !st || !st.aberto) return;
+  ac.innerHTML = st.itens.map((it, i) => '<div class="qa-ac-item' + (i === st.idx ? ' on' : '') + '" data-act="qa-ac-pick" data-i="' + i + '">' + it.html + '</div>').join('');
+  ac.hidden = false;
+}
+function acFechar() { const ac = $('#qa-ac'); if (ac) { ac.hidden = true; ac.innerHTML = ''; } if (window._ac) window._ac.aberto = false; }
+function acCompletar(inp, i) {
+  const st = window._ac; if (!st || !st.aberto) return false;
+  const it = st.itens[i == null ? st.idx : i]; if (!it) return false;
+  const v = inp.value;
+  inp.value = v.slice(0, st.start) + st.tipo + it.valor + ' ' + v.slice(st.start + st.len);
+  const caret = st.start + st.tipo.length + it.valor.length + 1;
+  acFechar();
+  try { inp.setSelectionRange(caret, caret); } catch (_) {}
+  Actions['qa-parse'](inp); inp.focus();
+  return true;
+}
+act('qa-ac-pick', el => acCompletar($('#qa-inp'), Number(el.dataset.i)));
+document.addEventListener('keydown', e => {
+  if (!e.target || e.target.id !== 'qa-inp') return;
+  const st = window._ac; if (!st || !st.aberto) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); st.idx = (st.idx + 1) % st.itens.length; acRender(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); st.idx = (st.idx - 1 + st.itens.length) % st.itens.length; acRender(); }
+  else if (e.key === 'Tab' || e.key === 'Enter') { if (acCompletar(e.target)) { e.preventDefault(); e.stopPropagation(); } }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); acFechar(); }
+}, true);
+document.addEventListener('click', e => { if (window._ac && window._ac.aberto && !e.target.closest('#qa-ac') && e.target.id !== 'qa-inp') acFechar(); });
+function ofereceCriarProjeto(p, depois) {
+  const nome = p.projetoDesconhecido;
+  modal('<div class="bx-h"><div class="h2">Projeto não existe</div></div>'
+    + '<p class="muted">O projeto <b>' + esc(nome) + '</b> não existe. O que deseja fazer?</p>'
+    + '<div class="bx-foot" style="flex-wrap:wrap;gap:8px">'
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button>'
+    + '<button class="btn" data-act="qa-semproj">Criar sem projeto</button>'
+    + '<button class="btn primary" data-act="qa-criaproj">Criar projeto</button></div>');
+  Actions['qa-semproj'] = () => { closeModal(); p.projeto_id = null; p.projetoDesconhecido = null; depois(); };
+  Actions['qa-criaproj'] = () => { closeModal();
+    editModal({ titulo:'Novo projeto', fields: resolveOpts(projFields), vals:{ nome: ucfirst(nome), icone:'📁', status:'ativo' },
+      onSave: v => { const np = dbUpsert('projetos', v); p.projeto_id = np.id; p.projetoDesconhecido = null; depois(); } });
+  };
+}
 function criarTarefaParseada(p, ctx) {
   for (const en of p.etiquetasNovas) dbUpsert('etiquetas', {nome: en, cor:'#9AA0B0'});
   const projeto_id = p.projeto_id || ctx.projeto_id || null;
   const proj = byId('projetos', projeto_id);
   const t = dbUpsert('tarefas', {
     titulo: p.titulo, descricao: null,
-    area_id: ctx.area_id || (proj ? proj.area_id : null),
+    area_id: proj ? proj.area_id : (ctx.area_id || null), // área herdada do projeto escolhido
     projeto_id, secao_id: p.projeto_id ? null : (ctx.secao_id || null),
     vencimento: p.vencimento || ctx.def_venc || null,
-    hora: p.hora, prioridade: p.prioridade, estimativa_min: null,
+    hora: p.hora, prioridade: p.prioridade,
+    estimativa_min: (p.estimativa_min != null ? p.estimativa_min : 5), // toda tarefa tem duração; padrão 5min
     recorrencia: p.recorrencia, subtarefas: [], etiquetas: p.etiquetas,
     comentarios: [], links: [], ordem: Date.now() % 100000, origem: ctx.origem || null,
     abandonada: false, concluida: false, concluida_em: null
@@ -1940,15 +2003,16 @@ act('qa-tarefa', () => {
   closeModal();
   modal('<div class="bx-h"><div class="h2">✅ Nova tarefa</div><button class="iconbtn" data-act="m-close">✕</button></div>'
     + quickAddHTML({ph:'ex.: Reunião sexta 14:30 #trabalho @urgente p1'})
-    + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>toda segunda 7h</kbd> <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
+    + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>d30</kbd> (duração) <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
     + '<div class="bx-foot"><button class="btn primary" data-act="qa-sub-modal">Criar tarefa</button></div>',
     { onMount: ov => setTimeout(() => { const i = ov.querySelector('#qa-inp'); if (i) i.focus(); }, 80) });
 });
 act('qa-sub-modal', () => {
   const inp = $('#qa-inp'); const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
-  criarTarefaParseada(p, {});
-  closeModal(); render();
+  acFechar();
+  const concluir = () => { criarTarefaParseada(p, {}); closeModal(); render(); };
+  if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
 /* ════════════════ ETAPA 4 — HÁBITOS (3 tipos, streaks, heatmap, fonte_auto) ════════════════ */
 const regDoDia = (h, data) => T('habito_registros').find(r => r.habito_id === h.id && r.data === (data || hoje()));
