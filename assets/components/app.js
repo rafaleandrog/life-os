@@ -425,6 +425,8 @@ async function flush(forcar) {
   if (!transitorio && !S.syncPausado && !S.queue.length) {
     if (!S.deadQueue.length) { S.syncErr = null; FLAGS.lastSync = nowISO(); saveFlags(); }
     S.retry = 0;
+    // confirmado: limpa os indicadores "salvando" sem piscar nem mexer no scroll
+    if (typeof document !== 'undefined' && document.querySelector && document.querySelector('.task .saving')) render({ manterScroll:true, semFade:true });
   } else if (transitorio && !S.syncPausado) {
     agendarRetry();
   }
@@ -440,12 +442,39 @@ async function pullTable(t) {
   }
   return out;
 }
+/* Conjunto de ids com escrita PENDENTE (na fila ou em quarentena) por tabela.
+   Usado para (a) não deixar o servidor remover otimistas da UI e (b) marcar "salvando". */
+function idsPendentes(t) {
+  const pk = TABLES[t], set = new Set();
+  for (const it of S.queue) if (it.op === 'up' && it.t === t && it.rows) for (const r of it.rows) set.add(r[pk]);
+  for (const it of S.deadQueue) if (it.op === 'up' && it.t === t && it.rows) for (const r of it.rows) set.add(r[pk]);
+  return set;
+}
+const estaPendente = (t, id) => {
+  for (const it of S.queue) if (it.op === 'up' && it.t === t && it.rows && it.rows.some(r => r[TABLES[t]] === id)) return true;
+  return false;
+};
+/* Mescla as operações ainda pendentes (fila) e os recusados (quarentena) POR CIMA do
+   snapshot do servidor — assim um item otimista criado antes/durante o pull nunca some. */
+function mesclarPendentes(novo) {
+  const sobre = (t, rows) => {
+    const pk = TABLES[t]; const arr = novo[t] || (novo[t] = []);
+    for (const r of rows) { const i = arr.findIndex(x => x[pk] === r[pk]); if (i >= 0) arr[i] = r; else arr.push(r); }
+  };
+  for (const it of S.queue) {
+    if (it.op === 'up' && it.rows) sobre(it.t, it.rows);
+    else if (it.op === 'del' && novo[it.t]) novo[it.t] = novo[it.t].filter(x => x[TABLES[it.t]] !== it.id);
+  }
+  // recusados (não salvos) continuam visíveis localmente para o usuário resolver
+  for (const it of S.deadQueue) if (it.op === 'up' && it.rows) sobre(it.t, it.rows);
+}
 async function pullAll(silencioso) {
   if (!CFG.url || !CFG.key || !usuarioAutenticado()) return false;
   await flush();
-  if (S.queue.length) return false; // não sobrescrever com pendências locais
+  if (!navigator.onLine) return false; // offline: não lê; pendências ficam na fila
   const novo = {};
-  for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t);
+  try { for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t); }
+  catch (e) { S.syncErr = e.msg || String(e); atualizarSyncUI(); return false; } // blip de rede: não sobrescreve
   // dedup defensivo por id no que veio da nuvem (cache nunca recebe id repetido)
   for (const t of Object.keys(TABLES)) {
     const pk = TABLES[t], m = new Map();
@@ -454,7 +483,9 @@ async function pullAll(silencioso) {
   }
   const totalNuvem = Object.values(novo).reduce((a, arr) => a + arr.length, 0);
   const totalLocal = Object.values(S.data).reduce((a, arr) => a + arr.length, 0);
-  if (!totalNuvem && totalLocal) return 'vazio'; // nuvem vazia p/ esta conta: NÃO apagar dados locais
+  if (!totalNuvem && totalLocal && !S.queue.length && !S.deadQueue.length) return 'vazio'; // nuvem vazia p/ esta conta
+  // RECONCILIAÇÃO: nunca remover da UI um item ainda pendente/otimista (criado antes ou DURANTE o pull)
+  mesclarPendentes(novo);
   S.lastPull = nowISO(); S.syncErr = null;
   const mudou = JSON.stringify(novo) !== JSON.stringify(S.data);
   if (!mudou) { atualizarSyncUI(); return 'igual'; } // nuvem == local → não re-renderiza (sem piscar)
@@ -1374,9 +1405,10 @@ function taskItemHTML(t, o={}) {
     (t.links||[]).length ? '<span>🔗 '+t.links.length+'</span>' : '',
     t.estimativa_min ? '<span>⏳ '+fmtMin(t.estimativa_min)+'</span>' : ''
   ].filter(Boolean).join(' ');
+  const salvando = estaPendente('tarefas', t.id) ? '<span class="saving" title="salvando…">⟳</span>' : '';
   return '<div class="item task'+(t.concluida?' done':'')+'" data-tid="'+t.id+'" '+(o.drag?'draggable="true"':'')+'>'
     + '<button class="check p'+(t.prioridade||4)+(t.concluida?' ck':'')+'" data-act="task-toggle" data-id="'+t.id+'"></button>'
-    + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+'</div>'
+    + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+salvando+'</div>'
     + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
     + (o.rollover ? '<button class="btn small" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
     + '</div>';
