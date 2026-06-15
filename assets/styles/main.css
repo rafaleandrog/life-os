@@ -314,6 +314,10 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 .sb-x{margin-left:auto;background:none;border:none;color:var(--txt2);font-size:18px;line-height:1;cursor:pointer;padding:2px 7px;border-radius:6px}
 .sb-x:hover{background:rgba(255,255,255,.06);color:var(--txt)}
 #sb-show{display:none}
+#install-pwa{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;z-index:47;background:var(--acc);color:#fff;border:none;border-radius:999px;padding:10px 18px;font-weight:700;font-size:13px;cursor:pointer;box-shadow:0 6px 20px rgba(124,92,252,.5)}
+#install-pwa[hidden]{display:none}
+#install-pwa:active{transform:translateX(-50%) scale(.96)}
+@media(min-width:900px){#install-pwa{bottom:22px}}
 @media(min-width:900px){
   #sidebar{transition:transform .18s ease}
   body.sb-collapsed #sidebar{transform:translateX(-100%)}

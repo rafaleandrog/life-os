@@ -676,6 +676,20 @@ function fldHTML(f, v) {
 function aplicarSidebar() { document.body.classList.toggle('sb-collapsed', !!FLAGS.sidebarColapsada); }
 act('sb-toggle', () => { FLAGS.sidebarColapsada = !FLAGS.sidebarColapsada; saveFlags(); aplicarSidebar(); });
 BootHooks.push(aplicarSidebar);
+
+// ---- Instalação PWA (Android) — banner discreto via beforeinstallprompt ----
+let _pwaPrompt = null;
+const pwaInstalado = () => matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+function mostrarBotaoInstalar(v) { const b = document.getElementById('install-pwa'); if (b) b.hidden = !v; }
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); _pwaPrompt = e; if (!pwaInstalado()) mostrarBotaoInstalar(true); });
+window.addEventListener('appinstalled', () => { _pwaPrompt = null; mostrarBotaoInstalar(false); if (window.toast) toast('App instalado ✓', {icone:'📲'}); });
+act('pwa-instalar', async () => {
+  if (!_pwaPrompt) { mostrarBotaoInstalar(false); return; }
+  _pwaPrompt.prompt();
+  try { await _pwaPrompt.userChoice; } catch (_) {}
+  _pwaPrompt = null; mostrarBotaoInstalar(false);
+});
+BootHooks.push(() => { if (pwaInstalado()) mostrarBotaoInstalar(false); });
 // data+hora no fuso de Brasília, formato BR (ex.: 14/06/2026 23:57)
 function fmtDataHoraBR(iso) {
   if (!iso) return '—';

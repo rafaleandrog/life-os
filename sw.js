@@ -1,10 +1,11 @@
-/* Life OS — service worker (PWA)
-   Cacheia o app shell (3 arquivos) e as bibliotecas de CDN (fontes) para
-   abertura offline e instantânea. Nunca cacheia chamadas de dados
-   (Supabase, extração de artigos). Regra 18 do spec. */
+/* Life OS — service worker (PWA, foco Android)
+   Cacheia o app shell (HTML/CSS/JS modular + ícones) e libs de CDN (fontes/SDK)
+   para abertura instantânea e offline. NUNCA intercepta/cacheia dados nem
+   autenticação do Supabase (DATA_HOSTS) — esses sempre vão à rede. Versionado:
+   o activate apaga caches antigos e assume o controle sem travar. */
 'use strict';
 
-const VERSION = 'lifeos-v4.6.0';
+const VERSION = 'lifeos-v4.7.0';
 const CORE = [
   './',
   './index.html',
@@ -15,7 +16,11 @@ const CORE = [
   './assets/state/store.js',
   './assets/components/ui.js',
   './assets/components/router.js',
-  './assets/components/app.js'
+  './assets/components/app.js',
+  './assets/icons/icon-192.png',
+  './assets/icons/icon-512.png',
+  './assets/icons/icon-192-maskable.png',
+  './assets/icons/icon-512-maskable.png'
 ];
 
 // Hosts de DADOS — nunca interceptar/cachear
