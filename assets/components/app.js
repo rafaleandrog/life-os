@@ -1172,12 +1172,25 @@ act('cfg-rebuild', () => confirmBox('Reconstruir do banco? Isto APAGA o estado l
 }, {sim:'Reconstruir'}));
 
 /* ============ BUGS E SUGESTÕES (coleta + export CSV) ============ */
-const FEEDBACK_STATUS = { aberto:{l:'aberto', c:'var(--warn)'}, implementado:{l:'implementado', c:'var(--ok)'}, descartado:{l:'descartado', c:'var(--txt2)'} };
+const FEEDBACK_STATUS = {
+  aberto:       { l:'aberto',       c:'var(--warn)' },
+  em_progresso: { l:'em progresso', c:'var(--p3)' },
+  implementado: { l:'implementado', c:'var(--ok)' },
+  descartado:   { l:'descartado',   c:'var(--txt2)' }
+};
+const FEEDBACK_STATUS_ORD = ['aberto','em_progresso','implementado','descartado'];
+const statusFeedback = v => FEEDBACK_STATUS[v] ? v : 'aberto';
+function setStatusFeedback(id, novo) { dbPatch('feedback', id, { status: novo, implementado_em: novo === 'implementado' ? nowISO() : null }); }
 const FEEDBACK_TIPOS = [{v:'bug', t:'🐞 Bug'}, {v:'sugestao', t:'💡 Sugestão'}];
 // telas para o assunto: "Geral" + as telas do menu (mesma fonte da navegação)
 const telasFeedback = () => [{v:'geral', t:'🧭 Geral'}].concat((typeof MENU !== 'undefined' ? MENU : []).map(([r, em, l]) => ({ v:r, t:em+' '+l })));
 const tipoLabel = v => (FEEDBACK_TIPOS.find(o => o.v === v) || {}).t || '🐞 Bug';
 const telaLabel = v => (telasFeedback().find(o => o.v === v) || {}).t || (v || '🧭 Geral');
+function baixarArquivo(nome, conteudo, mime) {
+  const blob = new Blob([conteudo], { type: mime });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nome;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
 act('feedback-open', () => editModal({
   titulo:'Registrar bug ou sugestão',
   salvar:'Registrar',
@@ -1192,44 +1205,71 @@ act('feedback-open', () => editModal({
     toast('Registrado ✓ Obrigado!', {icone:'🐛'}); render(); }
 }));
 function feedbackCardHTML() {
-  const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
+  const todos = ordenar(T('feedback'), f => Number(f.numero) || 0, true); // maior número (mais recente) primeiro
+  const filtro = window._fbFiltro || 'pendentes';
+  const pend = f => f.status === 'aberto' || f.status === 'em_progresso';
+  const mostra = filtro === 'pendentes' ? todos.filter(pend) : filtro === 'todos' ? todos : todos.filter(f => statusFeedback(f.status) === filtro);
+  const resolvidos = todos.filter(f => !pend(f));
+  const corTipo = f => f.tipo === 'sugestao' ? 'var(--p3)' : 'var(--err)';
   const linha = f => {
-    const st = FEEDBACK_STATUS[f.status] || FEEDBACK_STATUS.aberto;
-    const corTipo = f.tipo === 'sugestao' ? 'var(--p3)' : 'var(--err)';
+    const st = FEEDBACK_STATUS[statusFeedback(f.status)];
     return '<div class="item" style="align-items:flex-start">'
-      + '<div class="grow"><div class="ttl">'+esc(f.titulo)+' <span class="tag" style="background:'+st.c+'22;color:'+st.c+'">'+st.l+'</span></div>'
-      + '<div class="row wrap" style="gap:5px;margin:3px 0 2px"><span class="tag" style="background:'+corTipo+'22;color:'+corTipo+'">'+esc(tipoLabel(f.tipo))+'</span>'
-      + '<span class="tag" style="background:var(--elev);color:var(--txt2)">'+esc(telaLabel(f.assunto))+'</span></div>'
+      + '<div class="grow"><div class="ttl"><span class="muted">#'+(f.numero != null ? f.numero : '?')+'</span> '+esc(f.titulo)+'</div>'
+      + '<div class="row wrap" style="gap:5px;margin:3px 0 2px">'
+      + '<span class="tag" style="background:'+corTipo(f)+'22;color:'+corTipo(f)+'">'+esc(tipoLabel(f.tipo))+'</span>'
+      + '<span class="tag" style="background:var(--elev);color:var(--txt2)">'+esc(telaLabel(f.assunto))+'</span>'
+      + '<span class="tag" style="background:'+st.c+'22;color:'+st.c+'">'+st.l+'</span>'
+      + (f.implementado_em ? '<span class="tag" style="background:var(--ok-soft);color:var(--ok)">✓ '+esc(fmtDataHoraBR(f.implementado_em))+'</span>' : '')
+      + '</div>'
       + (f.problema ? '<div class="sub"><b>Problema:</b> '+esc(f.problema)+'</div>' : '')
       + (f.solucao ? '<div class="sub"><b>Sugestão:</b> '+esc(f.solucao)+'</div>' : '')
-      + '<div class="row wrap" style="margin-top:6px">'
-      + '<button class="btn small" data-act="feedback-status" data-id="'+f.id+'" data-s="'+(f.status==='implementado'?'aberto':'implementado')+'">'+(f.status==='implementado'?'↩︎ Reabrir':'✅ Implementado')+'</button>'
-      + '<button class="btn small" data-act="feedback-status" data-id="'+f.id+'" data-s="descartado">🗂️ Descartar</button>'
-      + '<button class="btn small danger" data-act="feedback-del" data-id="'+f.id+'">🗑️ Excluir</button>'
+      + '<div class="row wrap" style="margin-top:6px;gap:4px;align-items:center">'
+      + FEEDBACK_STATUS_ORD.map(s => '<span class="chip mini'+(statusFeedback(f.status)===s?' sel':'')+'" data-act="feedback-status" data-id="'+f.id+'" data-s="'+s+'">'+FEEDBACK_STATUS[s].l+'</span>').join('')
+      + '<span class="sp"></span><button class="btn small danger" data-act="feedback-del" data-id="'+f.id+'">🗑️</button>'
       + '</div></div></div>';
   };
+  const filtroOpts = [['pendentes','Pendentes'],['todos','Todos'],['aberto','Aberto'],['em_progresso','Em progresso'],['implementado','Implementado'],['descartado','Descartado']];
   return '<div class="card"><div class="card-h"><div class="h2">🐛 Bugs e sugestões</div>'
-    + (itens.length ? '<button class="btn small" data-act="feedback-export">⬇️ Exportar CSV</button>' : '') + '</div>'
-    + '<p class="small muted" style="margin:0 0 10px">Use o botão 🐛 flutuante para registrar. Marque <b>Implementado</b> conforme resolver e exporte em CSV para colar numa IA.</p>'
-    + (itens.length ? '<div class="list">'+itens.map(linha).join('')+'</div>'
-        : '<div class="empty"><span class="em">🐛</span>Nenhum registro ainda.</div>') + '</div>';
+    + '<select class="select" data-chg="feedback-filtro" style="max-width:170px">'+filtroOpts.map(([v,l]) => '<option value="'+v+'"'+(v===filtro?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:8px"><input class="input" id="fb-lote" placeholder="nº já resolvidos (ex.: 1, 3, 5)" style="flex:1;min-width:150px"><button class="btn small primary" data-act="feedback-lote">✅ Marcar como implementados</button></div>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:10px"><span class="tiny muted" style="align-self:center">Exportar:</span>'
+    + '<button class="btn small" data-act="feedback-export" data-fmt="csv" data-escopo="pend">CSV pendentes</button>'
+    + '<button class="btn small" data-act="feedback-export" data-fmt="csv" data-escopo="all">CSV tudo</button>'
+    + '<button class="btn small" data-act="feedback-export" data-fmt="json" data-escopo="pend">JSON pendentes</button>'
+    + '<button class="btn small" data-act="feedback-export" data-fmt="json" data-escopo="all">JSON tudo</button></div>'
+    + (mostra.length ? '<div class="list">'+mostra.map(linha).join('')+'</div>' : '<div class="empty"><span class="em">🐛</span>Nada neste filtro.</div>')
+    + (filtro === 'pendentes' && resolvidos.length ? '<details class="help" style="margin-top:8px"><summary>Implementados / descartados ('+resolvidos.length+')</summary><div class="list">'+resolvidos.map(linha).join('')+'</div></details>' : '')
+    + '</div>';
 }
-act('feedback-status', el => { dbPatch('feedback', el.dataset.id, { status: el.dataset.s }); render(); });
+act('feedback-filtro', el => { window._fbFiltro = el.value; render(); });
+act('feedback-status', el => { setStatusFeedback(el.dataset.id, el.dataset.s); render(); });
 act('feedback-del', el => confirmBox('Excluir este registro de bug/sugestão?', () => { dbDelete('feedback', el.dataset.id); render(); toast('Removido.', {icone:'🗑️'}); }, {perigo:1, sim:'Excluir'}));
-act('feedback-export', () => {
-  const itens = ordenar(T('feedback'), f => f.criado_em || '', true);
-  if (!itens.length) { toast('Nada para exportar.', {icone:'📭'}); return; }
-  const cel = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
-  const cols = [['titulo','Título'],['tipo','Tipo'],['assunto','Tela/Assunto'],['problema','Problema'],['solucao','Sugestão'],['status','Status'],['criado_em','Criado em']];
-  const val = (f, k) => k === 'criado_em' ? String(f.criado_em||'').slice(0,16).replace('T',' ')
-    : k === 'tipo' ? tipoLabel(f.tipo) : k === 'assunto' ? telaLabel(f.assunto) : f[k];
-  const csv = '﻿' + cols.map(c => cel(c[1])).join(';') + '\r\n'
-    + itens.map(f => cols.map(c => cel(val(f, c[0]))).join(';')).join('\r\n');
-  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = 'lifeos-bugs-sugestoes-' + hoje() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
-  toast('CSV exportado ✓', {icone:'📄'});
+act('feedback-lote', () => {
+  const inp = $('#fb-lote'); const nums = ((inp && inp.value) || '').match(/\d+/g) || [];
+  if (!nums.length) { toast('Cole os números (ex.: 1, 3, 5).', {icone:'✍️'}); return; }
+  const alvo = new Set(nums.map(Number)); let n = 0;
+  for (const f of T('feedback')) if (alvo.has(Number(f.numero)) && f.status !== 'implementado') { setStatusFeedback(f.id, 'implementado'); n++; }
+  render();
+  toast(n ? (n + ' item(ns) marcados como implementados ✓') : 'Nenhum nº correspondente (já sincronizou para ter número?).', {icone: n ? '✅' : '⚠️', ms:5000});
+});
+act('feedback-export', el => {
+  const fmt = el.dataset.fmt, escopo = el.dataset.escopo;
+  let itens = ordenar(T('feedback'), f => Number(f.numero) || 0, false); // por número crescente
+  if (escopo === 'pend') itens = itens.filter(f => f.status === 'aberto' || f.status === 'em_progresso');
+  if (!itens.length) { toast('Nada para exportar neste escopo.', {icone:'📭'}); return; }
+  const nome = 'lifeos-feedback-' + (escopo === 'pend' ? 'pendentes-' : '') + hoje();
+  if (fmt === 'json') {
+    const dados = itens.map(f => ({ numero:f.numero, titulo:f.titulo, tipo:f.tipo, assunto:f.assunto, problema:f.problema, solucao:f.solucao, status:f.status, criado_em:f.criado_em, implementado_em:f.implementado_em || null }));
+    baixarArquivo(nome + '.json', JSON.stringify(dados, null, 2), 'application/json');
+  } else {
+    const cel = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
+    const cols = [['numero','#'],['titulo','Título'],['tipo','Tipo'],['assunto','Tela/Assunto'],['problema','Problema'],['solucao','Sugestão'],['status','Status'],['criado_em','Criado em'],['implementado_em','Implementado em']];
+    const val = (f, k) => (k === 'criado_em' || k === 'implementado_em') ? (f[k] ? fmtDataHoraBR(f[k]) : '')
+      : k === 'tipo' ? tipoLabel(f.tipo) : k === 'assunto' ? telaLabel(f.assunto) : f[k];
+    const csv = '﻿' + cols.map(c => cel(c[1])).join(';') + '\r\n' + itens.map(f => cols.map(c => cel(val(f, c[0]))).join(';')).join('\r\n');
+    baixarArquivo(nome + '.csv', csv, 'text/csv;charset=utf-8');
+  }
+  toast('Exportado ✓ (' + itens.length + ' item(ns))', {icone:'📄'});
 });
 act('pin-set', () => {
   modal('<div class="bx-h"><div class="h2">Definir PIN</div></div>'
