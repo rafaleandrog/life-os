@@ -101,7 +101,7 @@ const COLS = {
   revisoes:['id','tipo','periodo_inicio','periodo_fim','metricas','respostas','criado_em'],
   conquistas:['codigo','desbloqueada_em'],
   configuracoes:['chave','valor'],
-  feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em']
+  feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em','implementado_em','commit_ref']
 };
 
 /* ---- Estado local (offline-first, regra 12) ---- */
