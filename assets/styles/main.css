@@ -296,6 +296,11 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
   border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.45);overflow:hidden auto;max-height:260px}
 .qa-ac-item{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qa-ac-item.on,.qa-ac-item:hover{background:rgba(124,92,252,.18)}
+.escrita-cards{display:flex;gap:12px;overflow-x:auto;padding:4px 2px 12px;-webkit-overflow-scrolling:touch}
+.txt-card{flex:0 0 218px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;cursor:pointer;transition:border-color .12s,transform .12s}
+.txt-card:hover{border-color:var(--acc);transform:translateY(-2px)}
+.txt-card .tc-tit{font-weight:700;margin-bottom:8px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+@media(max-width:899px){.txt-card{flex-basis:170px}}
 .bloco-head{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer}
 .bloco-head:hover{background:rgba(255,255,255,.03)}
 .bloco-dot{width:9px;height:9px;border-radius:50%;flex:none}
@@ -306,6 +311,16 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 .seg{display:flex;gap:6px;background:var(--elev);border:1px solid var(--border);border-radius:9px;padding:3px}
 .seg-b{flex:1;border:none;background:none;color:var(--txt2);padding:8px 10px;border-radius:7px;cursor:pointer;font-weight:700;font-size:13px;transition:background .12s}
 .seg-b.on{background:var(--acc);color:#fff}
+.sb-x{margin-left:auto;background:none;border:none;color:var(--txt2);font-size:18px;line-height:1;cursor:pointer;padding:2px 7px;border-radius:6px}
+.sb-x:hover{background:rgba(255,255,255,.06);color:var(--txt)}
+#sb-show{display:none}
+@media(min-width:900px){
+  #sidebar{transition:transform .18s ease}
+  body.sb-collapsed #sidebar{transform:translateX(-100%)}
+  body.sb-collapsed #main{margin-left:0;max-width:none}
+  #sb-show{position:fixed;top:14px;left:12px;z-index:46;width:40px;height:40px;border-radius:9px;background:var(--elev);border:1px solid var(--border);color:var(--txt);font-size:18px;cursor:pointer;place-items:center;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+  body.sb-collapsed #sb-show{display:grid}
+}
 
 /* ---------- Diversos ---------- */
 .areachip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:7px;font-size:11.5px;font-weight:700}

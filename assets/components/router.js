@@ -31,12 +31,12 @@ window.addEventListener('hashchange', () => render()); // navegação por hash s
 /* ============ NAVEGAÇÃO / LAYOUT ============ */
 const MENU = [
   ['hoje','☀️','Hoje'], ['tarefas','✅','Tarefas'], ['habitos','🔁','Hábitos'], ['agenda','📅','Agenda'],
-  ['treino','🏋️','Treino'], ['corrida','🏃','Corrida'], ['leitura','📖','Leitura'], ['escrita','✍️','Escrita'],
+  ['treino','🏋️','Treino'], ['leitura','📖','Leitura'], ['escrita','✍️','Escrita'],
   ['metas','🎯','Metas'], ['financas','💰','Finanças'], ['dashboard','📊','Dashboard'], ['revisao','🧭','Revisão'], ['retro','🌅','Retro'], ['config','⚙️','Config']
 ];
 function renderNav(atual) {
   const base = atual.split('/')[0];
-  $('#sidebar').innerHTML = '<div class="logo"><span class="mark">⚡</span> Life OS</div>'
+  $('#sidebar').innerHTML = '<div class="logo"><span class="mark">⚡</span> Life OS<button class="sb-x" data-act="sb-toggle" title="Recolher menu" aria-label="Recolher menu">«</button></div>'
     + MENU.map(([r, em, l]) => '<button class="navit'+(base===r?' on':'')+'" data-act="nav" data-r="'+r+'"><span class="em">'+em+'</span>'+l+'</button>').join('')
     + '<div class="foot" data-act="nav" data-r="config">'+syncDotHTML()+'<span id="synclabel">'+syncLabel()+'</span></div>';
   const tit = (Views[base] && Views[base].titulo) || 'Life OS';

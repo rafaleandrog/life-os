@@ -672,6 +672,16 @@ function fldHTML(f, v) {
   }
   return '<div class="field'+(f.meia?' meia':'')+'"><label>'+esc(f.l)+(f.req?' *':'')+'</label>'+inp+(f.dica?'<span class="tiny muted">'+esc(f.dica)+'</span>':'')+'</div>';
 }
+// menu lateral recolhível (desktop) — estado persistido por dispositivo
+function aplicarSidebar() { document.body.classList.toggle('sb-collapsed', !!FLAGS.sidebarColapsada); }
+act('sb-toggle', () => { FLAGS.sidebarColapsada = !FLAGS.sidebarColapsada; saveFlags(); aplicarSidebar(); });
+BootHooks.push(aplicarSidebar);
+// data+hora no fuso de Brasília, formato BR (ex.: 14/06/2026 23:57)
+function fmtDataHoraBR(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString('pt-BR', { timeZone:'America/Sao_Paulo', day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', ''); }
+  catch (_) { return String(iso).slice(0,16).replace('T',' '); }
+}
 act('fld-cor', el => { const box = el.closest('[data-cor]'); box.dataset.val = el.dataset.c;
   box.querySelectorAll('.dot').forEach(d => d.style.outline = d.dataset.c === el.dataset.c ? '2px solid #fff' : 'none'); });
 act('fld-star', el => { const box = el.closest('[data-stars]'); const v = Number(el.dataset.v);
@@ -1018,7 +1028,7 @@ async function rodarSaude() {
   const fila = S.queue.length;
   html += linha(fila ? 'warn' : 'ok', 'Fila offline', fila
     ? fila + ' alterações aguardando envio.' + (S.syncErr && !S.syncPausado ? ' Último erro: ' + esc(S.syncErr) : '')
-    : 'Nada pendente. Última sincronização: ' + (FLAGS.lastSync ? fmtData(FLAGS.lastSync.slice(0,10)) + ' ' + FLAGS.lastSync.slice(11,16) : '—'),
+    : 'Nada pendente. Última sincronização: ' + fmtDataHoraBR(FLAGS.lastSync),
     fila && !S.syncPausado ? '<div class="row" style="margin-top:8px"><button class="btn small primary" data-act="sync-agora">Enviar agora</button></div>' : '');
   if (S.deadQueue.length) {
     const itens = S.deadQueue.map((d, i) => {
@@ -1092,7 +1102,7 @@ reg('config', {
     return '<div class="h1">⚙️ Config</div>'
     + contaCard
     + '<div class="card"><div class="card-h"><div class="h2">☁️ Supabase (sincronização)</div></div>'
-      + '<p class="small" style="margin:0 0 10px">'+stTxt+(FLAGS.lastSync?' <span class="muted">· último envio '+esc(FLAGS.lastSync.slice(11,16))+'</span>':'')+'</p>'
+      + '<p class="small" style="margin:0 0 10px">'+stTxt+(FLAGS.lastSync?' <span class="muted">· última sinc.: '+esc(fmtDataHoraBR(FLAGS.lastSync))+'</span>':'')+'</p>'
       + '<p class="small muted" style="margin:0 0 10px">Projeto Supabase já configurado: <b>'+esc((CFG.url||'').replace(/^https:\/\//,'').split('.')[0]||'Life OS')+'</b>. Não é necessário colar URL nem chave pública.</p>'
       + '<div class="row wrap">'
       + '<button class="btn primary" data-act="nav" data-r="saude">🩺 Saúde do Sistema</button>'
@@ -1250,7 +1260,14 @@ act('area-edit', el => {
       toast('Área excluída.', { undo: () => { dbUpsert('areas', bkp); render(); } }); } });
 });
 const etqFields = [ {k:'nome', l:'Nome (sem espaços)', req:1, foco:1}, {k:'cor', t:'cor', l:'Cor'} ];
-act('etq-add', () => editModal({ titulo:'Nova etiqueta', fields:etqFields, onSave: v => { v.nome = v.nome.replace(/\s+/g,'-').toLowerCase(); dbUpsert('etiquetas', v); render(); } }));
+function criarOuAtualizarEtiqueta(nomeRaw, cor) {
+  const nome = String(nomeRaw || '').replace(/\s+/g, '-').toLowerCase();
+  if (!nome) { toast('Dê um nome à etiqueta.', { icone:'✍️' }); return null; }
+  const existente = T('etiquetas').find(e => norm(e.nome) === norm(nome));
+  if (existente) { if (cor && cor !== existente.cor) dbPatch('etiquetas', existente.id, { cor }); return existente; }
+  return dbUpsert('etiquetas', { nome, cor: cor || '#9AA0B0' });
+}
+act('etq-add', () => editModal({ titulo:'Nova etiqueta', fields:etqFields, onSave: v => { if (criarOuAtualizarEtiqueta(v.nome, v.cor)) { toast('Etiqueta salva ✓', {icone:'🏷️'}); render(); } } }));
 act('etq-edit', el => {
   const t = byId('etiquetas', el.dataset.id);
   editModal({ titulo:'Editar etiqueta', fields:etqFields, vals:t,
@@ -1515,7 +1532,7 @@ function ofereceCriarProjeto(p, depois) {
   };
 }
 function criarTarefaParseada(p, ctx) {
-  for (const en of p.etiquetasNovas) dbUpsert('etiquetas', {nome: en, cor:'#9AA0B0'});
+  for (const en of p.etiquetasNovas) criarOuAtualizarEtiqueta(en, '#9AA0B0');
   const projeto_id = p.projeto_id || ctx.projeto_id || null;
   const proj = byId('projetos', projeto_id);
   // Etapa E: com o dia já planejado, a tarefa entra no bloco ATIVO agora (que inclua o projeto),
@@ -1553,7 +1570,7 @@ function taskItemHTML(t, o={}) {
     (t.subtarefas||[]).length ? '<span>☑ '+(t.subtarefas.filter(s=>s.feito).length)+'/'+t.subtarefas.length+'</span>' : '',
     (t.comentarios||[]).length ? '<span>💬 '+t.comentarios.length+'</span>' : '',
     (t.links||[]).length ? '<span>🔗 '+t.links.length+'</span>' : '',
-    t.estimativa_min ? '<span>⏳ '+fmtMin(t.estimativa_min)+'</span>' : ''
+    '<span>⏳ '+fmtMin(estMin(t))+'</span>'
   ].filter(Boolean).join(' ');
   const salvando = estaPendente('tarefas', t.id) ? '<span class="saving" title="salvando…">⟳</span>' : '';
   return '<div class="item task'+(t.concluida?' done':'')+'" data-tid="'+t.id+'" '+(o.drag?'draggable="true"':'')+'>'
@@ -1735,7 +1752,7 @@ act('td-save', () => {
     prioridade: Number($('#td-pri').value) || 4,
     vencimento: $('#td-venc').value || null,
     hora: $('#td-hora').value || null,
-    estimativa_min: Number($('#td-est').value) || null,
+    estimativa_min: Number($('#td-est').value) || 5, // toda tarefa tem duração; padrão 5min
     recorrencia: rec,
     etiquetas: $$('#td-tags .chip.sel').map(c => c.dataset.n)
   });
@@ -2242,7 +2259,7 @@ function capacidadeDia(data) {
   const comBloco = new Set(bs.map(b => b.tarefa_id).filter(Boolean));   // blocos antigos (1 tarefa)
   for (const t of T('tarefas')) if (t.bloco_id) comBloco.add(t.id);     // tarefas em blocos de planejamento
   let min = 0;
-  for (const t of tarefasPendentes().filter(t => t.vencimento === data)) if (!comBloco.has(t.id)) min += Number(t.estimativa_min) || 0;
+  for (const t of tarefasPendentes().filter(t => t.vencimento === data)) if (!comBloco.has(t.id)) min += estMin(t); // null → 5min
   for (const b of bs) min += ehBlocoPlano(b) ? blocoRealMin(b) : blocoMin(b); // blocos de plano esticam pelo conteúdo
   return { min, janela, pct: min / janela };
 }
@@ -2696,7 +2713,9 @@ function planDraw() {
     const projChips = projs.length
       ? projs.map(p => '<span class="chip'+(blk.projetos.includes(p.id)?' sel':'')+'" data-act="plan-proj" data-i="'+i+'" data-p="'+p.id+'">'+projIconeHTML(p)+' '+esc(p.nome)+'</span>').join('')
       : '<span class="tiny muted">Crie projetos primeiro (em Tarefas).</span>';
-    const eleg = tarefasElegiveis(blk.projetos, blk.id);
+    // tarefas já escolhidas em OUTROS blocos deste planejamento ficam indisponíveis (sem repetir)
+    const ocupadasOutros = new Set(); P.blocos.forEach((o, j) => { if (j !== i) o.tarefaIds.forEach(id => ocupadasOutros.add(id)); });
+    const eleg = tarefasElegiveis(blk.projetos, blk.id).filter(t => !ocupadasOutros.has(t.id));
     const elegIds = new Set(eleg.map(t => t.id));
     const extras = blk.tarefaIds.filter(id => !elegIds.has(id)).map(id => byId('tarefas', id)).filter(Boolean);
     const lista = eleg.concat(extras);
@@ -2736,11 +2755,13 @@ act('plan-del', el => { window._plan.blocos.splice(Number(el.dataset.i), 1); pla
 act('plan-set-ini', el => { window._plan.blocos[Number(el.dataset.i)].inicio = el.value; planDraw(); });
 act('plan-set-fim', el => { window._plan.blocos[Number(el.dataset.i)].fim = el.value; planDraw(); });
 act('plan-proj', el => {
-  const blk = window._plan.blocos[Number(el.dataset.i)], pid = el.dataset.p;
+  const P = window._plan, i = Number(el.dataset.i), blk = P.blocos[i], pid = el.dataset.p;
   const k = blk.projetos.indexOf(pid);
   if (k < 0) blk.projetos.push(pid); else blk.projetos.splice(k, 1);
-  // re-seleciona automaticamente as tarefas que cabem dos projetos atuais
-  blk.tarefaIds = selecionarAteCaber(tarefasElegiveis(blk.projetos, blk.id), Math.max(0, diffMinHHMM(blk.inicio, blk.fim))).map(t => t.id);
+  // re-seleciona automaticamente as que cabem, excluindo as já usadas em outros blocos do dia
+  const ocupadasOutros = new Set(); P.blocos.forEach((o, j) => { if (j !== i) o.tarefaIds.forEach(id => ocupadasOutros.add(id)); });
+  const eleg = tarefasElegiveis(blk.projetos, blk.id).filter(t => !ocupadasOutros.has(t.id));
+  blk.tarefaIds = selecionarAteCaber(eleg, Math.max(0, diffMinHHMM(blk.inicio, blk.fim))).map(t => t.id);
   planDraw();
 });
 act('plan-task', el => {
@@ -2958,16 +2979,35 @@ act('treino-salvar', el => {
   render();
 });
 
-/* ---- página TREINO ---- */
+/* ---- página TREINO (musculação + corrida + corpo) ---- */
+function treinoResumoHTML() {
+  const nSemMusc = T('treino_sessoes').filter(s => s.data >= inicioSemana(hoje())).length;
+  const cs = T('corridas'); const anoAtual = new Date().getFullYear();
+  const kmAno = sum(cs.filter(c => anoDe(c.data) === anoAtual).map(c => c.distancia_km));
+  const rec = recordesCorrida();
+  return '<div class="grid4" style="margin-bottom:14px">'
+    + '<div class="kpi"><div class="l">🏋️ sessões/semana</div><div class="v">'+nSemMusc+'</div><div class="d muted tiny">'+T('treino_sessoes').length+' no total</div></div>'
+    + '<div class="kpi"><div class="l">🏃 km no ano</div><div class="v">'+fmtNum(kmAno,1)+'</div></div>'
+    + '<div class="kpi"><div class="l">🏆 melhor pace</div><div class="v" style="font-size:18px">'+paceFmt(rec.melhorPace)+'</div></div>'
+    + '<div class="kpi"><div class="l">🏆 maior distância</div><div class="v">'+fmtNum(rec.maiorKm,1)+' km</div></div></div>';
+}
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
+    const aba = params[0] === 'corrida' ? 'corrida' : params[0] === 'corpo' ? 'corpo' : 'musc';
+    const tabs = '<div class="h1" style="margin-bottom:10px">🏋️ Treino</div>'
+      + '<div class="seg" style="margin-bottom:12px;max-width:480px">'
+      + '<button class="seg-b'+(aba==='musc'?' on':'')+'" data-act="nav" data-r="treino">🏋️ Musculação</button>'
+      + '<button class="seg-b'+(aba==='corrida'?' on':'')+'" data-act="nav" data-r="treino/corrida">🏃 Corrida</button>'
+      + '<button class="seg-b'+(aba==='corpo'?' on':'')+'" data-act="nav" data-r="treino/corpo">📏 Corpo</button></div>'
+      + treinoResumoHTML();
+    if (aba === 'corrida') return tabs + corridaTabHTML();
+    if (aba === 'corpo') return tabs + corpoTabHTML();
     const sessoes = ordenar(T('treino_sessoes'), s => s.data + (s.criado_em||''), true);
     const exNomes = [...new Set(T('treino_registros').filter(r => r.carga_max != null).map(r => r.exercicio_nome))].sort();
     const exSel = params[0] === 'ex' ? decodeURIComponent(params[1]) : (window._trEx || exNomes[0] || '');
     window._trEx = exSel;
-    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🏋️ Treino</div>'
-      + '<button class="btn primary" data-act="qa-treino">+ Registrar treino</button></div>';
+    let html = tabs + '<div class="row" style="margin-bottom:12px"><button class="btn primary" data-act="qa-treino">+ Registrar treino</button></div>';
     // planilhas
     html += '<div class="grid2">' + ordenar(T('treino_planilhas').filter(p => p.ativo !== false), p => p.ordem||0).map(p => {
       const exs = exsDaPlanilha(p.id); const ult = ultimaSessao(p.id);
@@ -3175,15 +3215,10 @@ act('corpo-salvar', () => {
 });
 
 /* ---- página CORRIDA (abas Corrida | Corpo) ---- */
+// 'corrida' agora vive dentro de Treino; rota mantida p/ links antigos (#/corrida)
 reg('corrida', {
-  titulo: 'Corrida',
-  render: (params) => {
-    const aba = params[0] === 'corpo' ? 'corpo' : 'corrida';
-    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">🏃 Corrida & Corpo</div>'
-      + '<div class="seg"><button class="'+(aba==='corrida'?'on':'')+'" data-act="nav" data-r="corrida">🏃 Corrida</button>'
-      + '<button class="'+(aba==='corpo'?'on':'')+'" data-act="nav" data-r="corrida/corpo">📏 Corpo</button></div></div>';
-    return html + (aba === 'corrida' ? corridaTabHTML() : corpoTabHTML());
-  }
+  titulo: 'Treino',
+  render: (params) => Views.treino.render(params[0] === 'corpo' ? ['corpo'] : ['corrida'])
 });
 function corridaTabHTML() {
   const cs = ordenar(T('corridas'), c => c.data + (c.criado_em||''), true);
@@ -3607,24 +3642,22 @@ reg('escrita', {
   titulo: 'Escrita',
   render: (params) => {
     if (params[0] === 'editor') return editorHTML(params[1]);
-    const ts = ordenar(T('textos'), t => t.atualizado_em || t.criado_em || '', true);
+    const ts = ordenar(T('textos'), t => t.atualizado_em || t.criado_em || '', true); // só textos existentes (apagados não entram)
     const stk = streakEscritor();
-    const semanas = [];
-    for (let i = 7; i >= 0; i--) { const s = addDias(inicioSemana(hoje()), -7*i); semanas.push({ x: fmtDataCurta(s), y: palavrasSemana(s) }); }
-    let html = '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">✍️ Escrita</div>'
+    const statusTag = s => (STATUS_TEXTO.find(x => x[0] === s) || ['', s || 'rascunho'])[1];
+    const card = t => '<div class="txt-card" data-act="texto-abrir" data-id="'+t.id+'">'
+      + '<div class="tc-tit">'+esc(t.titulo || 'Sem título')+'</div>'
+      + '<div class="row wrap" style="gap:5px;margin-bottom:8px"><span class="tag" style="background:var(--acc-soft);color:var(--acc)">'+esc(statusTag(t.status))+'</span>'
+      + (t.tags||[]).slice(0,3).map(tg => '<span class="tag" style="background:var(--elev);color:var(--txt2)">#'+esc(tg)+'</span>').join('')+'</div>'
+      + '<div class="tiny muted">'+fmtNum(t.palavras||0)+' palavras · '+fmtData((t.atualizado_em||t.criado_em||'').slice(0,10))+'</div></div>';
+    return '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">✍️ Escrita</div>'
       + '<button class="btn primary" data-act="texto-novo">+ Novo texto</button></div>'
-      + '<div class="grid3">'
+      + '<div class="grid2" style="margin-bottom:4px">'
       + '<div class="kpi"><div class="l">🔥 streak do escritor</div><div class="v">'+stk+' dia'+(stk===1?'':'s')+'</div></div>'
-      + '<div class="kpi"><div class="l">palavras esta semana</div><div class="v">'+fmtNum(palavrasSemana(inicioSemana(hoje())))+'</div></div>'
       + '<div class="kpi"><div class="l">textos</div><div class="v">'+ts.length+'</div></div></div>'
-      + '<div class="card"><div class="h2">📈 Palavras por semana</div>'+svgBarras(semanas, { fmt: v => fmtNum(v) })+'</div>'
-      + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
-      + (ts.map(t => '<div class="item" data-act="texto-abrir" data-id="'+t.id+'"><span>📄</span><div class="grow">'
-        + '<div class="ttl">'+esc(t.titulo)+'</div><div class="sub">'+(STATUS_TEXTO.find(s=>s[0]===t.status)||['',t.status])[1]
-        + ' · '+fmtNum(t.palavras||0)+' palavras · '+fmtData((t.atualizado_em||t.criado_em||'').slice(0,10))
-        + ' '+(t.tags||[]).map(tg => '#'+esc(tg)).join(' ')+'</div></div></div>').join('')
-      || '<div class="empty"><span class="em">✍️</span>Comece um texto — o editor salva sozinho a cada pausa.</div>') + '</div></div>';
-    return html;
+      + '<div class="h2" style="margin:14px 2px 8px">📝 Últimos textos</div>'
+      + (ts.length ? '<div class="escrita-cards">'+ts.slice(0,24).map(card).join('')+'</div>'
+          : '<div class="card"><div class="empty"><span class="em">✍️</span>Comece um texto — o editor salva sozinho a cada pausa.</div></div>');
   }
 });
 act('texto-novo', () => { const t = dbUpsert('textos', { titulo:'Sem título', conteudo:'', status:'rascunho', tags:[], palavras:0, atualizado_em: nowISO() }); nav('escrita/editor/'+t.id); });

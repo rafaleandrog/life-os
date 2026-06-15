@@ -14,8 +14,11 @@ const TABLES = {
   livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
   textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id'
 };
+/* etiquetas faz upsert pela PK (id) — não depende do índice único (user_id,nome),
+   que pode não existir se havia duplicatas. A unicidade por nome é garantida no
+   cliente (reaproveita etiqueta existente). */
 const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data',
-  etiquetas:'user_id,nome', dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
+  dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
 
 /* ---- Ordem de dependência: PAIS antes de FILHOS (evita violar FK no flush) ---- */
 const TABLE_ORDER = [
