@@ -1631,7 +1631,7 @@ function taskItemHTML(t, o={}) {
     + '<button class="check p'+(t.prioridade||4)+(t.concluida?' ck':'')+'" data-act="task-toggle" data-id="'+t.id+'"></button>'
     + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+salvando+'</div>'
     + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
-    + (o.rollover ? '<button class="btn small" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
+    + (o.rollover ? '<button class="btn small danger" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
     + (o.blocoMenu ? '<button class="btn small" data-act="task-bloco-menu" data-id="'+t.id+'" title="mover/tirar do dia">⋯</button>' : '')
     + '</div>';
 }
@@ -2309,12 +2309,7 @@ const horaDe = iso => { const d = new Date(iso); return pad2(d.getHours()) + ':'
 function capacidadeDia(data) {
   data = data || hoje();
   const janela = Math.max(1, Number(getCfg('janela_util', 8))) * 60;
-  const bs = blocosDoDia(data);
-  const comBloco = new Set(bs.map(b => b.tarefa_id).filter(Boolean));   // blocos antigos (1 tarefa)
-  for (const t of T('tarefas')) if (t.bloco_id) comBloco.add(t.id);     // tarefas em blocos de planejamento
-  let min = 0;
-  for (const t of tarefasPendentes().filter(t => t.vencimento === data)) if (!comBloco.has(t.id)) min += estMin(t); // null → 5min
-  for (const b of bs) min += ehBlocoPlano(b) ? blocoRealMin(b) : blocoMin(b); // blocos de plano esticam pelo conteúdo
+  const min = sum(blocosPlano(data).map(b => blocoSomaMin(b)));
   return { min, janela, pct: min / janela };
 }
 function capacidadeHTML(data) {
@@ -2330,19 +2325,19 @@ function capacidadeHTML(data) {
 
 /* ════════ BLOCOS DE PLANEJAMENTO (modelo novo: janela + projetos + várias tarefas) ════════ */
 const ehBlocoPlano = b => Array.isArray(b.projetos_incluidos) && b.projetos_incluidos.length > 0;
-const blocosPlano = data => blocosDoDia(data || hoje()).filter(ehBlocoPlano)
+const ehBlocoAgenda = b => !b.tarefa_id && !b.tempo_real_min;
+const blocosPlano = data => blocosDoDia(data || hoje()).filter(ehBlocoAgenda)
   .sort((a, b) => (a.ordem||0) - (b.ordem||0) || String(a.inicio).localeCompare(String(b.inicio)));
 const tarefasDoBloco = b => ordenar(T('tarefas').filter(t => t.bloco_id === b.id && !t.abandonada), ordTarefa);
-const estMin = t => Number(t.estimativa_min) || 5;            // toda tarefa tem duração (padrão 5)
+const estMin = t => Number(t.estimativa_min) || 0;            // sem estimativa soma 0min
 const blocoPrevistoMin = b => Math.max(0, (new Date(b.fim) - new Date(b.inicio)) / 60000);
 const blocoSomaMin = b => sum(tarefasDoBloco(b).map(estMin));  // tempo real = soma das durações das tarefas
 const blocoEsticou = b => blocoSomaMin(b) > blocoPrevistoMin(b) + 0.5;
 const blocoRealMin = b => Math.max(blocoPrevistoMin(b), blocoSomaMin(b));
 /* tarefas elegíveis para um bloco: pendentes/atrasadas dos projetos escolhidos,
    ainda sem bloco (ou já neste), por prioridade e depois menor duração */
-function tarefasElegiveis(projIds, blocoAtual) {
-  const set = new Set(projIds || []);
-  return T('tarefas').filter(t => !t.concluida && !t.abandonada && set.has(t.projeto_id) && (!t.bloco_id || t.bloco_id === blocoAtual))
+function tarefasElegiveis(areaId, blocoAtual) {
+  return T('tarefas').filter(t => !t.concluida && !t.abandonada && (areaId ? t.area_id === areaId : !t.area_id) && (!t.bloco_id || t.bloco_id === blocoAtual))
     .sort((a, b) => (a.prioridade||4) - (b.prioridade||4) || estMin(a) - estMin(b) || String(a.vencimento||'9999').localeCompare(String(b.vencimento||'9999')));
 }
 function selecionarAteCaber(elegiveis, capMin) { // enche até caber; garante ao menos a 1ª (estouro permitido)
@@ -2374,8 +2369,7 @@ function limparBlocosVencidos() {
 }
 /* bloco do dia adequado para uma tarefa nova: o ATIVO agora (que inclua o projeto), senão o PRÓXIMO a começar */
 function blocoParaTarefaNova(t) {
-  if (!t.projeto_id) return null;
-  const cands = blocosPlano(hoje()).filter(b => (b.projetos_incluidos||[]).includes(t.projeto_id));
+  const cands = blocosPlano(hoje()).filter(b => (b.area_id || null) === (t.area_id || null));
   if (!cands.length) return null;
   const agora = Date.now();
   const ativo = cands.find(b => new Date(b.inicio).getTime() <= agora && agora < blocoRealMin(b)*60000 + new Date(b.inicio).getTime());
@@ -2386,7 +2380,7 @@ function blocoParaTarefaNova(t) {
 BootHooks.push(() => { if (FLAGS.onboarded) { try { limparBlocosVencidos(); } catch(_){} } });
 
 const hhmm = ms => { const d = new Date(ms); return pad2(d.getHours())+':'+pad2(d.getMinutes()); };
-function corDoBloco(b) { const p = byId('projetos', (b.projetos_incluidos||[])[0]); return p ? corArea(p.area_id) : 'var(--acc)'; }
+function corDoBloco(b) { return b.area_id ? corArea(b.area_id) : 'var(--acc)'; }
 
 /* ---- tela Hoje: tarefas agrupadas por bloco + grupo "Sem bloco" (Etapa C) ---- */
 function hojeTarefasHTML() {
@@ -2432,17 +2426,16 @@ function blocoGaugesHTML() {
 act('bloco-resumo', el => {
   const b = byId('blocos', el.dataset.id); if (!b) return;
   const ts = tarefasDoBloco(b);
-  const projs = (b.projetos_incluidos||[]).map(id => byId('projetos', id)).filter(Boolean);
-  modal('<div class="bx-h"><div class="h2">🧱 '+esc(b.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+  modal('<div class="bx-h"><div class="h2">🧱 '+esc(b.titulo)+'</div><button class="btn small" data-act="bloco-edit" data-id="'+b.id+'">Editar</button><button class="iconbtn" data-act="m-close">✕</button></div>'
     + '<p class="small muted" style="margin-top:0">'+horaDe(b.inicio)+'–'+horaDe(b.fim)+' · previsto '+fmtMin(blocoPrevistoMin(b))+' · tarefas '+fmtMin(blocoSomaMin(b))+(blocoEsticou(b)?' <span class="warn">(estica)</span>':'')+'</p>'
-    + (projs.length ? '<div class="row wrap" style="gap:6px;margin-bottom:8px">'+projs.map(p => '<span class="chip">'+projIconeHTML(p)+' '+esc(p.nome)+'</span>').join('')+'</div>' : '')
+    + (b.area_id ? '<div class="row wrap" style="gap:6px;margin-bottom:8px">'+areaChipHTML(b.area_id)+'</div>' : '')
     + '<div class="list">'+(ts.length ? ts.map(t => taskItemHTML(t, {blocoMenu:true})).join('') : '<div class="tiny muted" style="padding:8px">Sem tarefas.</div>')+'</div>'
     + '<div class="bx-foot"><button class="btn danger" data-act="bloco-apagar" data-id="'+b.id+'">🗑️ Apagar bloco</button><span class="sp"></span><button class="btn" data-act="m-close">Fechar</button></div>');
 });
 act('bloco-apagar', el => confirmBox('Apagar este bloco? As tarefas voltam a ficar soltas (não são apagadas).', () => { apagarBloco(el.dataset.id); closeModal(true); render(); toast('Bloco apagado; tarefas soltas.', {icone:'🗑️'}); }, {perigo:1, sim:'Apagar'}));
 act('task-bloco-menu', el => {
   const t = byId('tarefas', el.dataset.id); if (!t) return;
-  const outros = blocosPlano(hoje()).filter(b => b.id !== t.bloco_id);
+  const outros = blocosPlano(hoje()).filter(b => b.id !== t.bloco_id && (b.area_id || null) === (t.area_id || null));
   modal('<div class="bx-h"><div class="h2">Mover "'+esc(t.titulo)+'"</div><button class="iconbtn" data-act="m-close">✕</button></div>'
     + '<div class="fabmenu">'
     + (outros.length ? outros.map(b => '<button data-act="task-mover-bloco" data-id="'+t.id+'" data-b="'+b.id+'"><span class="em">🧱</span>'+esc(b.titulo)+' <span class="muted tiny">'+horaDe(b.inicio)+'</span></button>').join('') : '<div class="tiny muted" style="padding:6px">Não há outro bloco hoje.</div>')
@@ -2469,7 +2462,7 @@ function agendaDiaHTML(data) {
       + '🧱 '+esc(b.titulo)+'<div class="t">'+hhmm(iniMs)+'–'+hhmm(fimMs)+(esticou?' · esticou':'')+' · '+ts.filter(t=>t.concluida).length+'/'+ts.length+'</div></div>';
   }
   // blocos ANTIGOS (1 tarefa / rotina / timer): desenho original; clique = editar
-  for (const b of blocosDoDia(data).filter(b => !ehBlocoPlano(b))) {
+  for (const b of blocosDoDia(data).filter(b => !ehBlocoAgenda(b))) {
     const ini = new Date(b.inicio), fim = new Date(b.fim);
     const top = (ini.getHours() - H_INI) * PXH + ini.getMinutes() * PXH / 60;
     const alt = Math.max(20, (fim - ini) / 36e5 * PXH - 2);
@@ -2506,12 +2499,11 @@ act('task-to-bloco', el => {
   render();
 });
 function blocoModal(b, defs) {
-  const v = b ? { titulo:b.titulo, area_id:b.area_id||'', tarefa_id:b.tarefa_id||'', data: dISO(new Date(b.inicio)), inicio: horaDe(b.inicio), fim: horaDe(b.fim), foco: !!b.foco }
+  const v = b ? { titulo:b.titulo, area_id:b.area_id||'', data: dISO(new Date(b.inicio)), inicio: horaDe(b.inicio), fim: horaDe(b.fim), foco: !!b.foco }
               : { data: hoje(), inicio:'09:00', fim:'10:00', ...(defs||{}) };
   const fields = [
     {k:'titulo', l:'Título', req:1, foco:1, ph:'ex.: Deep work — projeto X'},
     {k:'area_id', t:'sel', l:'Área', opts: optsAreas()},
-    {k:'tarefa_id', t:'sel', l:'Tarefa vinculada', opts: [{v:'',t:'— nenhuma —'}].concat(tarefasPendentes().slice(0,80).map(t => ({v:t.id, t:t.titulo})))},
     {k:'data', t:'date', l:'Data', meia:1},
     {k:'inicio', t:'time', l:'Início', meia:1},
     {k:'fim', t:'time', l:'Fim', meia:1},
@@ -2520,8 +2512,9 @@ function blocoModal(b, defs) {
   editModal({ titulo: b ? 'Editar bloco' : 'Novo bloco', fields, vals: v,
     onSave: nv => {
       if (!nv.inicio || !nv.fim) { toast('Defina início e fim.'); return; }
-      const row = { id: b ? b.id : undefined, titulo: nv.titulo, area_id: nv.area_id||null, projeto_id: b ? b.projeto_id : null,
-        tarefa_id: nv.tarefa_id||null, inicio: isoLocal(nv.data, nv.inicio), fim: isoLocal(nv.data, nv.fim >= nv.inicio ? nv.fim : nv.inicio),
+      if (nv.fim <= nv.inicio) { toast('A hora de fim precisa ser depois do início.'); return; }
+      const row = { id: b ? b.id : undefined, titulo: nv.titulo, area_id: nv.area_id||null, projeto_id: null,
+        tarefa_id: null, inicio: isoLocal(nv.data, nv.inicio), fim: isoLocal(nv.data, nv.fim),
         tempo_real_min: b ? b.tempo_real_min : null, foco: !!nv.foco, template: b ? b.template : null };
       dbUpsert('blocos', row); render();
     },
@@ -2748,99 +2741,72 @@ function tituloBloco(blk, i) {
   return nomes.length ? nomes.slice(0,2).join(' + ') + (nomes.length>2 ? ' +'+(nomes.length-2) : '') : 'Bloco '+(i+1);
 }
 function planejarDia() {
-  window._plan = { blocos: blocosPlano(hoje()).map(b => ({
-    id: b.id, inicio: horaDe(b.inicio), fim: horaDe(b.fim),
-    projetos: [...(b.projetos_incluidos||[])], tarefaIds: tarefasDoBloco(b).map(t => t.id)
-  })) };
+  const blocos = blocosPlano(hoje());
+  if (!blocos.length) {
+    modal('<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<div class="empty"><span class="em">📅</span>Não há blocos na Agenda para hoje.<br>Crie blocos ou aplique uma rotina na Agenda antes de planejar o dia.</div>'
+      + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Fechar</button><button class="btn primary" data-act="plan-ir-agenda">Ir para Agenda</button></div>');
+    return;
+  }
+  const ocupadas = new Set();
+  window._plan = { blocos: blocos.map(b => {
+    const cap = blocoPrevistoMin(b);
+    const eleg = tarefasElegiveis(b.area_id || null, b.id).filter(t => !ocupadas.has(t.id));
+    const tarefaIds = selecionarAteCaber(eleg, cap).map(t => t.id);
+    tarefaIds.forEach(id => ocupadas.add(id));
+    return { id: b.id, titulo: b.titulo, area_id: b.area_id || null, inicio: horaDe(b.inicio), fim: horaDe(b.fim), tarefaIds };
+  }) };
   modal('<div id="plan-box"></div>', { onMount: () => planDraw(), fixo: true });
 }
 function planDraw() {
   const box = $('#plan-box'); if (!box) return;
   const P = window._plan;
-  const projs = ordenar(T('projetos').filter(p => p.status !== 'arquivado'), p => p.nome);
   let totalMin = 0;
   const cards = P.blocos.map((blk, i) => {
     const capMin = Math.max(0, diffMinHHMM(blk.inicio, blk.fim));
     const somaMin = sum(blk.tarefaIds.map(id => { const t = byId('tarefas', id); return t ? estMin(t) : 0; }));
-    totalMin += Math.max(capMin, somaMin);
-    const estouro = somaMin > capMin + 0.5;
-    const projChips = projs.length
-      ? projs.map(p => '<span class="chip'+(blk.projetos.includes(p.id)?' sel':'')+'" data-act="plan-proj" data-i="'+i+'" data-p="'+p.id+'">'+projIconeHTML(p)+' '+esc(p.nome)+'</span>').join('')
-      : '<span class="tiny muted">Crie projetos primeiro (em Tarefas).</span>';
-    // tarefas já escolhidas em OUTROS blocos deste planejamento ficam indisponíveis (sem repetir)
+    totalMin += somaMin;
+    const area = blk.area_id ? areaDe(blk.area_id) : null;
     const ocupadasOutros = new Set(); P.blocos.forEach((o, j) => { if (j !== i) o.tarefaIds.forEach(id => ocupadasOutros.add(id)); });
-    const eleg = tarefasElegiveis(blk.projetos, blk.id).filter(t => !ocupadasOutros.has(t.id));
-    const elegIds = new Set(eleg.map(t => t.id));
-    const extras = blk.tarefaIds.filter(id => !elegIds.has(id)).map(id => byId('tarefas', id)).filter(Boolean);
-    const lista = eleg.concat(extras);
-    const tHtml = blk.projetos.length
-      ? (lista.length ? lista.map(t => '<div class="item" data-act="plan-task" data-i="'+i+'" data-id="'+t.id+'" style="padding:6px 4px;cursor:pointer">'
-          + '<span class="check p'+(t.prioridade||4)+(blk.tarefaIds.includes(t.id)?' ck':'')+'" style="border-radius:6px"></span>'
-          + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">⏳ '+fmtMin(estMin(t))
-          + (byId('projetos',t.projeto_id) ? ' · '+projLabelHTML(byId('projetos',t.projeto_id)) : '')
-          + (t.vencimento && t.vencimento < hoje() ? ' · <span class="err">atrasada</span>' : '')+'</div></div></div>').join('')
-        : '<div class="tiny muted" style="padding:6px">Nenhuma tarefa pendente nesses projetos.</div>')
-      : '<div class="tiny muted" style="padding:6px">Escolha projeto(s) para o sistema sugerir tarefas.</div>';
-    return '<div class="card" style="margin-bottom:10px"><div class="row" style="gap:6px;align-items:center;flex-wrap:wrap">'
-      + '<input class="input" type="time" value="'+blk.inicio+'" data-chg="plan-set-ini" data-i="'+i+'" style="width:auto;padding:6px 8px">'
-      + '<span class="muted">→</span><input class="input" type="time" value="'+blk.fim+'" data-chg="plan-set-fim" data-i="'+i+'" style="width:auto;padding:6px 8px">'
-      + '<span class="sp"></span><span class="small '+(estouro?'warn':'muted')+'">'+fmtMin(somaMin)+' / '+fmtMin(capMin)+(estouro?' ⚠️ estica':'')+'</span>'
-      + '<button class="iconbtn" data-act="plan-del" data-i="'+i+'" title="remover bloco">🗑️</button></div>'
-      + '<div class="row wrap" style="margin:8px 0 4px;gap:6px">'+projChips+'</div>'
+    const lista = tarefasElegiveis(blk.area_id || null, blk.id).filter(t => !ocupadasOutros.has(t.id));
+    const tHtml = lista.length ? lista.map(t => '<div class="item" data-act="plan-task" data-i="'+i+'" data-id="'+t.id+'" style="padding:6px 4px;cursor:pointer">'
+      + '<span class="check p'+(t.prioridade||4)+(blk.tarefaIds.includes(t.id)?' ck':'')+'" style="border-radius:6px"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">⏳ '+fmtMin(estMin(t))
+      + (byId('projetos',t.projeto_id) ? ' · '+projLabelHTML(byId('projetos',t.projeto_id)) : '')
+      + (t.vencimento && t.vencimento < hoje() ? ' · <span class="err">atrasada</span>' : '')+'</div></div></div>').join('')
+      : '<div class="tiny muted" style="padding:6px">Nenhuma tarefa pendente para esta área.</div>';
+    return '<div class="card" style="margin-bottom:10px"><div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<span class="dot" style="background:'+(blk.area_id ? corArea(blk.area_id) : '#9AA0B0')+'"></span><b>'+esc(blk.titulo)+'</b>'
+      + (area ? areaChipHTML(area.id) : '<span class="badge">sem área</span>')
+      + '<span class="sp"></span><span class="small muted">'+blk.inicio+'–'+blk.fim+' · '+fmtMin(somaMin)+' / '+fmtMin(capMin)+'</span></div>'
       + '<div class="list">'+tHtml+'</div></div>';
   }).join('');
-  const totH = totalMin/60;
   box.innerHTML = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-    + '<p class="muted small" style="margin-top:0">Crie blocos de tempo e escolha de quais <b>projetos</b> entram tarefas. O sistema seleciona por prioridade e menor duração; você ajusta à vontade. Estouro é permitido (o bloco estica).</p>'
-    + (cards || '<div class="empty"><span class="em">🧱</span>Nenhum bloco ainda. Adicione o primeiro abaixo.</div>')
-    + '<div class="row" style="margin:6px 0;align-items:center"><button class="btn" data-act="plan-add">➕ Adicionar bloco</button><span class="sp"></span>'
-    + '<span class="small '+(totH>8?'warn':'muted')+'">Total do dia: '+fmtMin(totalMin)+(totH>8?' ⚠️ acima de 8h':'')+'</span></div>'
+    + '<p class="muted small" style="margin-top:0">Os blocos vêm da Agenda. As tarefas são sugeridas por área, prioridade P1→P4 e menor duração, respeitando o tempo disponível de cada bloco.</p>'
+    + cards
+    + '<div class="row" style="margin:6px 0;align-items:center"><span class="sp"></span><span class="small muted">Capacidade por tarefas alocadas: '+fmtMin(totalMin)+'</span></div>'
     + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary big" data-act="plan-concluir">✓ Concluir planejamento</button></div>';
 }
-act('plan-add', () => {
-  const P = window._plan; let ini;
-  if (P.blocos.length) ini = P.blocos[P.blocos.length-1].fim;
-  else { const n = new Date(); ini = pad2(Math.min(22, Math.max(H_INI, n.getHours() + (n.getMinutes()>0?1:0)))) + ':00'; }
-  const fim = pad2(Math.min(23, Number(ini.slice(0,2)) + 2)) + ':' + ini.slice(3);
-  P.blocos.push({ id:null, inicio: ini, fim, projetos: [], tarefaIds: [] });
-  planDraw();
-});
-act('plan-del', el => { window._plan.blocos.splice(Number(el.dataset.i), 1); planDraw(); });
-act('plan-set-ini', el => { window._plan.blocos[Number(el.dataset.i)].inicio = el.value; planDraw(); });
-act('plan-set-fim', el => { window._plan.blocos[Number(el.dataset.i)].fim = el.value; planDraw(); });
-act('plan-proj', el => {
-  const P = window._plan, i = Number(el.dataset.i), blk = P.blocos[i], pid = el.dataset.p;
-  const k = blk.projetos.indexOf(pid);
-  if (k < 0) blk.projetos.push(pid); else blk.projetos.splice(k, 1);
-  // re-seleciona automaticamente as que cabem, excluindo as já usadas em outros blocos do dia
-  const ocupadasOutros = new Set(); P.blocos.forEach((o, j) => { if (j !== i) o.tarefaIds.forEach(id => ocupadasOutros.add(id)); });
-  const eleg = tarefasElegiveis(blk.projetos, blk.id).filter(t => !ocupadasOutros.has(t.id));
-  blk.tarefaIds = selecionarAteCaber(eleg, Math.max(0, diffMinHHMM(blk.inicio, blk.fim))).map(t => t.id);
-  planDraw();
-});
+act('plan-ir-agenda', () => { closeModal(); nav('agenda/dia/'+hoje()); });
 act('plan-task', el => {
   const blk = window._plan.blocos[Number(el.dataset.i)], id = el.dataset.id;
   const k = blk.tarefaIds.indexOf(id);
-  if (k < 0) blk.tarefaIds.push(id); else blk.tarefaIds.splice(k, 1);
+  if (k < 0) {
+    const capMin = Math.max(0, diffMinHHMM(blk.inicio, blk.fim));
+    const atual = sum(blk.tarefaIds.map(tid => { const t = byId('tarefas', tid); return t ? estMin(t) : 0; }));
+    const t = byId('tarefas', id);
+    if (t && atual + estMin(t) <= capMin) blk.tarefaIds.push(id); else toast('Essa tarefa não cabe no bloco.');
+  } else blk.tarefaIds.splice(k, 1);
   planDraw();
 });
 act('plan-concluir', () => {
   const P = window._plan;
-  const idsAntes = new Set(blocosPlano(hoje()).map(b => b.id));
-  const mantidos = new Set();
-  P.blocos.forEach((blk, i) => {
-    if (diffMinHHMM(blk.inicio, blk.fim) <= 0) return; // janela inválida: ignora
-    const b = dbUpsert('blocos', { id: blk.id || undefined, titulo: tituloBloco(blk, i),
-      inicio: isoLocal(hoje(), blk.inicio), fim: isoLocal(hoje(), blk.fim),
-      projetos_incluidos: [...blk.projetos], ordem: i, tarefa_id: null, area_id: null, foco: false });
-    blk.id = b.id; mantidos.add(b.id);
-    for (const t of T('tarefas').filter(t => t.bloco_id === b.id && !blk.tarefaIds.includes(t.id))) dbPatch('tarefas', t.id, { bloco_id: null });
-    for (const id of blk.tarefaIds) { const t = byId('tarefas', id); if (t && t.bloco_id !== b.id) dbPatch('tarefas', id, { bloco_id: b.id }); }
-  });
-  for (const id of idsAntes) if (!mantidos.has(id)) apagarBloco(id); // blocos removidos no assistente
+  const blocoIds = new Set(P.blocos.map(b => b.id));
+  for (const t of T('tarefas').filter(t => t.bloco_id && blocoIds.has(t.bloco_id))) dbPatch('tarefas', t.id, { bloco_id: null });
+  P.blocos.forEach(blk => blk.tarefaIds.forEach(id => { const t = byId('tarefas', id); if (t) dbPatch('tarefas', id, { bloco_id: blk.id, vencimento: hoje() }); }));
   dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
   closeModal(true); render();
-  toast(mantidos.size ? ('Dia planejado em '+mantidos.size+' bloco(s) ✓') : 'Planejamento limpo.', {icone:'🧱', ms:4000});
+  toast('Dia planejado a partir dos blocos da Agenda ✓', {icone:'🧱', ms:4000});
 });
 /* ---- Planejar (ritual antigo de 3 passos — desativado, mantido p/ referência) ---- */
 act('ritual-planejar', () => planejarDia());
@@ -3567,16 +3533,30 @@ function artigosTabHTML() {
     + (paraLer.map(item).join('') || '<div class="empty small">nada na fila</div>') + '</div></div>'
     + (lidos.length ? '<details class="help"><summary>✅ Lidos ('+lidos.length+')</summary><div class="list">'+lidos.map(item).join('')+'</div></details>' : '');
 }
-act('artigo-add', () => editModal({ titulo:'Novo artigo', fields: [
-    {k:'titulo', l:'Título', req:1, foco:1},
-    {k:'url', l:'URL (opcional — dá para colar o texto depois)', ph:'https://…'},
-    {k:'fonte', l:'Fonte', ph:'ex.: newsletter X'}
-  ], onSave: v => { const a = dbUpsert('artigos', { ...v, status:'para_ler' }); render(); abrirArtigo(a.id); } }));
+const artigoFields = () => [
+  {k:'titulo', l:'Título', req:1, foco:1},
+  {k:'url', l:'URL', ph:'https://…'},
+  {k:'fonte', l:'Fonte', meia:1, ph:'ex.: newsletter X'},
+  {k:'status', t:'sel', l:'Status', meia:1, opts:[{v:'para_ler',t:'Para ler'},{v:'lido',t:'Lido'}]},
+  {k:'conteudo_cache', t:'ta', l:'Texto salvo / leitura offline', rows:7, ph:'Cole o texto do artigo aqui, se quiser manter uma cópia offline.'}
+];
+function artigoEditorModal(a) {
+  editModal({ titulo: a ? 'Editar artigo' : 'Novo artigo', fields: artigoFields(), vals: a || {status:'para_ler'},
+    onSave: v => {
+      const dados = { ...v, conteudo_cache: (v.conteudo_cache||'').trim() || null };
+      const salvo = a ? dbPatch('artigos', a.id, dados) : dbUpsert('artigos', dados);
+      render(); abrirArtigo((salvo || a).id);
+    },
+    onDelete: a ? () => { notasDe('artigo_id', a.id).forEach(n => dbDelete('leitura_notas', n.id)); dbDelete('artigos', a.id); render(); toast('Artigo excluído.'); } : null
+  });
+}
+act('artigo-add', () => artigoEditorModal(null));
 act('artigo-lido', el => { dbPatch('artigos', el.dataset.id, { status:'lido' }); render(); });
+act('artigo-edit', el => artigoEditorModal(byId('artigos', el.dataset.id)));
 act('artigo-abrir', el => abrirArtigo(el.dataset.id));
 function abrirArtigo(id) {
   const a = byId('artigos', id); if (!a) return;
-  modal('<div class="bx-h"><div class="h2" style="font-size:15px">📰 '+esc(a.titulo)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+  modal('<div class="bx-h"><div class="h2" style="font-size:15px">📰 '+esc(a.titulo)+'</div><button class="btn small" data-act="artigo-edit" data-id="'+a.id+'">Editar</button><button class="iconbtn" data-act="m-close">✕</button></div>'
     + '<div id="art-corpo">'+artigoCorpoHTML(a)+'</div>'
     + '<hr class="sep"><div class="h3">Notas</div>'+notasListaHTML(notasDe('artigo_id', a.id))+notaFormHTML('artigo', a.id)
     + '<div class="bx-foot"><button class="btn danger" data-act="artigo-del" data-id="'+a.id+'">Excluir</button><span class="sp"></span>'
@@ -3728,7 +3708,6 @@ function editorHTML(id) {
     + '<div class="row wrap" style="margin-bottom:10px">'
     + '<input class="input" id="ed-titulo" data-inp="ed-mudou" value="'+esc(t.titulo)+'" style="flex:1;min-width:160px;font-weight:700;font-size:16px">'
     + '<select class="select" id="ed-status" data-chg="ed-mudou" style="width:auto">'+STATUS_TEXTO.map(([v,l]) => '<option value="'+v+'"'+(v===t.status?' selected':'')+'>'+l+'</option>').join('')+'</select>'
-    + '<select class="select" id="ed-areasel" data-chg="ed-mudou" style="width:auto">'+optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(t.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('')+'</select>'
     + '</div>'
     + '<div class="row wrap" style="margin-bottom:10px">'
     + '<input class="input" id="ed-tags" data-inp="ed-mudou" value="'+esc((t.tags||[]).join(', '))+'" placeholder="tags, por, vírgula" style="flex:1;min-width:120px">'
@@ -3770,7 +3749,6 @@ function edSalvar() {
   dbPatch('textos', t.id, {
     titulo: ($('#ed-titulo')||{value:t.titulo}).value.trim() || 'Sem título',
     status: ($('#ed-status')||{value:t.status}).value,
-    area_id: $('#ed-areasel') ? ($('#ed-areasel').value || null) : t.area_id,
     tags: (($('#ed-tags')||{value:''}).value || '').split(',').map(s => s.trim()).filter(Boolean),
     conteudo, palavras, atualizado_em: nowISO()
   });
@@ -4009,7 +3987,9 @@ act('modelo-aplicar', el => {
   const ms = T('rotina_modelos');
   if (!ms.length) { toast('Nenhum modelo salvo ainda.'); return; }
   modal('<div class="bx-h"><div class="h2">📋 Aplicar modelo em '+fmtData(d)+'</div><button class="iconbtn" data-act="m-close">✕</button></div><div class="col">'
-    + ms.map(m => '<button class="btn big" data-act="modelo-aplicar-ok" data-id="'+m.id+'" data-d="'+d+'" style="justify-content:space-between"><span>'+(m.guiada?'🧭 ':'')+esc(m.nome)+'</span><span class="tiny muted">'+(m.blocos||[]).length+' blocos</span></button>').join('')+'</div>');
+    + ms.map(m => '<div class="card" style="margin-bottom:8px"><div class="row"><div class="grow"><b>'+(m.guiada?'🧭 ':'📋 ')+esc(m.nome)+'</b><div class="tiny muted">'+(m.blocos||[]).length+' blocos</div></div>'
+      + '<button class="btn small primary" data-act="modelo-aplicar-ok" data-id="'+m.id+'" data-d="'+d+'">Dia</button>'
+      + '<button class="btn small" data-act="modelo-aplicar-semana" data-id="'+m.id+'" data-d="'+d+'">Semana</button></div></div>').join('')+'</div>');
 });
 act('modelo-aplicar-ok', el => {
   const m = byId('rotina_modelos', el.dataset.id); const d = el.dataset.d;
@@ -4023,13 +4003,52 @@ act('modelo-aplicar-ok', el => {
   closeModal(); render();
   toast(criados.length + ' blocos criados a partir de "'+esc(m.nome)+'" ✓', { undo: () => { criados.forEach(b => dbDelete('blocos', b.id)); render(); } });
 });
+act('modelo-aplicar-semana', el => {
+  const m = byId('rotina_modelos', el.dataset.id); const iniSem = inicioSemana(el.dataset.d || hoje());
+  const criados = [];
+  for (let i = 0; i < 7; i++) {
+    const d = addDias(iniSem, i);
+    for (const it of (m.blocos||[])) {
+      if (!it.inicio) continue;
+      const ini = isoLocal(d, it.inicio);
+      criados.push(dbUpsert('blocos', { titulo: it.titulo, area_id: it.area_id||null,
+        inicio: ini, fim: new Date(new Date(ini).getTime() + (it.dur_min||60)*60000).toISOString(), foco: false, template: m.nome }));
+    }
+  }
+  closeModal(); render();
+  toast(criados.length + ' blocos criados na semana a partir de "'+esc(m.nome)+'" ✓', { undo: () => { criados.forEach(b => dbDelete('blocos', b.id)); render(); } });
+});
+function garantirModeloDiaTrabalho() {
+  if (T('rotina_modelos').some(m => m.nome === 'Dia de trabalho')) return;
+  const trab = T('areas').find(a => norm(a.nome).includes('trabalho')) || T('areas')[0];
+  const area_id = trab ? trab.id : null;
+  dbUpsert('rotina_modelos', { nome:'Dia de trabalho', guiada:false, blocos:[
+    { titulo:'Planejamento e prioridades', inicio:'09:00', dur_min:30, area_id },
+    { titulo:'Trabalho profundo', inicio:'09:30', dur_min:150, area_id },
+    { titulo:'Execução e reuniões', inicio:'13:30', dur_min:150, area_id },
+    { titulo:'Fechamento do dia', inicio:'16:30', dur_min:30, area_id }
+  ] });
+}
+BootHooks.push(() => { if (FLAGS.onboarded) { try { garantirModeloDiaTrabalho(); } catch(_){} } });
+function rotinaBarHTML(m) {
+  const blocos = ordenar((m.blocos||[]).filter(b => (b.dur_min||0) > 0), b => b.inicio || '99:99');
+  const total = blocos.reduce((s,b) => s + (Number(b.dur_min)||0), 0);
+  if (!total) return '<div class="tiny muted">Sem durações definidas para montar a barra.</div>';
+  return '<div class="rotina-bar" title="Distribuição visual da rotina">' + blocos.map(b => {
+    const cor = b.area_id ? corArea(b.area_id) : '#9AA0B0';
+    const a = b.area_id ? areaDe(b.area_id) : null;
+    return '<div class="rotina-seg" style="flex:'+(Number(b.dur_min)||0)+' 1 0;background:'+cor+'" title="'+esc(b.titulo)+' · '+(b.dur_min||0)+'min'+(a?' · '+esc(a.nome):'')+'">'
+      + '<span>'+esc(b.titulo)+'</span></div>';
+  }).join('') + '</div>';
+}
 function rotinasTabHTML() {
   const ms = T('rotina_modelos');
   return '<button class="btn primary" data-act="modelo-novo" style="margin-bottom:14px">+ Novo modelo / rotina guiada</button>'
     + (ms.map(m => '<div class="card"><div class="card-h"><div class="h2">'+(m.guiada?'🧭 ':'📋 ')+esc(m.nome)+'</div>'
       + (m.guiada ? '<button class="btn small primary" data-act="rotina-exec" data-id="'+m.id+'">▶ Executar</button>' : '')
       + '<button class="iconbtn" data-act="modelo-edit" data-id="'+m.id+'">✏️</button></div>'
-      + '<div class="tiny muted">'+(m.blocos||[]).map(b => (b.inicio?b.inicio+' ':'')+esc(b.titulo)+' ('+(b.dur_min||0)+'min)').join(' · ')+'</div></div>').join('')
+      + rotinaBarHTML(m)
+      + '<div class="tiny muted" style="margin-top:8px">'+(m.blocos||[]).map(b => (b.inicio?b.inicio+' ':'')+esc(b.titulo)+' ('+(b.dur_min||0)+'min)').join(' · ')+'</div></div>').join('')
     || '<div class="card"><div class="empty"><span class="em">📋</span>Modelos aplicam um dia inteiro de blocos com 1 toque.<br>Rotinas guiadas executam passo a passo com timer.</div></div>');
 }
 function modeloEditor(m) {
@@ -4039,6 +4058,7 @@ function modeloEditor(m) {
     + '<input class="input" value="'+esc(b.titulo||'')+'" data-mb-t placeholder="passo/bloco" style="flex:2">'
     + '<input class="input" type="time" value="'+esc(b.inicio||'')+'" data-mb-i style="width:96px" title="hora (vazio em rotina guiada)">'
     + '<input class="input" type="number" value="'+(b.dur_min||15)+'" data-mb-d style="width:70px" title="minutos">'
+    + '<select class="select" data-mb-a style="width:150px" title="área">'+optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(b.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('')+'</select>'
     + '<button class="iconbtn" data-act="mod-rm" data-i="'+i+'">✕</button></div>';
   modal('<div class="bx-h"><div class="h2">'+(m?'Editar':'Novo')+' modelo</div><button class="iconbtn" data-act="m-close">✕</button></div>'
     + '<div class="field"><label>Nome *</label><input class="input" id="mod-nome" value="'+esc(m?m.nome:'')+'" autofocus></div>'
@@ -4051,14 +4071,15 @@ function modeloEditor(m) {
 act('modelo-novo', () => modeloEditor(null));
 act('modelo-edit', el => modeloEditor(byId('rotina_modelos', el.dataset.id)));
 act('mod-add', () => { const div = document.createElement('div');
-  $('#mod-blocos').insertAdjacentHTML('beforeend', '<div class="row" style="margin-bottom:6px"><input class="input" data-mb-t placeholder="passo/bloco" style="flex:2"><input class="input" type="time" data-mb-i style="width:96px"><input class="input" type="number" value="15" data-mb-d style="width:70px"><button class="iconbtn" data-act="mod-rm-el">✕</button></div>'); });
+  $('#mod-blocos').insertAdjacentHTML('beforeend', '<div class="row" style="margin-bottom:6px"><input class="input" data-mb-t placeholder="passo/bloco" style="flex:2"><input class="input" type="time" data-mb-i style="width:96px"><input class="input" type="number" value="15" data-mb-d style="width:70px"><select class="select" data-mb-a style="width:150px">'+optsAreas().map(o => '<option value="'+o.v+'">'+esc(o.t)+'</option>').join('')+'</select><button class="iconbtn" data-act="mod-rm-el">✕</button></div>'); });
 act('mod-rm', el => el.closest('.row').remove());
 act('mod-rm-el', el => el.closest('.row').remove());
 act('mod-save', el => {
   const nome = $('#mod-nome').value.trim(); if (!nome) { toast('Dê um nome.'); return; }
   const blocos = [...$('#mod-blocos').querySelectorAll('.row')].map(r => ({
     titulo: r.querySelector('[data-mb-t]').value.trim(), inicio: r.querySelector('[data-mb-i]').value || null,
-    dur_min: Number(r.querySelector('[data-mb-d]').value) || 15
+    dur_min: Number(r.querySelector('[data-mb-d]').value) || 15,
+    area_id: r.querySelector('[data-mb-a]') ? (r.querySelector('[data-mb-a]').value || null) : null
   })).filter(b => b.titulo);
   if (!blocos.length) { toast('Adicione pelo menos um passo.'); return; }
   dbUpsert('rotina_modelos', { id: el.dataset.id || undefined, nome, guiada: $('#mod-guiada').checked, blocos });
