@@ -247,7 +247,12 @@ create table if not exists feedback (
   titulo text not null,
   problema text, solucao text,
   status text default 'aberto',
-  criado_em timestamptz default now());`;
+  criado_em timestamptz default now());
+
+-- ===== ALIMENTAÇÃO (MVP) =====
+create table if not exists nutricao_perfil (
+  id uuid primary key default gen_random_uuid(),
+  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric);`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
@@ -482,8 +487,12 @@ async function pullAll(silencioso) {
   await flush();
   if (!navigator.onLine) return false; // offline: não lê; pendências ficam na fila
   const novo = {};
-  try { for (const t of Object.keys(TABLES)) novo[t] = await pullTable(t); }
-  catch (e) { S.syncErr = e.msg || String(e); atualizarSyncUI(); return false; } // blip de rede: não sobrescreve
+  try {
+    for (const t of Object.keys(TABLES)) {
+      try { novo[t] = await pullTable(t); }
+      catch (e) { if (e && e.tipo === 'tabela') novo[t] = (S.data[t] || []).slice(); else throw e; } // tabela ainda não criada: preserva local, não trava o resto
+    }
+  } catch (e) { S.syncErr = e.msg || String(e); atualizarSyncUI(); return false; } // blip de rede: não sobrescreve
   // dedup defensivo por id no que veio da nuvem (cache nunca recebe id repetido)
   for (const t of Object.keys(TABLES)) {
     const pk = TABLES[t], m = new Map();
@@ -3045,16 +3054,41 @@ function treinoResumoHTML() {
     + '<div class="kpi"><div class="l">🏆 melhor pace</div><div class="v" style="font-size:18px">'+paceFmt(rec.melhorPace)+'</div></div>'
     + '<div class="kpi"><div class="l">🏆 maior distância</div><div class="v">'+fmtNum(rec.maiorKm,1)+' km</div></div></div>';
 }
+
+/* ════════ ALIMENTAÇÃO — seção interna do Treino (MVP) ════════ */
+const nutricaoPerfil = () => T('nutricao_perfil')[0] || null;
+const nutriMetaFields = [
+  {k:'meta_cal', t:'num', l:'Calorias (kcal/dia)', meia:1, ph:'ex.: 2200'},
+  {k:'meta_prot', t:'num', l:'Proteína (g/dia)', meia:1, ph:'ex.: 160'},
+  {k:'meta_carb', t:'num', l:'Carboidrato (g/dia)', meia:1, ph:'ex.: 220'},
+  {k:'meta_gord', t:'num', l:'Gordura (g/dia)', meia:1, ph:'ex.: 70'}
+];
+function alimentacaoTabHTML() {
+  const p = nutricaoPerfil() || {};
+  return '<div class="card"><div class="card-h"><div class="h2">🍎 Metas diárias</div></div>'
+    + '<p class="small muted" style="margin:0 0 10px">Defina suas metas manualmente (sem fórmulas). Elas serão a base das barras de progresso do dia.</p>'
+    + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
+    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></div>';
+}
+act('nutri-metas-save', () => {
+  const v = lerForm($('#nutri-metas'), nutriMetaFields); if (!v) return;
+  const p = nutricaoPerfil(), me = usuarioAtual();
+  const id = p ? p.id : (me ? detUUID('nutri-perfil:' + me.id) : uid()); // 1 perfil por usuário (id estável)
+  dbUpsert('nutricao_perfil', { id, meta_cal:v.meta_cal||null, meta_prot:v.meta_prot||null, meta_carb:v.meta_carb||null, meta_gord:v.meta_gord||null });
+  toast('Metas salvas ✓', {icone:'🍎'}); render();
+});
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
-    const aba = params[0] === 'corrida' ? 'corrida' : params[0] === 'corpo' ? 'corpo' : 'musc';
-    const tabs = '<div class="h1" style="margin-bottom:10px">🏋️ Treino</div>'
-      + '<div class="seg" style="margin-bottom:12px;max-width:480px">'
+    const aba = params[0] === 'corrida' ? 'corrida' : params[0] === 'corpo' ? 'corpo' : params[0] === 'alimentacao' ? 'alimentacao' : 'musc';
+    const seg = '<div class="h1" style="margin-bottom:10px">🏋️ Treino</div>'
+      + '<div class="seg" style="margin-bottom:12px;max-width:560px;flex-wrap:wrap">'
       + '<button class="seg-b'+(aba==='musc'?' on':'')+'" data-act="nav" data-r="treino">🏋️ Musculação</button>'
       + '<button class="seg-b'+(aba==='corrida'?' on':'')+'" data-act="nav" data-r="treino/corrida">🏃 Corrida</button>'
-      + '<button class="seg-b'+(aba==='corpo'?' on':'')+'" data-act="nav" data-r="treino/corpo">📏 Corpo</button></div>'
-      + treinoResumoHTML();
+      + '<button class="seg-b'+(aba==='corpo'?' on':'')+'" data-act="nav" data-r="treino/corpo">📏 Corpo</button>'
+      + '<button class="seg-b'+(aba==='alimentacao'?' on':'')+'" data-act="nav" data-r="treino/alimentacao">🍎 Alimentação</button></div>';
+    if (aba === 'alimentacao') return seg + alimentacaoTabHTML();
+    const tabs = seg + treinoResumoHTML();
     if (aba === 'corrida') return tabs + corridaTabHTML();
     if (aba === 'corpo') return tabs + corpoTabHTML();
     const sessoes = ordenar(T('treino_sessoes'), s => s.data + (s.criado_em||''), true);
