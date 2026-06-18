@@ -12,7 +12,7 @@ const TABLES = {
   treino_planilhas:'id', treino_exercicios:'id', treino_sessoes:'id', treino_registros:'id',
   corridas:'id', corpo_registros:'id',
   livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
-  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id'
+  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id', nutricao_perfil:'id'
 };
 /* etiquetas faz upsert pela PK (id) — não depende do índice único (user_id,nome),
    que pode não existir se havia duplicatas. A unicidade por nome é garantida no
@@ -25,7 +25,7 @@ const TABLE_ORDER = [
   // raízes (sem dependências) primeiro
   'areas','etiquetas','filtros','categorias_financeiras','contas_financeiras',
   'investimentos_ativos','treino_planilhas','artigos','rotina_modelos',
-  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias','feedback',
+  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias','feedback','nutricao_perfil',
   // dependem de uma raiz
   'projetos','habitos','metas','livros','textos',
   // dependem de nível 2
@@ -101,7 +101,8 @@ const COLS = {
   revisoes:['id','tipo','periodo_inicio','periodo_fim','metricas','respostas','criado_em'],
   conquistas:['codigo','desbloqueada_em'],
   configuracoes:['chave','valor'],
-  feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em','implementado_em','commit_ref']
+  feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em','implementado_em','commit_ref'],
+  nutricao_perfil:['id','meta_cal','meta_prot','meta_carb','meta_gord']
 };
 
 /* ---- Estado local (offline-first, regra 12) ---- */
