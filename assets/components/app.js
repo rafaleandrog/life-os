@@ -252,7 +252,16 @@ create table if not exists feedback (
 -- ===== ALIMENTAÇÃO (MVP) =====
 create table if not exists nutricao_perfil (
   id uuid primary key default gen_random_uuid(),
-  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric);`;
+  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric);
+
+create table if not exists alimentos (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null,
+  base text not null default '100g',
+  cal numeric, prot numeric, carb numeric, gord numeric,
+  gramas_unidade numeric,
+  favorito boolean default false,
+  criado_em timestamptz default now());`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
@@ -3068,7 +3077,8 @@ function alimentacaoTabHTML() {
   return '<div class="card"><div class="card-h"><div class="h2">🍎 Metas diárias</div></div>'
     + '<p class="small muted" style="margin:0 0 10px">Defina suas metas manualmente (sem fórmulas). Elas serão a base das barras de progresso do dia.</p>'
     + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
-    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></div>';
+    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></div>'
+    + alimentosListaHTML();
 }
 act('nutri-metas-save', () => {
   const v = lerForm($('#nutri-metas'), nutriMetaFields); if (!v) return;
@@ -3077,6 +3087,46 @@ act('nutri-metas-save', () => {
   dbUpsert('nutricao_perfil', { id, meta_cal:v.meta_cal||null, meta_prot:v.meta_prot||null, meta_carb:v.meta_carb||null, meta_gord:v.meta_gord||null });
   toast('Metas salvas ✓', {icone:'🍎'}); render();
 });
+
+/* ---- Banco de alimentos (CRUD) ---- */
+const ALIM_BASE = [{v:'100g', t:'por 100 g'}, {v:'unidade', t:'por 1 unidade'}];
+const alimBaseLabel = b => b === 'unidade' ? 'por unidade' : 'por 100g';
+const alimFields = () => [
+  {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Arroz cozido'},
+  {k:'base', t:'seg', l:'Porção de referência', def:'100g', opts: ALIM_BASE},
+  {k:'cal', t:'num', l:'Calorias (kcal)', meia:1},
+  {k:'prot', t:'num', l:'Proteína (g)', meia:1},
+  {k:'carb', t:'num', l:'Carboidrato (g)', meia:1},
+  {k:'gord', t:'num', l:'Gordura (g)', meia:1},
+  {k:'gramas_unidade', t:'num', l:'Peso de 1 unidade (g) — opcional', dica:'usado p/ converter quando a porção é por unidade'},
+  {k:'favorito', t:'chk', l:'⭐ Favorito (aparece no topo)'}
+];
+const normAlim = v => ({ nome:(v.nome||'').trim(), base: v.base === 'unidade' ? 'unidade' : '100g',
+  cal:v.cal||null, prot:v.prot||null, carb:v.carb||null, gord:v.gord||null,
+  gramas_unidade:v.gramas_unidade||null, favorito: !!v.favorito });
+function alimentosListaHTML() {
+  const as = ordenar(T('alimentos'), a => (a.favorito ? '0' : '1') + norm(a.nome));
+  const item = a => {
+    const m = '⚡'+fmtNum(a.cal||0)+' kcal · P'+fmtNum(a.prot||0)+' C'+fmtNum(a.carb||0)+' G'+fmtNum(a.gord||0);
+    return '<div class="item" data-act="alim-edit" data-id="'+a.id+'">'
+      + '<button class="iconbtn" data-act="alim-fav" data-id="'+a.id+'" title="favorito">'+(a.favorito?'⭐':'☆')+'</button>'
+      + '<div class="grow"><div class="ttl">'+esc(a.nome)+'</div><div class="sub">'+alimBaseLabel(a.base)
+      + (a.base==='unidade' && a.gramas_unidade ? ' ('+fmtNum(a.gramas_unidade)+'g)' : '')+' · '+m+'</div></div></div>';
+  };
+  return '<div class="card pad0"><div class="card-h" style="padding:12px 14px 4px"><div class="h2">🥗 Banco de alimentos</div>'
+    + '<button class="btn small primary" data-act="alim-add">+ Alimento</button></div>'
+    + (as.length ? '<div class="list" style="padding:0 10px 8px">'+as.map(item).join('')+'</div>'
+        : '<div class="empty" style="padding:18px"><span class="em">🥗</span>Nenhum alimento ainda. Cadastre os que você mais come — os favoritos aparecem no topo.</div>')
+    + '</div>';
+}
+act('alim-add', () => editModal({ titulo:'Novo alimento', fields: alimFields(), vals:{ base:'100g' },
+  onSave: v => { dbUpsert('alimentos', normAlim(v)); render(); toast('Alimento salvo ✓', {icone:'🥗'}); } }));
+act('alim-edit', el => { const a = byId('alimentos', el.dataset.id); if (!a) return;
+  editModal({ titulo:'Editar alimento', fields: alimFields(), vals: a,
+    onSave: v => { dbPatch('alimentos', a.id, normAlim(v)); render(); },
+    onDelete: () => { const bkp = {...a}; dbDelete('alimentos', a.id); render();
+      toast('Alimento excluído.', { undo: () => { dbUpsert('alimentos', bkp); render(); } }); } }); });
+act('alim-fav', el => { const a = byId('alimentos', el.dataset.id); if (a) { dbPatch('alimentos', a.id, { favorito: !a.favorito }); render(); } });
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
