@@ -261,7 +261,20 @@ create table if not exists alimentos (
   cal numeric, prot numeric, carb numeric, gord numeric,
   gramas_unidade numeric,
   favorito boolean default false,
-  criado_em timestamptz default now());`;
+  criado_em timestamptz default now());
+
+create table if not exists nutricao_registros (
+  id uuid primary key default gen_random_uuid(),
+  data date not null default current_date,
+  alimento_id uuid, nome text,
+  qtd numeric, unidade text,
+  cal numeric, prot numeric, carb numeric, gord numeric,
+  criado_em timestamptz default now());
+
+create table if not exists nutricao_dia (
+  data date primary key,
+  chk_prot boolean default false, chk_agua boolean default false,
+  chk_treino boolean default false, chk_cal boolean default false);`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
@@ -943,6 +956,8 @@ alter table configuracoes drop constraint if exists configuracoes_pkey;
 create unique index if not exists configuracoes_user_chave on configuracoes(user_id, chave);
 alter table conquistas drop constraint if exists conquistas_pkey;
 create unique index if not exists conquistas_user_codigo on conquistas(user_id, codigo);
+alter table nutricao_dia drop constraint if exists nutricao_dia_pkey;
+create unique index if not exists nutricao_dia_user_data on nutricao_dia(user_id, data);
 -- pronto! Volte ao app e toque em "Já rodei — verificar".`;
   return s;
 }
@@ -3074,10 +3089,12 @@ const nutriMetaFields = [
 ];
 function alimentacaoTabHTML() {
   const p = nutricaoPerfil() || {};
-  return '<div class="card"><div class="card-h"><div class="h2">🍎 Metas diárias</div></div>'
-    + '<p class="small muted" style="margin:0 0 10px">Defina suas metas manualmente (sem fórmulas). Elas serão a base das barras de progresso do dia.</p>'
+  return nutriDiaHTML()
+    + nutriChecklistHTML()
+    + '<details class="help"><summary>🍎 Metas diárias</summary>'
+    + '<p class="small muted" style="margin:6px 0 10px">Defina suas metas manualmente (sem fórmulas). Elas são a base das barras de progresso do dia.</p>'
     + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
-    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></div>'
+    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></details>'
     + alimentosListaHTML();
 }
 act('nutri-metas-save', () => {
@@ -3127,6 +3144,106 @@ act('alim-edit', el => { const a = byId('alimentos', el.dataset.id); if (!a) ret
     onDelete: () => { const bkp = {...a}; dbDelete('alimentos', a.id); render();
       toast('Alimento excluído.', { undo: () => { dbUpsert('alimentos', bkp); render(); } }); } }); });
 act('alim-fav', el => { const a = byId('alimentos', el.dataset.id); if (a) { dbPatch('alimentos', a.id, { favorito: !a.favorito }); render(); } });
+
+/* ---- Registro diário + barras de progresso (núcleo) ---- */
+const round1 = x => Math.round((Number(x) || 0) * 10) / 10;
+const registrosDoDia = data => ordenar(T('nutricao_registros').filter(r => r.data === (data || hoje())), r => r.criado_em || '');
+const calcMacros = (a, qtd) => { const f = a.base === 'unidade' ? qtd : qtd / 100; return { cal:(a.cal||0)*f, prot:(a.prot||0)*f, carb:(a.carb||0)*f, gord:(a.gord||0)*f }; };
+function somaMacros(regs) { return regs.reduce((s, r) => ({ cal:s.cal+(+r.cal||0), prot:s.prot+(+r.prot||0), carb:s.carb+(+r.carb||0), gord:s.gord+(+r.gord||0) }), {cal:0,prot:0,carb:0,gord:0}); }
+function barraNutri(label, consumido, meta, un) {
+  consumido = Math.round(consumido); meta = Number(meta) || 0;
+  const pct = meta > 0 ? consumido / meta : 0;
+  const cls = !meta ? 'ok' : pct > 1 ? 'err' : pct > 0.9 ? 'warn' : 'ok';
+  const dir = meta ? (consumido <= meta ? ' · faltam ' + (meta - consumido) + un : ' · +' + (consumido - meta) + un + ' acima') : '';
+  return '<div style="margin-bottom:9px"><div class="row" style="margin-bottom:3px"><span class="small bold">' + label + '</span><span class="sp"></span>'
+    + '<span class="small ' + cls + '">' + consumido + un + (meta ? ' / ' + Math.round(meta) + un : ' (sem meta)') + dir + '</span></div>'
+    + '<div class="bar thick"><i class="' + cls + '" style="width:' + clamp(pct * 100, 2, 100) + '%"></i></div></div>';
+}
+function nutriDiaHTML() {
+  const p = nutricaoPerfil() || {};
+  const regs = registrosDoDia(hoje());
+  const t = somaMacros(regs);
+  let html = '<div class="card"><div class="card-h"><div class="h2">📊 Hoje</div><button class="btn small primary" data-act="nutri-add">+ Registrar alimento</button></div>'
+    + barraNutri('Calorias', t.cal, p.meta_cal, ' kcal')
+    + barraNutri('Proteína', t.prot, p.meta_prot, ' g')
+    + barraNutri('Carboidrato', t.carb, p.meta_carb, ' g')
+    + barraNutri('Gordura', t.gord, p.meta_gord, ' g')
+    + (!p.meta_cal && !p.meta_prot ? '<div class="tiny muted" style="margin-top:4px">Defina as metas abaixo para ver o saldo restante.</div>' : '')
+    + '</div>';
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">🍽️ Registros de hoje ('+regs.length+')</div><div class="list" style="padding:0 10px 8px">'
+    + (regs.length ? regs.map(r => '<div class="item"><div class="grow"><div class="ttl">'+esc(r.nome||'avulso')
+        + (r.qtd ? ' <span class="muted small">'+fmtNum(r.qtd)+(r.unidade==='un'?' un':' g')+'</span>' : '')+'</div>'
+        + '<div class="sub">⚡'+fmtNum(r.cal||0)+' kcal · P'+fmtNum(r.prot||0)+' C'+fmtNum(r.carb||0)+' G'+fmtNum(r.gord||0)+'</div></div>'
+        + '<button class="btn small danger" data-act="nutri-del" data-id="'+r.id+'">✕</button></div>').join('')
+      : '<div class="empty" style="padding:14px"><span class="em">🍽️</span>Nada registrado hoje. Toque em "+ Registrar alimento".</div>')
+    + '</div></div>';
+  return html;
+}
+function registrarNutri(r) { dbUpsert('nutricao_registros', { data: hoje(), alimento_id:null, qtd:null, unidade:null, carb:null, gord:null, ...r }); }
+act('nutri-del', el => { const r = byId('nutricao_registros', el.dataset.id); if (!r) return; const bkp = {...r};
+  dbDelete('nutricao_registros', r.id); render();
+  toast('Registro removido.', { undo: () => { dbUpsert('nutricao_registros', bkp); render(); } }); });
+act('nutri-add', () => {
+  modal('<div class="bx-h"><div class="h2">Registrar alimento</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<input class="input" id="nutri-busca" data-inp="nutri-busca" placeholder="buscar alimento…" autocomplete="off">'
+    + '<div id="nutri-add-lista" class="list" style="max-height:46vh;overflow:auto;margin-top:8px"></div>'
+    + '<div class="bx-foot"><button class="btn" data-act="nutri-min">⚡ Modo mínimo (kcal + proteína)</button></div>',
+    { onMount: () => nutriAddListaDraw('') });
+});
+function nutriAddListaDraw(q) {
+  const lista = $('#nutri-add-lista'); if (!lista) return;
+  const as = ordenar(T('alimentos').filter(a => !q || norm(a.nome).includes(norm(q))), a => (a.favorito?'0':'1') + norm(a.nome)).slice(0, 50);
+  lista.innerHTML = as.length
+    ? as.map(a => '<div class="item" data-act="nutri-pick" data-id="'+a.id+'"><span>'+(a.favorito?'⭐':'🍽️')+'</span><div class="grow"><div class="ttl">'+esc(a.nome)+'</div><div class="sub">'+alimBaseLabel(a.base)+' · ⚡'+fmtNum(a.cal||0)+' P'+fmtNum(a.prot||0)+'</div></div></div>').join('')
+    : '<div class="tiny muted" style="padding:8px">Nenhum alimento. Cadastre no Banco de alimentos abaixo.</div>';
+}
+act('nutri-busca', el => nutriAddListaDraw(el.value));
+act('nutri-pick', el => { const a = byId('alimentos', el.dataset.id); if (!a) return;
+  const un = a.base === 'unidade' ? 'unidade(s)' : 'gramas';
+  modal('<div class="bx-h"><div class="h2">'+esc(a.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Quantidade ('+un+')</label><input class="input" id="nutri-qtd" type="number" inputmode="decimal" value="'+(a.base==='unidade'?'1':'100')+'"></div>'
+    + '<div id="nutri-prev" class="small muted" style="margin-bottom:6px"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="nutri-add-confirm" data-id="'+a.id+'">Adicionar</button></div>',
+    { onMount: ov => { const i = ov.querySelector('#nutri-qtd');
+        const upd = () => { const m = calcMacros(a, Number(i.value)||0); ov.querySelector('#nutri-prev').textContent = '⚡'+Math.round(m.cal)+' kcal · P'+round1(m.prot)+' C'+round1(m.carb)+' G'+round1(m.gord); };
+        i.addEventListener('input', upd); upd(); setTimeout(() => { i.focus(); i.select(); }, 60); } });
+});
+act('nutri-add-confirm', el => {
+  const a = byId('alimentos', el.dataset.id); const qtd = Number(($('#nutri-qtd')||{}).value) || 0;
+  if (!a || qtd <= 0) { toast('Informe a quantidade.', {icone:'✍️'}); return; }
+  const m = calcMacros(a, qtd);
+  registrarNutri({ nome:a.nome, alimento_id:a.id, qtd, unidade: a.base==='unidade'?'un':'g', cal:Math.round(m.cal), prot:round1(m.prot), carb:round1(m.carb), gord:round1(m.gord) });
+  closeModal(true); render(); toast('Adicionado ✓', {icone:'🍽️'});
+});
+act('nutri-min', () => { closeModal(true); editModal({ titulo:'Modo mínimo', salvar:'Adicionar',
+  fields:[ {k:'nome', l:'Descrição (opcional)', ph:'ex.: refeição fora'}, {k:'cal', t:'num', l:'Calorias (kcal)', meia:1, foco:1}, {k:'prot', t:'num', l:'Proteína (g)', meia:1} ],
+  onSave: v => { registrarNutri({ nome:(v.nome||'avulso'), cal:Math.round(v.cal||0), prot:round1(v.prot||0) }); render(); toast('Adicionado ✓', {icone:'⚡'}); } }); });
+
+/* ---- Checklist de aderência + streak (Etapa 4) ---- */
+const nutricaoDiaRow = data => byId('nutricao_dia', data || hoje());
+const setNutriDia = patch => { const d = nutricaoDiaRow(hoje()) || { data: hoje() }; dbUpsert('nutricao_dia', { ...d, ...patch }); };
+const nutriChecklistCompleto = d => !!(d && d.chk_prot && d.chk_agua && d.chk_treino && d.chk_cal);
+function nutriStreak() {
+  let n = 0, dia = hoje();
+  if (!nutriChecklistCompleto(nutricaoDiaRow(hoje()))) dia = addDias(hoje(), -1); // tolera hoje ainda incompleto
+  for (let i = 0; i < 400 && nutriChecklistCompleto(nutricaoDiaRow(dia)); i++) { n++; dia = addDias(dia, -1); }
+  return n;
+}
+function nutriRecorde() {
+  const dias = T('nutricao_dia').filter(nutriChecklistCompleto).map(d => d.data).sort();
+  let best = 0, run = 0, prev = null;
+  for (const d of dias) { run = (prev && diffDias(prev, d) === 1) ? run + 1 : 1; best = Math.max(best, run); prev = d; }
+  return best;
+}
+function nutriChecklistHTML() {
+  const d = nutricaoDiaRow(hoje()) || {};
+  const item = (k, label) => '<span class="chip'+(d[k]?' sel':'')+'" data-act="nutri-check" data-k="'+k+'">'+(d[k]?'✅':'⬜')+' '+label+'</span>';
+  const streak = nutriStreak(), rec = nutriRecorde();
+  return '<div class="card"><div class="card-h"><div class="h2">✅ Checklist do dia</div><span class="badge ok">🔥 '+streak+' dia'+(streak===1?'':'s')+'</span></div>'
+    + '<div class="row wrap" style="gap:8px">'+item('chk_prot','Proteína')+item('chk_agua','Água')+item('chk_treino','Treino')+item('chk_cal','Calorias')+'</div>'
+    + (rec > streak ? '<div class="tiny muted" style="margin-top:8px">Recorde: '+rec+' dias seguidos</div>' : '') + '</div>';
+}
+act('nutri-check', el => { const k = el.dataset.k; const d = nutricaoDiaRow(hoje()) || {}; setNutriDia({ [k]: !d[k] }); render(); });
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
