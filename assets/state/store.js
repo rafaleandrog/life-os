@@ -12,20 +12,20 @@ const TABLES = {
   treino_planilhas:'id', treino_exercicios:'id', treino_sessoes:'id', treino_registros:'id',
   corridas:'id', corpo_registros:'id',
   livros:'id', artigos:'id', leitura_notas:'id', leitura_registros:'id',
-  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id', nutricao_perfil:'id', alimentos:'id'
+  textos:'id', revisoes:'id', conquistas:'codigo', configuracoes:'chave', feedback:'id', nutricao_perfil:'id', alimentos:'id', nutricao_registros:'id', nutricao_dia:'data', nutricao_refeicoes:'id'
 };
 /* etiquetas faz upsert pela PK (id) — não depende do índice único (user_id,nome),
    que pode não existir se havia duplicatas. A unicidade por nome é garantida no
    cliente (reaproveita etiqueta existente). */
 const ON_CONFLICT = { habito_registros:'habito_id,data', investimentos_saldos:'ativo_id,data',
-  dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo' };
+  dias:'user_id,data', configuracoes:'user_id,chave', conquistas:'user_id,codigo', nutricao_dia:'user_id,data' };
 
 /* ---- Ordem de dependência: PAIS antes de FILHOS (evita violar FK no flush) ---- */
 const TABLE_ORDER = [
   // raízes (sem dependências) primeiro
   'areas','etiquetas','filtros','categorias_financeiras','contas_financeiras',
   'investimentos_ativos','treino_planilhas','artigos','rotina_modelos',
-  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias','feedback','nutricao_perfil','alimentos',
+  'corridas','corpo_registros','revisoes','conquistas','configuracoes','dias','feedback','nutricao_perfil','alimentos','nutricao_registros','nutricao_dia','nutricao_refeicoes',
   // dependem de uma raiz
   'projetos','habitos','metas','livros','textos',
   // dependem de nível 2
@@ -102,8 +102,11 @@ const COLS = {
   conquistas:['codigo','desbloqueada_em'],
   configuracoes:['chave','valor'],
   feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em','implementado_em','commit_ref'],
-  nutricao_perfil:['id','meta_cal','meta_prot','meta_carb','meta_gord'],
-  alimentos:['id','nome','base','cal','prot','carb','gord','gramas_unidade','favorito','criado_em']
+  nutricao_perfil:['id','meta_cal','meta_prot','meta_carb','meta_gord','sexo','idade','altura','peso','objetivo','meta_peso_semana','nivel_atividade'],
+  alimentos:['id','nome','base','cal','prot','carb','gord','gramas_unidade','favorito','categoria','criado_em'],
+  nutricao_registros:['id','data','alimento_id','nome','qtd','unidade','cal','prot','carb','gord','criado_em'],
+  nutricao_dia:['data','chk_prot','chk_agua','chk_treino','chk_cal'],
+  nutricao_refeicoes:['id','nome','tipo','horario','favorito','itens','criado_em']
 };
 
 /* ---- Estado local (offline-first, regra 12) ---- */
@@ -150,7 +153,7 @@ const ordenar = (arr, fn, desc) => [...arr].sort((a, b) => { const x = fn(a), y 
 function dbUpsert(t, row) {
   const pk = TABLES[t];
   if (row[pk] === undefined || row[pk] === null) row[pk] = pk === 'id' ? uid() : row[pk];
-  if (!row.criado_em && ['areas','projetos','tarefas','habitos','lancamentos_financeiros','investimentos_ativos','investimentos_movimentos','treino_planilhas','treino_sessoes','corridas','livros','artigos','leitura_notas','textos','revisoes','metas','feedback','alimentos'].includes(t)) row.criado_em = nowISO();
+  if (!row.criado_em && ['areas','projetos','tarefas','habitos','lancamentos_financeiros','investimentos_ativos','investimentos_movimentos','treino_planilhas','treino_sessoes','corridas','livros','artigos','leitura_notas','textos','revisoes','metas','feedback','alimentos','nutricao_registros','nutricao_refeicoes'].includes(t)) row.criado_em = nowISO();
   const arr = T(t);
   const i = arr.findIndex(r => r[pk] === row[pk]);
   if (i < 0) arr.push(row); else arr[i] = row;

@@ -252,7 +252,9 @@ create table if not exists feedback (
 -- ===== ALIMENTAÇÃO (MVP) =====
 create table if not exists nutricao_perfil (
   id uuid primary key default gen_random_uuid(),
-  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric);
+  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric,
+  sexo text, idade numeric, altura numeric, peso numeric,
+  objetivo text, meta_peso_semana numeric, nivel_atividade text);
 
 create table if not exists alimentos (
   id uuid primary key default gen_random_uuid(),
@@ -261,6 +263,27 @@ create table if not exists alimentos (
   cal numeric, prot numeric, carb numeric, gord numeric,
   gramas_unidade numeric,
   favorito boolean default false,
+  categoria text default 'geral',
+  criado_em timestamptz default now());
+
+create table if not exists nutricao_registros (
+  id uuid primary key default gen_random_uuid(),
+  data date not null default current_date,
+  alimento_id uuid, nome text,
+  qtd numeric, unidade text,
+  cal numeric, prot numeric, carb numeric, gord numeric,
+  criado_em timestamptz default now());
+
+create table if not exists nutricao_dia (
+  data date primary key,
+  chk_prot boolean default false, chk_agua boolean default false,
+  chk_treino boolean default false, chk_cal boolean default false);
+
+create table if not exists nutricao_refeicoes (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, tipo text default 'outro', horario text,
+  favorito boolean default false,
+  itens jsonb default '[]',
   criado_em timestamptz default now());`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
@@ -933,6 +956,14 @@ function sqlSetup() {
   s += `
 -- colunas novas em tabelas já existentes (idempotente)
 alter table projetos add column if not exists icone text default '📁';
+alter table alimentos add column if not exists categoria text default 'geral';
+alter table nutricao_perfil add column if not exists sexo text;
+alter table nutricao_perfil add column if not exists idade numeric;
+alter table nutricao_perfil add column if not exists altura numeric;
+alter table nutricao_perfil add column if not exists peso numeric;
+alter table nutricao_perfil add column if not exists objetivo text;
+alter table nutricao_perfil add column if not exists meta_peso_semana numeric;
+alter table nutricao_perfil add column if not exists nivel_atividade text;
 
 -- chaves únicas passam a valer por usuário
 alter table etiquetas drop constraint if exists etiquetas_nome_key;
@@ -943,6 +974,8 @@ alter table configuracoes drop constraint if exists configuracoes_pkey;
 create unique index if not exists configuracoes_user_chave on configuracoes(user_id, chave);
 alter table conquistas drop constraint if exists conquistas_pkey;
 create unique index if not exists conquistas_user_codigo on conquistas(user_id, codigo);
+alter table nutricao_dia drop constraint if exists nutricao_dia_pkey;
+create unique index if not exists nutricao_dia_user_data on nutricao_dia(user_id, data);
 -- pronto! Volte ao app e toque em "Já rodei — verificar".`;
   return s;
 }
@@ -3032,7 +3065,16 @@ function treinoResumoHTML() {
 
 /* ════════ ALIMENTAÇÃO — seção interna do Treino (MVP) ════════ */
 const nutricaoPerfil = () => T('nutricao_perfil')[0] || null;
+const NUTRI_OBJETIVOS = [{v:'',t:'—'},{v:'perder',t:'Perder gordura'},{v:'ganhar',t:'Ganhar massa'},{v:'recomp',t:'Recomposição'},{v:'manter',t:'Manutenção'}];
+const NUTRI_ATIVIDADE = [{v:'',t:'—'},{v:'sedentario',t:'Sedentário'},{v:'leve',t:'Leve'},{v:'moderado',t:'Moderado'},{v:'intenso',t:'Intenso'}];
 const nutriMetaFields = [
+  {k:'sexo', t:'sel', l:'Sexo', meia:1, opts:[{v:'',t:'—'},{v:'M',t:'Masculino'},{v:'F',t:'Feminino'}]},
+  {k:'idade', t:'num', l:'Idade', meia:1},
+  {k:'altura', t:'num', l:'Altura (cm)', meia:1},
+  {k:'peso', t:'num', l:'Peso atual (kg)', meia:1},
+  {k:'objetivo', t:'sel', l:'Objetivo', meia:1, opts: NUTRI_OBJETIVOS},
+  {k:'meta_peso_semana', t:'num', l:'Meta semanal de peso (kg)', meia:1, ph:'ex.: 0,3'},
+  {k:'nivel_atividade', t:'sel', l:'Nível de atividade', opts: NUTRI_ATIVIDADE},
   {k:'meta_cal', t:'num', l:'Calorias (kcal/dia)', meia:1, ph:'ex.: 2200'},
   {k:'meta_prot', t:'num', l:'Proteína (g/dia)', meia:1, ph:'ex.: 160'},
   {k:'meta_carb', t:'num', l:'Carboidrato (g/dia)', meia:1, ph:'ex.: 220'},
@@ -3040,23 +3082,30 @@ const nutriMetaFields = [
 ];
 function alimentacaoTabHTML() {
   const p = nutricaoPerfil() || {};
-  return '<div class="card"><div class="card-h"><div class="h2">🍎 Metas diárias</div></div>'
-    + '<p class="small muted" style="margin:0 0 10px">Defina suas metas manualmente (sem fórmulas). Elas serão a base das barras de progresso do dia.</p>'
-    + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
-    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></div>'
+  return nutriDiaHTML()
+    + nutriChecklistHTML()
+    + refeicoesListaHTML()
+    + comprasListaHTML()
+    + nutriMediasHTML()
+    + '<details class="help"><summary>🍎 Perfil &amp; metas</summary>'
+    + '<p class="small muted" style="margin:6px 0 10px">Perfil e metas manuais (sem fórmulas automáticas). As metas de macro são a base das barras de progresso do dia.</p>'
+    + '<div id="nutri-metas">' + formHTML(nutriMetaFields, p) + '</div>'
+    + '<button class="btn primary" data-act="nutri-metas-save">Salvar perfil e metas</button></details>'
     + alimentosListaHTML();
 }
 act('nutri-metas-save', () => {
   const v = lerForm($('#nutri-metas'), nutriMetaFields); if (!v) return;
   const p = nutricaoPerfil(), me = usuarioAtual();
   const id = p ? p.id : (me ? detUUID('nutri-perfil:' + me.id) : uid()); // 1 perfil por usuário (id estável)
-  dbUpsert('nutricao_perfil', { id, meta_cal:v.meta_cal||null, meta_prot:v.meta_prot||null, meta_carb:v.meta_carb||null, meta_gord:v.meta_gord||null });
-  toast('Metas salvas ✓', {icone:'🍎'}); render();
+  dbUpsert('nutricao_perfil', { id, ...v });
+  toast('Perfil e metas salvos ✓', {icone:'🍎'}); render();
 });
 
 /* ---- Banco de alimentos (CRUD) ---- */
 const ALIM_BASE = [{v:'100g', t:'por 100 g'}, {v:'unidade', t:'por 1 unidade'}];
 const alimBaseLabel = b => b === 'unidade' ? 'por unidade' : 'por 100g';
+const ALIM_CATS = [['proteina','🥩 Proteína'],['carboidrato','🍚 Carboidrato'],['fruta','🍎 Fruta'],['verdura','🥦 Verdura/Legume'],['geral','🛒 Geral']];
+const catLabel = v => (ALIM_CATS.find(c => c[0] === v) || ['','🛒 Geral'])[1];
 const alimFields = () => [
   {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Arroz cozido'},
   {k:'base', t:'seg', l:'Porção de referência', def:'100g', opts: ALIM_BASE},
@@ -3065,11 +3114,12 @@ const alimFields = () => [
   {k:'carb', t:'num', l:'Carboidrato (g)', meia:1},
   {k:'gord', t:'num', l:'Gordura (g)', meia:1},
   {k:'gramas_unidade', t:'num', l:'Peso de 1 unidade (g) — opcional', dica:'usado p/ converter quando a porção é por unidade'},
+  {k:'categoria', t:'sel', l:'Categoria (lista de compras)', def:'geral', opts: ALIM_CATS.map(([v,t]) => ({v,t}))},
   {k:'favorito', t:'chk', l:'⭐ Favorito (aparece no topo)'}
 ];
 const normAlim = v => ({ nome:(v.nome||'').trim(), base: v.base === 'unidade' ? 'unidade' : '100g',
   cal:v.cal||null, prot:v.prot||null, carb:v.carb||null, gord:v.gord||null,
-  gramas_unidade:v.gramas_unidade||null, favorito: !!v.favorito });
+  gramas_unidade:v.gramas_unidade||null, categoria: v.categoria||'geral', favorito: !!v.favorito });
 function alimentosListaHTML() {
   const as = ordenar(T('alimentos'), a => (a.favorito ? '0' : '1') + norm(a.nome));
   const item = a => {
@@ -3093,6 +3143,234 @@ act('alim-edit', el => { const a = byId('alimentos', el.dataset.id); if (!a) ret
     onDelete: () => { const bkp = {...a}; dbDelete('alimentos', a.id); render();
       toast('Alimento excluído.', { undo: () => { dbUpsert('alimentos', bkp); render(); } }); } }); });
 act('alim-fav', el => { const a = byId('alimentos', el.dataset.id); if (a) { dbPatch('alimentos', a.id, { favorito: !a.favorito }); render(); } });
+
+/* ---- Registro diário + barras de progresso (núcleo) ---- */
+const round1 = x => Math.round((Number(x) || 0) * 10) / 10;
+const registrosDoDia = data => ordenar(T('nutricao_registros').filter(r => r.data === (data || hoje())), r => r.criado_em || '');
+const calcMacros = (a, qtd) => { const f = a.base === 'unidade' ? qtd : qtd / 100; return { cal:(a.cal||0)*f, prot:(a.prot||0)*f, carb:(a.carb||0)*f, gord:(a.gord||0)*f }; };
+function somaMacros(regs) { return regs.reduce((s, r) => ({ cal:s.cal+(+r.cal||0), prot:s.prot+(+r.prot||0), carb:s.carb+(+r.carb||0), gord:s.gord+(+r.gord||0) }), {cal:0,prot:0,carb:0,gord:0}); }
+function barraNutri(label, consumido, meta, un) {
+  consumido = Math.round(consumido); meta = Number(meta) || 0;
+  const pct = meta > 0 ? consumido / meta : 0;
+  const cls = !meta ? 'ok' : pct > 1 ? 'err' : pct > 0.9 ? 'warn' : 'ok';
+  const dir = meta ? (consumido <= meta ? ' · faltam ' + (meta - consumido) + un : ' · +' + (consumido - meta) + un + ' acima') : '';
+  return '<div style="margin-bottom:9px"><div class="row" style="margin-bottom:3px"><span class="small bold">' + label + '</span><span class="sp"></span>'
+    + '<span class="small ' + cls + '">' + consumido + un + (meta ? ' / ' + Math.round(meta) + un : ' (sem meta)') + dir + '</span></div>'
+    + '<div class="bar thick"><i class="' + cls + '" style="width:' + clamp(pct * 100, 2, 100) + '%"></i></div></div>';
+}
+function nutriDiaHTML() {
+  const p = nutricaoPerfil() || {};
+  const regs = registrosDoDia(hoje());
+  const t = somaMacros(regs);
+  let html = '<div class="card"><div class="card-h"><div class="h2">📊 Hoje</div><button class="btn small primary" data-act="nutri-add">+ Registrar alimento</button></div>'
+    + barraNutri('Calorias', t.cal, p.meta_cal, ' kcal')
+    + barraNutri('Proteína', t.prot, p.meta_prot, ' g')
+    + barraNutri('Carboidrato', t.carb, p.meta_carb, ' g')
+    + barraNutri('Gordura', t.gord, p.meta_gord, ' g')
+    + (!p.meta_cal && !p.meta_prot ? '<div class="tiny muted" style="margin-top:4px">Defina as metas abaixo para ver o saldo restante.</div>' : '')
+    + '</div>';
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">🍽️ Registros de hoje ('+regs.length+')</div><div class="list" style="padding:0 10px 8px">'
+    + (regs.length ? regs.map(r => '<div class="item"><div class="grow"><div class="ttl">'+esc(r.nome||'avulso')
+        + (r.qtd ? ' <span class="muted small">'+fmtNum(r.qtd)+(r.unidade==='un'?' un':' g')+'</span>' : '')+'</div>'
+        + '<div class="sub">⚡'+fmtNum(r.cal||0)+' kcal · P'+fmtNum(r.prot||0)+' C'+fmtNum(r.carb||0)+' G'+fmtNum(r.gord||0)+'</div></div>'
+        + '<button class="btn small danger" data-act="nutri-del" data-id="'+r.id+'">✕</button></div>').join('')
+      : '<div class="empty" style="padding:14px"><span class="em">🍽️</span>Nada registrado hoje. Toque em "+ Registrar alimento".</div>')
+    + '</div></div>';
+  return html;
+}
+function registrarNutri(r) { dbUpsert('nutricao_registros', { data: hoje(), alimento_id:null, qtd:null, unidade:null, carb:null, gord:null, ...r }); }
+act('nutri-del', el => { const r = byId('nutricao_registros', el.dataset.id); if (!r) return; const bkp = {...r};
+  dbDelete('nutricao_registros', r.id); render();
+  toast('Registro removido.', { undo: () => { dbUpsert('nutricao_registros', bkp); render(); } }); });
+let _foodTarget = 'dia'; // 'dia' = registra no dia; 'refeicao' = adiciona à refeição em edição
+function abrirPickerAlimento(target) {
+  _foodTarget = target || 'dia';
+  modal('<div class="bx-h"><div class="h2">'+(_foodTarget==='refeicao'?'Adicionar à refeição':'Registrar alimento')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<input class="input" id="nutri-busca" data-inp="nutri-busca" placeholder="buscar alimento…" autocomplete="off">'
+    + '<div id="nutri-add-lista" class="list" style="max-height:46vh;overflow:auto;margin-top:8px"></div>'
+    + (_foodTarget==='dia' ? '<div class="bx-foot"><button class="btn" data-act="nutri-min">⚡ Modo mínimo (kcal + proteína)</button></div>' : ''),
+    { onMount: () => nutriAddListaDraw('') });
+}
+act('nutri-add', () => abrirPickerAlimento('dia'));
+function nutriAddListaDraw(q) {
+  const lista = $('#nutri-add-lista'); if (!lista) return;
+  const as = ordenar(T('alimentos').filter(a => !q || norm(a.nome).includes(norm(q))), a => (a.favorito?'0':'1') + norm(a.nome)).slice(0, 50);
+  lista.innerHTML = as.length
+    ? as.map(a => '<div class="item" data-act="nutri-pick" data-id="'+a.id+'"><span>'+(a.favorito?'⭐':'🍽️')+'</span><div class="grow"><div class="ttl">'+esc(a.nome)+'</div><div class="sub">'+alimBaseLabel(a.base)+' · ⚡'+fmtNum(a.cal||0)+' P'+fmtNum(a.prot||0)+'</div></div></div>').join('')
+    : '<div class="tiny muted" style="padding:8px">Nenhum alimento. Cadastre no Banco de alimentos abaixo.</div>';
+}
+act('nutri-busca', el => nutriAddListaDraw(el.value));
+act('nutri-pick', el => { const a = byId('alimentos', el.dataset.id); if (!a) return;
+  const un = a.base === 'unidade' ? 'unidade(s)' : 'gramas';
+  modal('<div class="bx-h"><div class="h2">'+esc(a.nome)+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Quantidade ('+un+')</label><input class="input" id="nutri-qtd" type="number" inputmode="decimal" value="'+(a.base==='unidade'?'1':'100')+'"></div>'
+    + '<div id="nutri-prev" class="small muted" style="margin-bottom:6px"></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="nutri-add-confirm" data-id="'+a.id+'">Adicionar</button></div>',
+    { onMount: ov => { const i = ov.querySelector('#nutri-qtd');
+        const upd = () => { const m = calcMacros(a, Number(i.value)||0); ov.querySelector('#nutri-prev').textContent = '⚡'+Math.round(m.cal)+' kcal · P'+round1(m.prot)+' C'+round1(m.carb)+' G'+round1(m.gord); };
+        i.addEventListener('input', upd); upd(); setTimeout(() => { i.focus(); i.select(); }, 60); } });
+});
+act('nutri-add-confirm', el => {
+  const a = byId('alimentos', el.dataset.id); const qtd = Number(($('#nutri-qtd')||{}).value) || 0;
+  if (!a || qtd <= 0) { toast('Informe a quantidade.', {icone:'✍️'}); return; }
+  const m = calcMacros(a, qtd);
+  const item = { nome:a.nome, alimento_id:a.id, qtd, unidade: a.base==='unidade'?'un':'g', cal:Math.round(m.cal), prot:round1(m.prot), carb:round1(m.carb), gord:round1(m.gord) };
+  if (_foodTarget === 'refeicao' && window._refed) { window._refed.itens.push(item); closeModal(true); abrirRefeicao(); return; } // volta ao editor da refeição
+  registrarNutri(item);
+  closeModal(true); render(); toast('Adicionado ✓', {icone:'🍽️'});
+});
+act('nutri-min', () => { closeModal(true); editModal({ titulo:'Modo mínimo', salvar:'Adicionar',
+  fields:[ {k:'nome', l:'Descrição (opcional)', ph:'ex.: refeição fora'}, {k:'cal', t:'num', l:'Calorias (kcal)', meia:1, foco:1}, {k:'prot', t:'num', l:'Proteína (g)', meia:1} ],
+  onSave: v => { registrarNutri({ nome:(v.nome||'avulso'), cal:Math.round(v.cal||0), prot:round1(v.prot||0) }); render(); toast('Adicionado ✓', {icone:'⚡'}); } }); });
+
+/* ---- Checklist de aderência + streak (Etapa 4) ---- */
+const nutricaoDiaRow = data => byId('nutricao_dia', data || hoje());
+const setNutriDia = patch => { const d = nutricaoDiaRow(hoje()) || { data: hoje() }; dbUpsert('nutricao_dia', { ...d, ...patch }); };
+const nutriChecklistCompleto = d => !!(d && d.chk_prot && d.chk_agua && d.chk_treino && d.chk_cal);
+function nutriStreak() {
+  let n = 0, dia = hoje();
+  if (!nutriChecklistCompleto(nutricaoDiaRow(hoje()))) dia = addDias(hoje(), -1); // tolera hoje ainda incompleto
+  for (let i = 0; i < 400 && nutriChecklistCompleto(nutricaoDiaRow(dia)); i++) { n++; dia = addDias(dia, -1); }
+  return n;
+}
+function nutriRecorde() {
+  const dias = T('nutricao_dia').filter(nutriChecklistCompleto).map(d => d.data).sort();
+  let best = 0, run = 0, prev = null;
+  for (const d of dias) { run = (prev && diffDias(prev, d) === 1) ? run + 1 : 1; best = Math.max(best, run); prev = d; }
+  return best;
+}
+function nutriChecklistHTML() {
+  const d = nutricaoDiaRow(hoje()) || {};
+  const item = (k, label) => '<span class="chip'+(d[k]?' sel':'')+'" data-act="nutri-check" data-k="'+k+'">'+(d[k]?'✅':'⬜')+' '+label+'</span>';
+  const streak = nutriStreak(), rec = nutriRecorde();
+  return '<div class="card"><div class="card-h"><div class="h2">✅ Checklist do dia</div><span class="badge ok">🔥 '+streak+' dia'+(streak===1?'':'s')+'</span></div>'
+    + '<div class="row wrap" style="gap:8px">'+item('chk_prot','Proteína')+item('chk_agua','Água')+item('chk_treino','Treino')+item('chk_cal','Calorias')+'</div>'
+    + (rec > streak ? '<div class="tiny muted" style="margin-top:8px">Recorde: '+rec+' dias seguidos</div>' : '') + '</div>';
+}
+act('nutri-check', el => { const k = el.dataset.k; const d = nutricaoDiaRow(hoje()) || {}; setNutriDia({ [k]: !d[k] }); render(); });
+
+/* ---- Refeições salvas (planejamento) + registrar no dia em 1 toque ---- */
+const REF_TIPOS = [['cafe','☕ Café'],['almoco','🍛 Almoço'],['jantar','🍽️ Jantar'],['lanche','🍎 Lanche'],['outro','• Outro']];
+const refTipoLabel = v => (REF_TIPOS.find(t => t[0] === v) || ['','• Outro'])[1];
+function refeicoesListaHTML() {
+  const rs = ordenar(T('nutricao_refeicoes'), r => (r.favorito ? '0' : '1') + norm(r.nome));
+  const linha = r => { const tot = somaMacros(r.itens || []);
+    return '<div class="item"><button class="iconbtn" data-act="refeicao-fav" data-id="'+r.id+'" title="favorita">'+(r.favorito?'⭐':'☆')+'</button>'
+      + '<div class="grow" data-act="refeicao-edit" data-id="'+r.id+'"><div class="ttl">'+esc(r.nome)+' <span class="muted small">'+refTipoLabel(r.tipo)+(r.horario?' · '+esc(r.horario):'')+'</span></div>'
+      + '<div class="sub">'+(r.itens||[]).length+' itens · ⚡'+Math.round(tot.cal)+' kcal · P'+round1(tot.prot)+' C'+round1(tot.carb)+' G'+round1(tot.gord)+'</div></div>'
+      + '<button class="btn small primary" data-act="refeicao-log" data-id="'+r.id+'">+ hoje</button></div>'; };
+  return '<div class="card pad0"><div class="card-h" style="padding:12px 14px 4px"><div class="h2">🍱 Minhas refeições</div><button class="btn small primary" data-act="refeicao-nova">+ Refeição</button></div>'
+    + (rs.length ? '<div class="list" style="padding:0 10px 8px">'+rs.map(linha).join('')+'</div>'
+        : '<div class="empty" style="padding:18px"><span class="em">🍱</span>Monte refeições prontas (ex.: "Café padrão") e registre o dia em 1 toque.</div>')
+    + '</div>';
+}
+act('refeicao-log', el => { const r = byId('nutricao_refeicoes', el.dataset.id); if (!r) return;
+  for (const it of (r.itens || [])) registrarNutri({ nome:it.nome, alimento_id:it.alimento_id||null, qtd:it.qtd, unidade:it.unidade, cal:it.cal, prot:it.prot, carb:it.carb, gord:it.gord });
+  render(); toast('Refeição registrada ✓ (' + (r.itens||[]).length + ' itens)', {icone:'🍱'}); });
+act('refeicao-fav', el => { const r = byId('nutricao_refeicoes', el.dataset.id); if (r) { dbPatch('nutricao_refeicoes', r.id, { favorito: !r.favorito }); render(); } });
+act('refeicao-nova', () => { window._refed = null; abrirRefeicao(); });
+act('refeicao-edit', el => abrirRefeicao(el.dataset.id));
+function capturarRefed() { const R = window._refed; if (!R) return;
+  const n = $('#refed-nome'), t = $('#refed-tipo'), h = $('#refed-hora'), f = $('#refed-fav');
+  if (n) R.nome = n.value; if (t) R.tipo = t.value; if (h) R.horario = h.value; if (f) R.favorito = f.checked; }
+function abrirRefeicao(id) {
+  if (id !== undefined) { const r = byId('nutricao_refeicoes', id);
+    window._refed = r ? { id:r.id, nome:r.nome, tipo:r.tipo||'outro', horario:r.horario||'', favorito:!!r.favorito, itens:(r.itens||[]).map(x => ({...x})) } : null; }
+  if (!window._refed) window._refed = { id:null, nome:'', tipo:'almoco', horario:'', favorito:false, itens:[] };
+  const R = window._refed, tot = somaMacros(R.itens);
+  modal('<div class="bx-h"><div class="h2">'+(R.id?'Editar refeição':'Nova refeição')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome</label><input class="input" id="refed-nome" value="'+esc(R.nome||'')+'" placeholder="ex.: Café padrão"></div>'
+    + '<div class="frow"><div class="field"><label>Tipo</label><select class="select" id="refed-tipo">'+REF_TIPOS.map(([v,l]) => '<option value="'+v+'"'+(v===R.tipo?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<div class="field"><label>Horário sugerido</label><input class="input" id="refed-hora" type="time" value="'+esc(R.horario||'')+'"></div></div>'
+    + '<label class="checkline"><input type="checkbox" id="refed-fav"'+(R.favorito?' checked':'')+'> ⭐ Favorita</label>'
+    + '<div class="sec-head">Itens · ⚡'+Math.round(tot.cal)+' kcal · P'+round1(tot.prot)+' C'+round1(tot.carb)+' G'+round1(tot.gord)+'</div>'
+    + '<div class="list">'+(R.itens.length ? R.itens.map((it,i) => '<div class="item"><div class="grow"><div class="ttl">'+esc(it.nome)+' <span class="muted small">'+fmtNum(it.qtd)+(it.unidade==='un'?' un':' g')+'</span></div><div class="sub">⚡'+fmtNum(it.cal||0)+' · P'+fmtNum(it.prot||0)+'</div></div><button class="btn small danger" data-act="refed-rm" data-i="'+i+'">✕</button></div>').join('') : '<div class="tiny muted" style="padding:6px">Sem itens. Adicione abaixo.</div>')+'</div>'
+    + '<div class="row" style="margin-top:6px"><button class="btn" data-act="refed-add-food">➕ Adicionar alimento</button></div>'
+    + '<div class="bx-foot">'+(R.id?'<button class="btn danger" data-act="refed-del" data-id="'+R.id+'">Excluir</button><span class="sp"></span>':'')
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="refed-save">Salvar refeição</button></div>');
+}
+act('refed-add-food', () => { capturarRefed(); abrirPickerAlimento('refeicao'); });
+act('refed-rm', el => { capturarRefed(); window._refed.itens.splice(Number(el.dataset.i), 1); abrirRefeicao(); });
+act('refed-save', () => { capturarRefed(); const R = window._refed;
+  if (!(R.nome||'').trim()) { toast('Dê um nome à refeição.', {icone:'✍️'}); return; }
+  dbUpsert('nutricao_refeicoes', { id: R.id || undefined, nome:R.nome.trim(), tipo:R.tipo||'outro', horario:R.horario||null, favorito:!!R.favorito, itens:R.itens });
+  window._refed = null; closeModal(true); render(); toast('Refeição salva ✓', {icone:'🍱'}); });
+act('refed-del', el => confirmBox('Excluir esta refeição salva? (os registros já lançados no dia continuam)', () => {
+  const bkp = byId('nutricao_refeicoes', el.dataset.id); dbDelete('nutricao_refeicoes', el.dataset.id); window._refed = null; closeModal(true); render();
+  toast('Refeição excluída.', { undo: () => { if (bkp) dbUpsert('nutricao_refeicoes', bkp); render(); } }); }, {perigo:1, sim:'Excluir'}));
+
+/* ---- Lista de compras (gerada das refeições; guardada em configuracoes) ---- */
+const PERIODOS = [['semanal','Semanal'],['quinzenal','Quinzenal'],['mensal','Mensal']];
+const comprasState = () => getCfg('nutri_compras', { periodo:'semanal', itens:[] }) || { periodo:'semanal', itens:[] };
+function comprasListaHTML() {
+  const st = comprasState(), itens = st.itens || [];
+  let body;
+  if (!itens.length) body = '<div class="empty" style="padding:18px"><span class="em">🛒</span>Gere a lista a partir das suas refeições (escolha quantas vezes vai comer cada uma no período).</div>';
+  else {
+    const porCat = {}; itens.forEach((it, idx) => { (porCat[it.categoria] = porCat[it.categoria] || []).push({ ...it, idx }); });
+    body = ALIM_CATS.map(c => c[0]).filter(c => porCat[c]).map(c =>
+      '<div class="sec-head" style="padding:8px 4px 2px">'+catLabel(c)+'</div>'
+      + porCat[c].map(it => '<label class="checkline" style="padding:6px 4px"><input type="checkbox" data-act="compras-check" data-i="'+it.idx+'"'+(it.comprado?' checked':'')+'> '
+        + '<span class="grow"'+(it.comprado?' style="text-decoration:line-through;opacity:.55"':'')+'>'+esc(it.nome)+' <span class="muted small">'+fmtNum(it.qtd)+(it.unidade==='un'?' un':' g')+'</span></span></label>').join('')
+    ).join('');
+  }
+  const comprados = itens.filter(i => i.comprado).length;
+  return '<div class="card"><div class="card-h"><div class="h2">🛒 Lista de compras'+(itens.length?' <span class="muted small">('+comprados+'/'+itens.length+')</span>':'')+'</div>'
+    + '<div class="row" style="gap:6px"><button class="btn small primary" data-act="compras-gerar">Gerar</button>'+(itens.length?'<button class="btn small" data-act="compras-limpar">Limpar</button>':'')+'</div></div>'
+    + (itens.length ? '<div class="tiny muted" style="margin:-4px 0 8px">Período: '+(PERIODOS.find(p=>p[0]===st.periodo)||['','Semanal'])[1]+'</div>' : '')
+    + body + '</div>';
+}
+act('compras-gerar', () => {
+  const rs = ordenar(T('nutricao_refeicoes'), r => (r.favorito?'0':'1') + norm(r.nome));
+  if (!rs.length) { toast('Crie refeições primeiro para gerar a lista.', {icone:'🍱'}); return; }
+  const cur = comprasState();
+  modal('<div class="bx-h"><div class="h2">Gerar lista de compras</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Período</label><select class="select" id="compras-periodo">'+PERIODOS.map(([v,l]) => '<option value="'+v+'"'+(v===cur.periodo?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<p class="small muted" style="margin:4px 0">Quantas vezes vai comer cada refeição no período:</p>'
+    + '<div class="list" style="max-height:42vh;overflow:auto">'+rs.map(r => '<div class="item"><div class="grow"><div class="ttl">'+esc(r.nome)+' <span class="muted small">'+refTipoLabel(r.tipo)+'</span></div><div class="sub">'+(r.itens||[]).length+' itens</div></div><input class="input" type="number" min="0" inputmode="numeric" value="0" data-compras-ref="'+r.id+'" style="width:64px"></div>').join('')+'</div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="compras-gerar-confirm">Gerar lista</button></div>');
+});
+act('compras-gerar-confirm', () => {
+  const periodo = ($('#compras-periodo')||{}).value || 'semanal';
+  const agg = {};
+  $$('[data-compras-ref]').forEach(inp => {
+    const vezes = Number(inp.value) || 0; if (vezes <= 0) return;
+    const r = byId('nutricao_refeicoes', inp.dataset.comprasRef); if (!r) return;
+    for (const it of (r.itens || [])) {
+      const ali = it.alimento_id ? byId('alimentos', it.alimento_id) : null;
+      const cat = ali ? (ali.categoria || 'geral') : 'geral';
+      const key = (it.alimento_id || norm(it.nome)) + '|' + (it.unidade || '');
+      if (!agg[key]) agg[key] = { nome: it.nome, categoria: cat, qtd: 0, unidade: it.unidade || '', comprado: false };
+      agg[key].qtd += (Number(it.qtd) || 0) * vezes;
+    }
+  });
+  const itens = Object.values(agg).map(i => ({ ...i, qtd: round1(i.qtd) }));
+  if (!itens.length) { toast('Marque ao menos 1 refeição com vezes > 0.', {icone:'✍️'}); return; }
+  setCfg('nutri_compras', { periodo, itens, gerado_em: nowISO() });
+  closeModal(true); render(); toast('Lista gerada ✓ ('+itens.length+' itens)', {icone:'🛒'});
+});
+act('compras-check', el => { const st = comprasState(), i = Number(el.dataset.i); if (st.itens && st.itens[i]) { st.itens[i].comprado = !st.itens[i].comprado; setCfg('nutri_compras', st); render(); } });
+act('compras-limpar', () => confirmBox('Limpar a lista de compras?', () => { setCfg('nutri_compras', { periodo: comprasState().periodo, itens: [] }); render(); }, {sim:'Limpar'}));
+
+/* ---- Relatórios simples (médias, % na meta, kcal 14 dias) ---- */
+function nutriMediasHTML() {
+  const dias14 = []; for (let i = 0; i < 14; i++) dias14.push(addDias(hoje(), -i));
+  const porDia = d => somaMacros(T('nutricao_registros').filter(r => r.data === d));
+  const com7 = dias14.slice(0, 7).map(porDia).filter(t => t.cal > 0);
+  const med = k => com7.length ? com7.reduce((s, t) => s + t[k], 0) / com7.length : 0;
+  const p = nutricaoPerfil() || {};
+  let comReg = 0, naMeta = 0;
+  for (const d of dias14) { const t = porDia(d); if (t.cal > 0) { comReg++; if (p.meta_cal && t.cal <= Number(p.meta_cal)) naMeta++; } }
+  const pctMeta = comReg ? Math.round(naMeta / comReg * 100) : 0;
+  const barras = dias14.slice().reverse().map(d => ({ x: fmtDataCurta(d), y: Math.round(porDia(d).cal) }));
+  return '<details class="help"><summary>📈 Relatórios</summary>'
+    + '<div class="grid2" style="margin:8px 0"><div class="kpi"><div class="l">média kcal/dia (7d)</div><div class="v">'+fmtNum(med('cal'),0)+'</div></div>'
+    + '<div class="kpi"><div class="l">média proteína/dia (7d)</div><div class="v">'+fmtNum(med('prot'),0)+' g</div></div></div>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:8px"><span class="badge">carbo méd '+fmtNum(med('carb'),0)+'g</span><span class="badge">gordura méd '+fmtNum(med('gord'),0)+'g</span>'
+    + (p.meta_cal ? '<span class="badge ok">'+pctMeta+'% dias dentro da meta de kcal (14d)</span>' : '<span class="tiny muted">defina a meta de kcal para ver % na dieta</span>')+'</div>'
+    + '<div class="h3" style="margin:6px 0 2px">Calorias — 14 dias</div>' + svgBarras(barras, { fmt: v => v })
+    + '</details>';
+}
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
