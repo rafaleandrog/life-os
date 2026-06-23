@@ -102,8 +102,8 @@ const COLS = {
   conquistas:['codigo','desbloqueada_em'],
   configuracoes:['chave','valor'],
   feedback:['id','titulo','tipo','assunto','problema','solucao','status','criado_em','implementado_em','commit_ref'],
-  nutricao_perfil:['id','meta_cal','meta_prot','meta_carb','meta_gord'],
-  alimentos:['id','nome','base','cal','prot','carb','gord','gramas_unidade','favorito','criado_em'],
+  nutricao_perfil:['id','meta_cal','meta_prot','meta_carb','meta_gord','sexo','idade','altura','peso','objetivo','meta_peso_semana','nivel_atividade'],
+  alimentos:['id','nome','base','cal','prot','carb','gord','gramas_unidade','favorito','categoria','criado_em'],
   nutricao_registros:['id','data','alimento_id','nome','qtd','unidade','cal','prot','carb','gord','criado_em'],
   nutricao_dia:['data','chk_prot','chk_agua','chk_treino','chk_cal'],
   nutricao_refeicoes:['id','nome','tipo','horario','favorito','itens','criado_em']

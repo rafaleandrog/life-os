@@ -252,7 +252,9 @@ create table if not exists feedback (
 -- ===== ALIMENTAÇÃO (MVP) =====
 create table if not exists nutricao_perfil (
   id uuid primary key default gen_random_uuid(),
-  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric);
+  meta_cal numeric, meta_prot numeric, meta_carb numeric, meta_gord numeric,
+  sexo text, idade numeric, altura numeric, peso numeric,
+  objetivo text, meta_peso_semana numeric, nivel_atividade text);
 
 create table if not exists alimentos (
   id uuid primary key default gen_random_uuid(),
@@ -261,6 +263,7 @@ create table if not exists alimentos (
   cal numeric, prot numeric, carb numeric, gord numeric,
   gramas_unidade numeric,
   favorito boolean default false,
+  categoria text default 'geral',
   criado_em timestamptz default now());
 
 create table if not exists nutricao_registros (
@@ -953,6 +956,14 @@ function sqlSetup() {
   s += `
 -- colunas novas em tabelas já existentes (idempotente)
 alter table projetos add column if not exists icone text default '📁';
+alter table alimentos add column if not exists categoria text default 'geral';
+alter table nutricao_perfil add column if not exists sexo text;
+alter table nutricao_perfil add column if not exists idade numeric;
+alter table nutricao_perfil add column if not exists altura numeric;
+alter table nutricao_perfil add column if not exists peso numeric;
+alter table nutricao_perfil add column if not exists objetivo text;
+alter table nutricao_perfil add column if not exists meta_peso_semana numeric;
+alter table nutricao_perfil add column if not exists nivel_atividade text;
 
 -- chaves únicas passam a valer por usuário
 alter table etiquetas drop constraint if exists etiquetas_nome_key;
@@ -3088,7 +3099,16 @@ function treinoResumoHTML() {
 
 /* ════════ ALIMENTAÇÃO — seção interna do Treino (MVP) ════════ */
 const nutricaoPerfil = () => T('nutricao_perfil')[0] || null;
+const NUTRI_OBJETIVOS = [{v:'',t:'—'},{v:'perder',t:'Perder gordura'},{v:'ganhar',t:'Ganhar massa'},{v:'recomp',t:'Recomposição'},{v:'manter',t:'Manutenção'}];
+const NUTRI_ATIVIDADE = [{v:'',t:'—'},{v:'sedentario',t:'Sedentário'},{v:'leve',t:'Leve'},{v:'moderado',t:'Moderado'},{v:'intenso',t:'Intenso'}];
 const nutriMetaFields = [
+  {k:'sexo', t:'sel', l:'Sexo', meia:1, opts:[{v:'',t:'—'},{v:'M',t:'Masculino'},{v:'F',t:'Feminino'}]},
+  {k:'idade', t:'num', l:'Idade', meia:1},
+  {k:'altura', t:'num', l:'Altura (cm)', meia:1},
+  {k:'peso', t:'num', l:'Peso atual (kg)', meia:1},
+  {k:'objetivo', t:'sel', l:'Objetivo', meia:1, opts: NUTRI_OBJETIVOS},
+  {k:'meta_peso_semana', t:'num', l:'Meta semanal de peso (kg)', meia:1, ph:'ex.: 0,3'},
+  {k:'nivel_atividade', t:'sel', l:'Nível de atividade', opts: NUTRI_ATIVIDADE},
   {k:'meta_cal', t:'num', l:'Calorias (kcal/dia)', meia:1, ph:'ex.: 2200'},
   {k:'meta_prot', t:'num', l:'Proteína (g/dia)', meia:1, ph:'ex.: 160'},
   {k:'meta_carb', t:'num', l:'Carboidrato (g/dia)', meia:1, ph:'ex.: 220'},
@@ -3099,23 +3119,27 @@ function alimentacaoTabHTML() {
   return nutriDiaHTML()
     + nutriChecklistHTML()
     + refeicoesListaHTML()
-    + '<details class="help"><summary>🍎 Metas diárias</summary>'
-    + '<p class="small muted" style="margin:6px 0 10px">Defina suas metas manualmente (sem fórmulas). Elas são a base das barras de progresso do dia.</p>'
-    + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
-    + '<button class="btn primary" data-act="nutri-metas-save">Salvar metas</button></details>'
+    + comprasListaHTML()
+    + nutriMediasHTML()
+    + '<details class="help"><summary>🍎 Perfil &amp; metas</summary>'
+    + '<p class="small muted" style="margin:6px 0 10px">Perfil e metas manuais (sem fórmulas automáticas). As metas de macro são a base das barras de progresso do dia.</p>'
+    + '<div id="nutri-metas">' + formHTML(nutriMetaFields, p) + '</div>'
+    + '<button class="btn primary" data-act="nutri-metas-save">Salvar perfil e metas</button></details>'
     + alimentosListaHTML();
 }
 act('nutri-metas-save', () => {
   const v = lerForm($('#nutri-metas'), nutriMetaFields); if (!v) return;
   const p = nutricaoPerfil(), me = usuarioAtual();
   const id = p ? p.id : (me ? detUUID('nutri-perfil:' + me.id) : uid()); // 1 perfil por usuário (id estável)
-  dbUpsert('nutricao_perfil', { id, meta_cal:v.meta_cal||null, meta_prot:v.meta_prot||null, meta_carb:v.meta_carb||null, meta_gord:v.meta_gord||null });
-  toast('Metas salvas ✓', {icone:'🍎'}); render();
+  dbUpsert('nutricao_perfil', { id, ...v });
+  toast('Perfil e metas salvos ✓', {icone:'🍎'}); render();
 });
 
 /* ---- Banco de alimentos (CRUD) ---- */
 const ALIM_BASE = [{v:'100g', t:'por 100 g'}, {v:'unidade', t:'por 1 unidade'}];
 const alimBaseLabel = b => b === 'unidade' ? 'por unidade' : 'por 100g';
+const ALIM_CATS = [['proteina','🥩 Proteína'],['carboidrato','🍚 Carboidrato'],['fruta','🍎 Fruta'],['verdura','🥦 Verdura/Legume'],['geral','🛒 Geral']];
+const catLabel = v => (ALIM_CATS.find(c => c[0] === v) || ['','🛒 Geral'])[1];
 const alimFields = () => [
   {k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Arroz cozido'},
   {k:'base', t:'seg', l:'Porção de referência', def:'100g', opts: ALIM_BASE},
@@ -3124,11 +3148,12 @@ const alimFields = () => [
   {k:'carb', t:'num', l:'Carboidrato (g)', meia:1},
   {k:'gord', t:'num', l:'Gordura (g)', meia:1},
   {k:'gramas_unidade', t:'num', l:'Peso de 1 unidade (g) — opcional', dica:'usado p/ converter quando a porção é por unidade'},
+  {k:'categoria', t:'sel', l:'Categoria (lista de compras)', def:'geral', opts: ALIM_CATS.map(([v,t]) => ({v,t}))},
   {k:'favorito', t:'chk', l:'⭐ Favorito (aparece no topo)'}
 ];
 const normAlim = v => ({ nome:(v.nome||'').trim(), base: v.base === 'unidade' ? 'unidade' : '100g',
   cal:v.cal||null, prot:v.prot||null, carb:v.carb||null, gord:v.gord||null,
-  gramas_unidade:v.gramas_unidade||null, favorito: !!v.favorito });
+  gramas_unidade:v.gramas_unidade||null, categoria: v.categoria||'geral', favorito: !!v.favorito });
 function alimentosListaHTML() {
   const as = ordenar(T('alimentos'), a => (a.favorito ? '0' : '1') + norm(a.nome));
   const item = a => {
@@ -3307,6 +3332,79 @@ act('refed-save', () => { capturarRefed(); const R = window._refed;
 act('refed-del', el => confirmBox('Excluir esta refeição salva? (os registros já lançados no dia continuam)', () => {
   const bkp = byId('nutricao_refeicoes', el.dataset.id); dbDelete('nutricao_refeicoes', el.dataset.id); window._refed = null; closeModal(true); render();
   toast('Refeição excluída.', { undo: () => { if (bkp) dbUpsert('nutricao_refeicoes', bkp); render(); } }); }, {perigo:1, sim:'Excluir'}));
+
+/* ---- Lista de compras (gerada das refeições; guardada em configuracoes) ---- */
+const PERIODOS = [['semanal','Semanal'],['quinzenal','Quinzenal'],['mensal','Mensal']];
+const comprasState = () => getCfg('nutri_compras', { periodo:'semanal', itens:[] }) || { periodo:'semanal', itens:[] };
+function comprasListaHTML() {
+  const st = comprasState(), itens = st.itens || [];
+  let body;
+  if (!itens.length) body = '<div class="empty" style="padding:18px"><span class="em">🛒</span>Gere a lista a partir das suas refeições (escolha quantas vezes vai comer cada uma no período).</div>';
+  else {
+    const porCat = {}; itens.forEach((it, idx) => { (porCat[it.categoria] = porCat[it.categoria] || []).push({ ...it, idx }); });
+    body = ALIM_CATS.map(c => c[0]).filter(c => porCat[c]).map(c =>
+      '<div class="sec-head" style="padding:8px 4px 2px">'+catLabel(c)+'</div>'
+      + porCat[c].map(it => '<label class="checkline" style="padding:6px 4px"><input type="checkbox" data-act="compras-check" data-i="'+it.idx+'"'+(it.comprado?' checked':'')+'> '
+        + '<span class="grow"'+(it.comprado?' style="text-decoration:line-through;opacity:.55"':'')+'>'+esc(it.nome)+' <span class="muted small">'+fmtNum(it.qtd)+(it.unidade==='un'?' un':' g')+'</span></span></label>').join('')
+    ).join('');
+  }
+  const comprados = itens.filter(i => i.comprado).length;
+  return '<div class="card"><div class="card-h"><div class="h2">🛒 Lista de compras'+(itens.length?' <span class="muted small">('+comprados+'/'+itens.length+')</span>':'')+'</div>'
+    + '<div class="row" style="gap:6px"><button class="btn small primary" data-act="compras-gerar">Gerar</button>'+(itens.length?'<button class="btn small" data-act="compras-limpar">Limpar</button>':'')+'</div></div>'
+    + (itens.length ? '<div class="tiny muted" style="margin:-4px 0 8px">Período: '+(PERIODOS.find(p=>p[0]===st.periodo)||['','Semanal'])[1]+'</div>' : '')
+    + body + '</div>';
+}
+act('compras-gerar', () => {
+  const rs = ordenar(T('nutricao_refeicoes'), r => (r.favorito?'0':'1') + norm(r.nome));
+  if (!rs.length) { toast('Crie refeições primeiro para gerar a lista.', {icone:'🍱'}); return; }
+  const cur = comprasState();
+  modal('<div class="bx-h"><div class="h2">Gerar lista de compras</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Período</label><select class="select" id="compras-periodo">'+PERIODOS.map(([v,l]) => '<option value="'+v+'"'+(v===cur.periodo?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<p class="small muted" style="margin:4px 0">Quantas vezes vai comer cada refeição no período:</p>'
+    + '<div class="list" style="max-height:42vh;overflow:auto">'+rs.map(r => '<div class="item"><div class="grow"><div class="ttl">'+esc(r.nome)+' <span class="muted small">'+refTipoLabel(r.tipo)+'</span></div><div class="sub">'+(r.itens||[]).length+' itens</div></div><input class="input" type="number" min="0" inputmode="numeric" value="0" data-compras-ref="'+r.id+'" style="width:64px"></div>').join('')+'</div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="compras-gerar-confirm">Gerar lista</button></div>');
+});
+act('compras-gerar-confirm', () => {
+  const periodo = ($('#compras-periodo')||{}).value || 'semanal';
+  const agg = {};
+  $$('[data-compras-ref]').forEach(inp => {
+    const vezes = Number(inp.value) || 0; if (vezes <= 0) return;
+    const r = byId('nutricao_refeicoes', inp.dataset.comprasRef); if (!r) return;
+    for (const it of (r.itens || [])) {
+      const ali = it.alimento_id ? byId('alimentos', it.alimento_id) : null;
+      const cat = ali ? (ali.categoria || 'geral') : 'geral';
+      const key = (it.alimento_id || norm(it.nome)) + '|' + (it.unidade || '');
+      if (!agg[key]) agg[key] = { nome: it.nome, categoria: cat, qtd: 0, unidade: it.unidade || '', comprado: false };
+      agg[key].qtd += (Number(it.qtd) || 0) * vezes;
+    }
+  });
+  const itens = Object.values(agg).map(i => ({ ...i, qtd: round1(i.qtd) }));
+  if (!itens.length) { toast('Marque ao menos 1 refeição com vezes > 0.', {icone:'✍️'}); return; }
+  setCfg('nutri_compras', { periodo, itens, gerado_em: nowISO() });
+  closeModal(true); render(); toast('Lista gerada ✓ ('+itens.length+' itens)', {icone:'🛒'});
+});
+act('compras-check', el => { const st = comprasState(), i = Number(el.dataset.i); if (st.itens && st.itens[i]) { st.itens[i].comprado = !st.itens[i].comprado; setCfg('nutri_compras', st); render(); } });
+act('compras-limpar', () => confirmBox('Limpar a lista de compras?', () => { setCfg('nutri_compras', { periodo: comprasState().periodo, itens: [] }); render(); }, {sim:'Limpar'}));
+
+/* ---- Relatórios simples (médias, % na meta, kcal 14 dias) ---- */
+function nutriMediasHTML() {
+  const dias14 = []; for (let i = 0; i < 14; i++) dias14.push(addDias(hoje(), -i));
+  const porDia = d => somaMacros(T('nutricao_registros').filter(r => r.data === d));
+  const com7 = dias14.slice(0, 7).map(porDia).filter(t => t.cal > 0);
+  const med = k => com7.length ? com7.reduce((s, t) => s + t[k], 0) / com7.length : 0;
+  const p = nutricaoPerfil() || {};
+  let comReg = 0, naMeta = 0;
+  for (const d of dias14) { const t = porDia(d); if (t.cal > 0) { comReg++; if (p.meta_cal && t.cal <= Number(p.meta_cal)) naMeta++; } }
+  const pctMeta = comReg ? Math.round(naMeta / comReg * 100) : 0;
+  const barras = dias14.slice().reverse().map(d => ({ x: fmtDataCurta(d), y: Math.round(porDia(d).cal) }));
+  return '<details class="help"><summary>📈 Relatórios</summary>'
+    + '<div class="grid2" style="margin:8px 0"><div class="kpi"><div class="l">média kcal/dia (7d)</div><div class="v">'+fmtNum(med('cal'),0)+'</div></div>'
+    + '<div class="kpi"><div class="l">média proteína/dia (7d)</div><div class="v">'+fmtNum(med('prot'),0)+' g</div></div></div>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:8px"><span class="badge">carbo méd '+fmtNum(med('carb'),0)+'g</span><span class="badge">gordura méd '+fmtNum(med('gord'),0)+'g</span>'
+    + (p.meta_cal ? '<span class="badge ok">'+pctMeta+'% dias dentro da meta de kcal (14d)</span>' : '<span class="tiny muted">defina a meta de kcal para ver % na dieta</span>')+'</div>'
+    + '<div class="h3" style="margin:6px 0 2px">Calorias — 14 dias</div>' + svgBarras(barras, { fmt: v => v })
+    + '</details>';
+}
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
