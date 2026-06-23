@@ -274,7 +274,14 @@ create table if not exists nutricao_registros (
 create table if not exists nutricao_dia (
   data date primary key,
   chk_prot boolean default false, chk_agua boolean default false,
-  chk_treino boolean default false, chk_cal boolean default false);`;
+  chk_treino boolean default false, chk_cal boolean default false);
+
+create table if not exists nutricao_refeicoes (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null, tipo text default 'outro', horario text,
+  favorito boolean default false,
+  itens jsonb default '[]',
+  criado_em timestamptz default now());`;
 
 /* ---- Cliente REST do Supabase (erros amigáveis em pt-BR) ---- */
 async function sb(metodo, caminho, corpo, headersExtra) {
@@ -3091,6 +3098,7 @@ function alimentacaoTabHTML() {
   const p = nutricaoPerfil() || {};
   return nutriDiaHTML()
     + nutriChecklistHTML()
+    + refeicoesListaHTML()
     + '<details class="help"><summary>🍎 Metas diárias</summary>'
     + '<p class="small muted" style="margin:6px 0 10px">Defina suas metas manualmente (sem fórmulas). Elas são a base das barras de progresso do dia.</p>'
     + '<div id="nutri-metas">' + formHTML(nutriMetaFields, { meta_cal:p.meta_cal, meta_prot:p.meta_prot, meta_carb:p.meta_carb, meta_gord:p.meta_gord }) + '</div>'
@@ -3183,13 +3191,16 @@ function registrarNutri(r) { dbUpsert('nutricao_registros', { data: hoje(), alim
 act('nutri-del', el => { const r = byId('nutricao_registros', el.dataset.id); if (!r) return; const bkp = {...r};
   dbDelete('nutricao_registros', r.id); render();
   toast('Registro removido.', { undo: () => { dbUpsert('nutricao_registros', bkp); render(); } }); });
-act('nutri-add', () => {
-  modal('<div class="bx-h"><div class="h2">Registrar alimento</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+let _foodTarget = 'dia'; // 'dia' = registra no dia; 'refeicao' = adiciona à refeição em edição
+function abrirPickerAlimento(target) {
+  _foodTarget = target || 'dia';
+  modal('<div class="bx-h"><div class="h2">'+(_foodTarget==='refeicao'?'Adicionar à refeição':'Registrar alimento')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
     + '<input class="input" id="nutri-busca" data-inp="nutri-busca" placeholder="buscar alimento…" autocomplete="off">'
     + '<div id="nutri-add-lista" class="list" style="max-height:46vh;overflow:auto;margin-top:8px"></div>'
-    + '<div class="bx-foot"><button class="btn" data-act="nutri-min">⚡ Modo mínimo (kcal + proteína)</button></div>',
+    + (_foodTarget==='dia' ? '<div class="bx-foot"><button class="btn" data-act="nutri-min">⚡ Modo mínimo (kcal + proteína)</button></div>' : ''),
     { onMount: () => nutriAddListaDraw('') });
-});
+}
+act('nutri-add', () => abrirPickerAlimento('dia'));
 function nutriAddListaDraw(q) {
   const lista = $('#nutri-add-lista'); if (!lista) return;
   const as = ordenar(T('alimentos').filter(a => !q || norm(a.nome).includes(norm(q))), a => (a.favorito?'0':'1') + norm(a.nome)).slice(0, 50);
@@ -3212,7 +3223,9 @@ act('nutri-add-confirm', el => {
   const a = byId('alimentos', el.dataset.id); const qtd = Number(($('#nutri-qtd')||{}).value) || 0;
   if (!a || qtd <= 0) { toast('Informe a quantidade.', {icone:'✍️'}); return; }
   const m = calcMacros(a, qtd);
-  registrarNutri({ nome:a.nome, alimento_id:a.id, qtd, unidade: a.base==='unidade'?'un':'g', cal:Math.round(m.cal), prot:round1(m.prot), carb:round1(m.carb), gord:round1(m.gord) });
+  const item = { nome:a.nome, alimento_id:a.id, qtd, unidade: a.base==='unidade'?'un':'g', cal:Math.round(m.cal), prot:round1(m.prot), carb:round1(m.carb), gord:round1(m.gord) };
+  if (_foodTarget === 'refeicao' && window._refed) { window._refed.itens.push(item); closeModal(true); abrirRefeicao(); return; } // volta ao editor da refeição
+  registrarNutri(item);
   closeModal(true); render(); toast('Adicionado ✓', {icone:'🍽️'});
 });
 act('nutri-min', () => { closeModal(true); editModal({ titulo:'Modo mínimo', salvar:'Adicionar',
@@ -3244,6 +3257,56 @@ function nutriChecklistHTML() {
     + (rec > streak ? '<div class="tiny muted" style="margin-top:8px">Recorde: '+rec+' dias seguidos</div>' : '') + '</div>';
 }
 act('nutri-check', el => { const k = el.dataset.k; const d = nutricaoDiaRow(hoje()) || {}; setNutriDia({ [k]: !d[k] }); render(); });
+
+/* ---- Refeições salvas (planejamento) + registrar no dia em 1 toque ---- */
+const REF_TIPOS = [['cafe','☕ Café'],['almoco','🍛 Almoço'],['jantar','🍽️ Jantar'],['lanche','🍎 Lanche'],['outro','• Outro']];
+const refTipoLabel = v => (REF_TIPOS.find(t => t[0] === v) || ['','• Outro'])[1];
+function refeicoesListaHTML() {
+  const rs = ordenar(T('nutricao_refeicoes'), r => (r.favorito ? '0' : '1') + norm(r.nome));
+  const linha = r => { const tot = somaMacros(r.itens || []);
+    return '<div class="item"><button class="iconbtn" data-act="refeicao-fav" data-id="'+r.id+'" title="favorita">'+(r.favorito?'⭐':'☆')+'</button>'
+      + '<div class="grow" data-act="refeicao-edit" data-id="'+r.id+'"><div class="ttl">'+esc(r.nome)+' <span class="muted small">'+refTipoLabel(r.tipo)+(r.horario?' · '+esc(r.horario):'')+'</span></div>'
+      + '<div class="sub">'+(r.itens||[]).length+' itens · ⚡'+Math.round(tot.cal)+' kcal · P'+round1(tot.prot)+' C'+round1(tot.carb)+' G'+round1(tot.gord)+'</div></div>'
+      + '<button class="btn small primary" data-act="refeicao-log" data-id="'+r.id+'">+ hoje</button></div>'; };
+  return '<div class="card pad0"><div class="card-h" style="padding:12px 14px 4px"><div class="h2">🍱 Minhas refeições</div><button class="btn small primary" data-act="refeicao-nova">+ Refeição</button></div>'
+    + (rs.length ? '<div class="list" style="padding:0 10px 8px">'+rs.map(linha).join('')+'</div>'
+        : '<div class="empty" style="padding:18px"><span class="em">🍱</span>Monte refeições prontas (ex.: "Café padrão") e registre o dia em 1 toque.</div>')
+    + '</div>';
+}
+act('refeicao-log', el => { const r = byId('nutricao_refeicoes', el.dataset.id); if (!r) return;
+  for (const it of (r.itens || [])) registrarNutri({ nome:it.nome, alimento_id:it.alimento_id||null, qtd:it.qtd, unidade:it.unidade, cal:it.cal, prot:it.prot, carb:it.carb, gord:it.gord });
+  render(); toast('Refeição registrada ✓ (' + (r.itens||[]).length + ' itens)', {icone:'🍱'}); });
+act('refeicao-fav', el => { const r = byId('nutricao_refeicoes', el.dataset.id); if (r) { dbPatch('nutricao_refeicoes', r.id, { favorito: !r.favorito }); render(); } });
+act('refeicao-nova', () => { window._refed = null; abrirRefeicao(); });
+act('refeicao-edit', el => abrirRefeicao(el.dataset.id));
+function capturarRefed() { const R = window._refed; if (!R) return;
+  const n = $('#refed-nome'), t = $('#refed-tipo'), h = $('#refed-hora'), f = $('#refed-fav');
+  if (n) R.nome = n.value; if (t) R.tipo = t.value; if (h) R.horario = h.value; if (f) R.favorito = f.checked; }
+function abrirRefeicao(id) {
+  if (id !== undefined) { const r = byId('nutricao_refeicoes', id);
+    window._refed = r ? { id:r.id, nome:r.nome, tipo:r.tipo||'outro', horario:r.horario||'', favorito:!!r.favorito, itens:(r.itens||[]).map(x => ({...x})) } : null; }
+  if (!window._refed) window._refed = { id:null, nome:'', tipo:'almoco', horario:'', favorito:false, itens:[] };
+  const R = window._refed, tot = somaMacros(R.itens);
+  modal('<div class="bx-h"><div class="h2">'+(R.id?'Editar refeição':'Nova refeição')+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<div class="field"><label>Nome</label><input class="input" id="refed-nome" value="'+esc(R.nome||'')+'" placeholder="ex.: Café padrão"></div>'
+    + '<div class="frow"><div class="field"><label>Tipo</label><select class="select" id="refed-tipo">'+REF_TIPOS.map(([v,l]) => '<option value="'+v+'"'+(v===R.tipo?' selected':'')+'>'+l+'</option>').join('')+'</select></div>'
+    + '<div class="field"><label>Horário sugerido</label><input class="input" id="refed-hora" type="time" value="'+esc(R.horario||'')+'"></div></div>'
+    + '<label class="checkline"><input type="checkbox" id="refed-fav"'+(R.favorito?' checked':'')+'> ⭐ Favorita</label>'
+    + '<div class="sec-head">Itens · ⚡'+Math.round(tot.cal)+' kcal · P'+round1(tot.prot)+' C'+round1(tot.carb)+' G'+round1(tot.gord)+'</div>'
+    + '<div class="list">'+(R.itens.length ? R.itens.map((it,i) => '<div class="item"><div class="grow"><div class="ttl">'+esc(it.nome)+' <span class="muted small">'+fmtNum(it.qtd)+(it.unidade==='un'?' un':' g')+'</span></div><div class="sub">⚡'+fmtNum(it.cal||0)+' · P'+fmtNum(it.prot||0)+'</div></div><button class="btn small danger" data-act="refed-rm" data-i="'+i+'">✕</button></div>').join('') : '<div class="tiny muted" style="padding:6px">Sem itens. Adicione abaixo.</div>')+'</div>'
+    + '<div class="row" style="margin-top:6px"><button class="btn" data-act="refed-add-food">➕ Adicionar alimento</button></div>'
+    + '<div class="bx-foot">'+(R.id?'<button class="btn danger" data-act="refed-del" data-id="'+R.id+'">Excluir</button><span class="sp"></span>':'')
+    + '<button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary" data-act="refed-save">Salvar refeição</button></div>');
+}
+act('refed-add-food', () => { capturarRefed(); abrirPickerAlimento('refeicao'); });
+act('refed-rm', el => { capturarRefed(); window._refed.itens.splice(Number(el.dataset.i), 1); abrirRefeicao(); });
+act('refed-save', () => { capturarRefed(); const R = window._refed;
+  if (!(R.nome||'').trim()) { toast('Dê um nome à refeição.', {icone:'✍️'}); return; }
+  dbUpsert('nutricao_refeicoes', { id: R.id || undefined, nome:R.nome.trim(), tipo:R.tipo||'outro', horario:R.horario||null, favorito:!!R.favorito, itens:R.itens });
+  window._refed = null; closeModal(true); render(); toast('Refeição salva ✓', {icone:'🍱'}); });
+act('refed-del', el => confirmBox('Excluir esta refeição salva? (os registros já lançados no dia continuam)', () => {
+  const bkp = byId('nutricao_refeicoes', el.dataset.id); dbDelete('nutricao_refeicoes', el.dataset.id); window._refed = null; closeModal(true); render();
+  toast('Refeição excluída.', { undo: () => { if (bkp) dbUpsert('nutricao_refeicoes', bkp); render(); } }); }, {perigo:1, sim:'Excluir'}));
 reg('treino', {
   titulo: 'Treino',
   render: (params) => {
