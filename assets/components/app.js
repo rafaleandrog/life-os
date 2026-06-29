@@ -721,8 +721,9 @@ BootHooks.push(aplicarSidebar);
 // ---- Instalação PWA (Android) — banner discreto via beforeinstallprompt ----
 let _pwaPrompt = null;
 const pwaInstalado = () => matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const pwaPodeInstalar = () => !pwaInstalado() && matchMedia('(max-width:899px)').matches; // só mobile; desktop não
 function mostrarBotaoInstalar(v) { const b = document.getElementById('install-pwa'); if (b) b.hidden = !v; }
-window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); _pwaPrompt = e; if (!pwaInstalado()) mostrarBotaoInstalar(true); });
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); _pwaPrompt = e; if (pwaPodeInstalar()) mostrarBotaoInstalar(true); });
 window.addEventListener('appinstalled', () => { _pwaPrompt = null; mostrarBotaoInstalar(false); if (window.toast) toast('App instalado ✓', {icone:'📲'}); });
 act('pwa-instalar', async () => {
   if (!_pwaPrompt) { mostrarBotaoInstalar(false); return; }
@@ -1453,7 +1454,9 @@ function parseNL(txt) {
   let s = ' ' + String(txt || '') + ' ';
   const toks = [];
   const eat = (re, fn) => { const m = s.match(re); if (m) { s = s.replace(re, ' '); fn(m); } return !!m; };
-  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoDesconhecido:null, estimativa_min:null, etiquetas:[], etiquetasNovas:[], tokens:toks };
+  const out = { titulo:'', vencimento:null, hora:null, recorrencia:null, prioridade:4, projeto_id:null, projetoDesconhecido:null, estimativa_min:null, etiquetas:[], etiquetasNovas:[], links:[], tokens:toks };
+  // URL → vai para o campo de link da tarefa e some do título (antes de #/@ p/ não comer partes da url)
+  eat(/\bhttps?:\/\/[^\s]+/i, m => { const u = m[0]; out.links.push({ titulo: u, url: u }); toks.push({tipo:'link', label:'🔗 link', raw:u}); });
   // #projeto — só VINCULA a projeto existente (criar projeto é só pelo formulário, com área obrigatória)
   eat(/#([\p{L}\d_-]+)/u, m => {
     const nome = m[1];
@@ -1565,7 +1568,7 @@ function quickAddHTML(ctx) {
 }
 act('qa-parse', el => {
   const p = parseNL(el.value);
-  const cls = {data:'dt', hora:'hr', dur:'dur', rec:'rec', proj:'proj', tag:'tag', pri:'pri'};
+  const cls = {data:'dt', hora:'hr', dur:'dur', rec:'rec', proj:'proj', tag:'tag', pri:'pri', link:'tag'};
   $('#qa-toks').innerHTML = p.tokens.map(t =>
     '<span class="tok '+(cls[t.tipo]||'')+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
   acAtualizar(el);
@@ -1651,7 +1654,7 @@ function criarTarefaParseada(p, ctx) {
     hora: p.hora, prioridade: p.prioridade,
     estimativa_min: (p.estimativa_min != null ? p.estimativa_min : 5), // toda tarefa tem duração; padrão 5min
     recorrencia: p.recorrencia, subtarefas: [], etiquetas: p.etiquetas,
-    comentarios: [], links: [], ordem: Date.now() % 100000, origem: ctx.origem || null,
+    comentarios: [], links: p.links || [], ordem: Date.now() % 100000, origem: ctx.origem || null,
     abandonada: false, concluida: false, concluida_em: null, bloco_id: bloco_id || null
   });
   toast('Tarefa criada ✓', {icone:'✅', undo: () => { dbDelete('tarefas', t.id); render(); }});
@@ -2741,7 +2744,7 @@ reg('hoje', {
       + '<button class="btn" data-act="qa-leitura">📖 Leitura</button>'
       + '<button class="btn" data-act="qa-gasto">💸 Gasto</button></div>';
     html += '<div class="grid2"><div>'
-      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ tarefa para hoje… (ex.: ligar médico 15h p2)'})+'</div>';
+      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ nova tarefa… (ex.: ligar médico hoje 15h d30 p2)'})+'</div>';
     if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas — decida o destino</span></div><div class="list" style="padding:0 10px 8px">'
       + atrasadas.slice(0, 6).map(t => taskItemHTML(t, {rollover:true})).join('')
       + (atrasadas.length > 6 ? '<div class="tiny muted center" style="padding:6px">+'+(atrasadas.length-6)+' na visão Tarefas</div>' : '') + '</div></div>';
