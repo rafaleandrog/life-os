@@ -1936,7 +1936,7 @@ function vistaHojeHTML() {
   const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
   const feitasHoje = T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === hoje());
   let html = '<div class="h1">☀️ Hoje <span class="muted" style="font-weight:400;font-size:14px">'+fmtData(hoje(),{semHoje:1})+'</span></div>';
-  html += '<div class="card">'+quickAddHTML({})+'</div>';
+  html += '<div class="card">'+quickAddHTML({def_venc: hoje()})+'</div>';
   if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px"><span class="err">⏰ Atrasadas ('+atrasadas.length+')</span></div><div class="list" style="padding:0 10px 8px">'
     + atrasadas.map(t => taskItemHTML(t, {rollover:true})).join('') + '</div></div>';
   html += '<div class="card pad0"><div class="list" style="padding:4px 10px">'
@@ -2744,7 +2744,7 @@ reg('hoje', {
       + '<button class="btn" data-act="qa-leitura">📖 Leitura</button>'
       + '<button class="btn" data-act="qa-gasto">💸 Gasto</button></div>';
     html += '<div class="grid2"><div>'
-      + '<div class="card">'+quickAddHTML({ph:'+ nova tarefa… (ex.: ligar médico hoje 15h d30 p2)'})+'</div>';
+      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ nova tarefa… (ex.: ligar médico hoje 15h d30 p2)'})+'</div>';
     if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas — decida o destino</span></div><div class="list" style="padding:0 10px 8px">'
       + atrasadas.slice(0, 6).map(t => taskItemHTML(t, {rollover:true})).join('')
       + (atrasadas.length > 6 ? '<div class="tiny muted center" style="padding:6px">+'+(atrasadas.length-6)+' na visão Tarefas</div>' : '') + '</div></div>';
