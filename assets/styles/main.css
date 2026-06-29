@@ -19,7 +19,9 @@
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--font);font-size:15px;line-height:1.45;
-  -webkit-font-smoothing:antialiased;overscroll-behavior-y:none}
+  -webkit-font-smoothing:antialiased;overscroll-behavior:none;overflow-x:clip;-webkit-tap-highlight-color:transparent}
+/* feel-de-app no mobile: sem realce azul no toque e sem seleção/menu de texto nos controles (texto comum continua selecionável) */
+.navit,.tb,.btn,.chip,.badge,.iconbtn,.seg-b,.bloco-head,.fab,.fab-desktop{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 a{color:var(--acc);text-decoration:none}
 ::selection{background:var(--acc-soft)}
@@ -48,7 +50,8 @@ a{color:var(--acc);text-decoration:none}
   #sidebar{display:none}
   #main{margin-left:0;padding:14px 14px 130px;max-width:none}
   #topbar{display:flex;position:sticky;top:0;z-index:30;background:rgba(14,15,19,.92);backdrop-filter:blur(10px);
-    margin:-14px -14px 10px;padding:13px 16px;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
+    margin:calc(-14px - env(safe-area-inset-top)) -14px 10px;padding:calc(13px + env(safe-area-inset-top)) 16px 13px;
+    align-items:center;gap:10px;border-bottom:1px solid var(--border)}
   #topbar .t{font-weight:700;font-size:17px;flex:1}
   #tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;height:calc(var(--tabbar-h) + env(safe-area-inset-bottom));
     padding-bottom:env(safe-area-inset-bottom);background:rgba(22,24,31,.97);backdrop-filter:blur(12px);
@@ -317,7 +320,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:12px 0}
 #install-pwa{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;z-index:47;background:var(--acc);color:#fff;border:none;border-radius:999px;padding:10px 18px;font-weight:700;font-size:13px;cursor:pointer;box-shadow:0 6px 20px rgba(124,92,252,.5)}
 #install-pwa[hidden]{display:none}
 #install-pwa:active{transform:translateX(-50%) scale(.96)}
-@media(min-width:900px){#install-pwa{bottom:22px}}
+@media(min-width:900px){#install-pwa{display:none!important}}
 @media(min-width:900px){
   #sidebar{transition:transform .18s ease}
   body.sb-collapsed #sidebar{transform:translateX(-100%)}
