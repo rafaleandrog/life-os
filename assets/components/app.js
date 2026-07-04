@@ -1686,6 +1686,8 @@ function taskItemHTML(t, o={}) {
     + '<div class="grow" data-act="task-open" data-id="'+t.id+'"><div class="ttl">'+esc(t.titulo)+salvando+'</div>'
     + (sub ? '<div class="sub">'+sub+'</div>' : '') + '</div>'
     + (o.rollover ? '<button class="btn small danger" data-act="rollover-menu" data-id="'+t.id+'">decidir</button>' : '')
+    + (o.planAdd ? '<button class="btn small primary" data-act="plan-add" data-id="'+t.id+'" title="enviar ao plano do dia">➕ plano</button>' : '')
+    + (o.planRemove ? '<button class="iconbtn" data-act="plan-remove" data-id="'+t.id+'" title="tirar do plano do dia">➖</button>' : '')
     + (o.blocoMenu ? '<button class="btn small" data-act="task-bloco-menu" data-id="'+t.id+'" title="mover/tirar do dia">⋯</button>' : '')
     + '</div>';
 }
@@ -2363,8 +2365,11 @@ const horaDe = iso => { const d = new Date(iso); return pad2(d.getHours()) + ':'
 function capacidadeDia(data) {
   data = data || hoje();
   const janela = Math.max(1, Number(getCfg('janela_util', 8))) * 60;
-  // soma das durações estimadas de TODAS as tarefas alocadas para o dia (sem estimativa = 0)
-  const min = sum(T('tarefas').filter(t => !t.abandonada && t.vencimento === data).map(estMin));
+  // se HÁ plano do dia, capacidade = soma das durações das tarefas NO plano (o que foi alocado);
+  // sem plano, cai para todas as tarefas com vencimento no dia. Nunca bloqueia — só avisa.
+  const plano = data === hoje() ? planoDia() : null;
+  const base = plano ? planoTarefas() : T('tarefas').filter(t => !t.abandonada && t.vencimento === data);
+  const min = sum(base.map(estMin));
   return { min, janela, pct: min / janela };
 }
 function capacidadeHTML(data) {
@@ -2437,36 +2442,62 @@ BootHooks.push(() => { if (FLAGS.onboarded) { try { limparBlocosVencidos(); } ca
 const hhmm = ms => { const d = new Date(ms); return pad2(d.getHours())+':'+pad2(d.getMinutes()); };
 function corDoBloco(b) { return b.area_id ? corArea(b.area_id) : 'var(--acc)'; }
 
-/* ---- tela Hoje: tarefas agrupadas por bloco + grupo "Sem bloco" (Etapa C) ---- */
-/* Lista do dia — na ordem definida no “Planejar o dia” (rank do projeto → p1-p4 → duração).
-   O card é alvo de drop para tarefas sem data (ver mount da tela Hoje). */
-function hojeTarefasHTML() {
-  const doDia = T('tarefas').filter(t => !t.abandonada && t.vencimento === hoje());
-  const plano = planoDia();
-  const ordenaPlano = ts => {
-    if (!plano) return ordenar(ts, ordTarefa);
-    const idx = id => { const i = plano.ordem.indexOf(id); return i < 0 ? 9999 : i; };
-    return [...ts].sort((a, b) => idx(a.id) - idx(b.id) || (ordTarefa(a) < ordTarefa(b) ? -1 : ordTarefa(a) > ordTarefa(b) ? 1 : 0));
-  };
-  const pend = ordenaPlano(doDia.filter(t => !t.concluida));
-  const feitas = doDia.filter(t => t.concluida);
-  let html = '<div class="card pad0 hoje-drop"><div class="sec-head" style="padding:10px 14px 2px">🗓️ Tarefas de hoje'
-    + (plano ? ' <span class="badge acc">planejado</span>' : '') + '</div>'
+/* ════════ TELA HOJE — 4 seções ════════
+   1) Plano do dia (na ordem montada, dentro do limite de 8h)
+   2) Hoje, fora do plano (venc. hoje, não entrou: projeto não escolhido ou passou de 8h)
+   3) Atrasadas (venc. < hoje) — decidir destino ou puxar ao plano
+   4) Restante da semana (amanhã até domingo) — puxar ao plano
+   De qualquer seção 2/3/4 dá para "➕ plano" (enviar ao plano do dia, mesmo estourando 8h → só avisa). */
+/* ordenação do dia: prioridade da tarefa (P1→P4) → menor duração → projeto (agrupa/desempata) → título */
+const projNomeDe = t => { const p = t.projeto_id && byId('projetos', t.projeto_id); return p ? norm(p.nome) : '￿'; };
+const ordDia = (a, b) => (a.prioridade||4) - (b.prioridade||4) || estMin(a) - estMin(b)
+  || projNomeDe(a).localeCompare(projNomeDe(b)) || String(a.titulo||'').localeCompare(String(b.titulo||''));
+/* tarefas do plano do dia, na ordem salva (só as existentes / não abandonadas) */
+function planoTarefas() { const p = planoDia(); return p ? p.ordem.map(id => byId('tarefas', id)).filter(t => t && !t.abandonada) : []; }
+const idsNoPlano = () => new Set((planoDia() || {}).ordem || []);
+
+/* Seção 1 — Plano do dia. Cada item pode ser tirado do plano (➖). */
+function hojePlanoHTML() {
+  const janela = Math.max(1, Number(getCfg('janela_util', 8))) * 60;
+  const p = planoDia();
+  if (!p) return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">🗓️ Plano do dia</div>'
+    + '<div class="empty" style="padding:18px"><span class="em">🌤️</span>Dia ainda não planejado. Toque em <b>Planejar o dia</b> para montar a lista por prioridade dentro do limite de '+fmtMin(janela)+'.</div></div>';
+  const ts = planoTarefas();
+  const pend = ts.filter(t => !t.concluida), feitas = ts.filter(t => t.concluida);
+  const totMin = sum(pend.map(estMin)), over = totMin > janela;
+  return '<div class="card pad0"><div class="sec-head row" style="padding:10px 14px 2px">🗓️ Plano do dia <span class="badge acc">'+pend.length+'</span>'
+    + '<span class="sp"></span><span class="tiny '+(over?'err':'muted')+'" style="padding-right:12px">⏳ '+fmtMin(totMin)+' / '+fmtMin(janela)+(over?' ⚠️':'')+'</span></div>'
     + '<div class="list" style="padding:0 10px 8px">'
-    + (pend.map(t => taskItemHTML(t)).join('')
-       || '<div class="empty" style="padding:18px"><span class="em">🌤️</span>Nada para hoje. Use “Planejar o dia”, arraste uma tarefa sem data ao lado, ou adicione acima.</div>')
-    + '</div></div>';
-  if (feitas.length) html += '<details class="help"><summary>✔️ Concluídas hoje ('+feitas.length+')</summary><div class="list">'+feitas.map(t => taskItemHTML(t)).join('')+'</div></details>';
-  return html;
+    + (pend.map(t => taskItemHTML(t, {planRemove:true})).join('')
+       || (ts.length ? '<div class="empty" style="padding:14px"><span class="em">🎉</span>Tudo do plano concluído!</div>'
+                     : '<div class="empty" style="padding:14px"><span class="em">🌤️</span>Plano vazio. Envie tarefas das seções ao lado com ➕ plano, ou refaça o Planejar o dia.</div>'))
+    + '</div>'
+    + (feitas.length ? '<details class="help"><summary>✔️ Concluídas ('+feitas.length+')</summary><div class="list">'+feitas.map(t => taskItemHTML(t, {planRemove:true})).join('')+'</div></details>' : '')
+    + '</div>';
 }
-/* Backlog de tarefas SEM data — arraste uma para o card “Tarefas de hoje”. */
-function hojeSemDataHTML() {
-  const semData = ordenar(tarefasPendentes().filter(t => !t.vencimento), t => -(new Date(t.criado_em||0)).getTime()).slice(0, 40);
-  return '<div class="card"><div class="h3">📥 Sem data <span class="muted tiny" style="font-weight:400">— arraste para hoje</span></div>'
-    + '<div class="list hoje-backlog" style="max-height:360px;overflow:auto">'
-    + (semData.map(t => taskItemHTML(t, {drag:true})).join('')
-       || '<div class="tiny muted" style="padding:8px">Nenhuma tarefa sem data. 🎯</div>')
-    + '</div></div>';
+/* Seção 2 — Hoje, fora do plano. */
+function hojeForaPlanoHTML() {
+  const noPlano = idsNoPlano();
+  const fora = tarefasPendentes().filter(t => t.vencimento === hoje() && !noPlano.has(t.id)).sort(ordDia);
+  if (!fora.length) return '';
+  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">📋 Hoje, fora do plano <span class="muted tiny">'+fora.length+'</span></div>'
+    + '<div class="list" style="padding:0 10px 8px">'+fora.map(t => taskItemHTML(t, {planAdd:true})).join('')+'</div></div>';
+}
+/* Seção 3 — Atrasadas (venc. < hoje). */
+function hojeAtrasadasHTML() {
+  const atr = ordenar(tarefasPendentes().filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+  if (!atr.length) return '';
+  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas</span> <span class="muted tiny">'+atr.length+'</span></div>'
+    + '<div class="list" style="padding:0 10px 8px">'+atr.slice(0, 12).map(t => taskItemHTML(t, {planAdd:true, rollover:true})).join('')
+    + (atr.length > 12 ? '<div class="tiny muted center" style="padding:6px">+'+(atr.length-12)+' na visão Tarefas</div>' : '')+'</div></div>';
+}
+/* Seção 4 — Restante da semana (amanhã até domingo). */
+function hojeSemanaHTML() {
+  const fim = fimSemana(hoje());
+  const sem = ordenar(tarefasPendentes().filter(t => t.vencimento && t.vencimento > hoje() && t.vencimento <= fim), t => t.vencimento).slice(0, 20);
+  if (!sem.length) return '';
+  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">📆 Restante da semana <span class="muted tiny">até '+fmtDataCurta(fim)+'</span></div>'
+    + '<div class="list" style="padding:0 10px 8px">'+sem.map(t => taskItemHTML(t, {planAdd:true})).join('')+'</div></div>';
 }
 /* ---- KPI velocímetro por bloco (Etapa D) ---- */
 function gaugeHTML(pct, label, sub, cor) {
@@ -2482,14 +2513,15 @@ function blocoGaugesHTML() {
   return '<div class="gauges">' + bs.map(b => { const ts = tarefasDoBloco(b); const done = ts.filter(t => t.concluida).length;
     return gaugeHTML(ts.length ? done/ts.length : 0, b.titulo, done+'/'+ts.length+' feitas', corDoBloco(b)); }).join('') + '</div>';
 }
-/* velocímetro único do dia — % de tarefas concluídas entre as alocadas para hoje */
+/* velocímetro único do dia — % concluído entre as tarefas DO PLANO (ou, sem plano, entre as de hoje) */
 function velocimetroDiaHTML() {
-  const todas = T('tarefas').filter(t => !t.abandonada && t.vencimento === hoje());
-  if (!todas.length) return '';
-  const done = todas.filter(t => t.concluida).length;
-  const pct = done / todas.length;
+  const plano = planoDia();
+  const base = plano ? planoTarefas() : T('tarefas').filter(t => !t.abandonada && t.vencimento === hoje());
+  if (!base.length) return '';
+  const done = base.filter(t => t.concluida).length;
+  const pct = done / base.length;
   const cor = pct >= 1 ? 'var(--ok)' : pct >= 0.5 ? 'var(--acc)' : 'var(--warn)';
-  return '<div class="gauges">' + gaugeHTML(pct, 'Concluídas hoje', done + ' de ' + todas.length, cor) + '</div>';
+  return '<div class="gauges">' + gaugeHTML(pct, plano ? 'Plano do dia' : 'Concluídas hoje', done + ' de ' + base.length, cor) + '</div>';
 }
 /* ---- ações de bloco/tarefa ---- */
 act('bloco-resumo', el => {
@@ -2741,54 +2773,32 @@ reg('hoje', {
     const nome = getCfg('nome','');
     const saud = (h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite') + (nome ? ', ' + esc(nome) : '') + '!';
     const pend = tarefasPendentes();
-    const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje() && !t.bloco_id), t => t.vencimento);
-    const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
+    const atrasadas = pend.filter(t => t.vencimento && t.vencimento < hoje());
+    const deHoje = pend.filter(t => t.vencimento === hoje());
     const habPend = habitosAtivos().filter(hb => (hb.tipo === 'semanal' ? !regDoDia(hb) : (diaAtivo(hb, hoje()) && !diaFeito(hb, hoje())))).length;
     const cap = capacidadeDia();
     let html = '<div class="h1">'+saud+'</div>'
       + '<p class="muted small" style="margin:-2px 0 12px">'+ucfirst(fmtData(hoje(),{semHoje:1}))+' · '
-      + deHoje.length+' tarefa'+(deHoje.length===1?'':'s')+(atrasadas.length?' <span class="err">(+'+atrasadas.length+' atrasadas)</span>':'')
-      + ' · '+habPend+' hábito'+(habPend===1?'':'s')+' pendente'+(habPend===1?'':'s')+' · '+fmtMin(cap.min)+' planejadas</p>';
+      + deHoje.length+' tarefa'+(deHoje.length===1?'':'s')+' hoje'+(atrasadas.length?' <span class="err">(+'+atrasadas.length+' atrasadas)</span>':'')
+      + ' · '+habPend+' hábito'+(habPend===1?'':'s')+' pendente'+(habPend===1?'':'s')+' · '+fmtMin(cap.min)+' no plano</p>';
     for (const fn of HojeExtras.alertas) { try { html += fn() || ''; } catch(e) {} }
     if (window.ritualBotoesHTML) html += ritualBotoesHTML();
     html += capacidadeHTML() + velocimetroDiaHTML();
     if (window.insightDoDiaHTML) { try { html += insightDoDiaHTML() || ''; } catch(e) {} }
     html += '<div class="grid2"><div>'
-      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ nova tarefa… (ex.: ligar médico hoje 15h d30 p2)'})+'</div>';
-    if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas — decida o destino</span></div><div class="list" style="padding:0 10px 8px">'
-      + atrasadas.slice(0, 6).map(t => taskItemHTML(t, {rollover:true})).join('')
-      + (atrasadas.length > 6 ? '<div class="tiny muted center" style="padding:6px">+'+(atrasadas.length-6)+' na visão Tarefas</div>' : '') + '</div></div>';
-    html += hojeTarefasHTML();
+      + '<div class="card">'+quickAddHTML({def_venc: hoje(), ph:'+ nova tarefa… (ex.: ligar médico hoje 15h d30 p2)'})+'</div>'
+      + hojePlanoHTML()
+      + hojeForaPlanoHTML();
     for (const fn of HojeExtras.cartoes) { try { html += fn() || ''; } catch(e) {} }
     html += '</div><div>'
-      + hojeSemDataHTML()
+      + hojeAtrasadasHTML()
+      + hojeSemanaHTML()
       + '<div class="card"><div class="h3">🔁 Hábitos de hoje</div>'+(habitoChipsHTML() || '<span class="muted small">Nenhum hábito ativo.</span>')+'</div>'
       + timerCardHTML() + '</div></div>';
     return html;
   },
   mount: () => {
     if (window._qaRefoco) { window._qaRefoco = false; const i = $('#qa-inp'); if (i) i.focus(); }
-    // arrastar tarefa SEM data (backlog) → card “Tarefas de hoje”
-    const alvo = $('.hoje-drop');
-    $$('.hoje-backlog .task[draggable]').forEach(el => {
-      el.addEventListener('dragstart', () => { _dragTaskId = el.dataset.tid; el.classList.add('dragging'); });
-      el.addEventListener('dragend', () => el.classList.remove('dragging'));
-    });
-    if (alvo) {
-      alvo.addEventListener('dragover', e => { e.preventDefault(); alvo.classList.add('drag-over'); });
-      alvo.addEventListener('dragleave', () => alvo.classList.remove('drag-over'));
-      alvo.addEventListener('drop', e => {
-        e.preventDefault(); alvo.classList.remove('drag-over');
-        const t = byId('tarefas', _dragTaskId); _dragTaskId = null;
-        if (!t) return;
-        if (t.vencimento) { toast('Essa tarefa já tem data.', {icone:'📅'}); return; }
-        dbPatch('tarefas', t.id, { vencimento: hoje() });
-        const plano = planoDia();
-        if (plano && !plano.ordem.includes(t.id)) { plano.ordem.push(t.id); salvarPlanoDia(plano.projetos, plano.ordem); }
-        toast('“'+esc(t.titulo)+'” adicionada ao dia ✓', {icone:'📌'});
-        render();
-      });
-    }
   }
 });
 /* ════════════════ ETAPA 6 — RITUAL DIÁRIO (planejar / encerrar — opcional, sem punição) ════════════════ */
@@ -2799,71 +2809,105 @@ function ritualBotoesHTML() {
     + '<button class="btn '+(d.planejado?'ok':'primary')+'" data-act="ritual-planejar" style="flex:1">'+(d.planejado?'✓ Dia planejado':'▶ Planejar o dia')+'</button>'
     + '<button class="btn '+(d.encerrado?'ok':'')+'" data-act="ritual-encerrar" style="flex:1">'+(d.encerrado?'✓ Dia encerrado':'◼ Encerrar o dia')+'</button></div>';
 }
-/* ---- Planejar o dia — POR PRIORIDADE DE PROJETO (modelo novo, sem blocos) ----
-   Busca os projetos com tarefa pendente para hoje (ou atrasada), você ordena os
-   projetos por prioridade do dia, e a lista do dia é montada: rank do projeto →
-   prioridade da tarefa (p1→p4) → menor duração. O plano é salvo em `configuracoes`
-   (chave plano_dia), então não precisa de SQL novo. */
+/* ---- Planejar o dia — SELEÇÃO DE PROJETOS + CORTE DE 8h (sem blocos, sem SQL) ----
+   Abre com os projetos que têm tarefa para HOJE já marcados. A lista é montada por
+   prioridade da TAREFA (P1→P4) → menor duração (projeto só agrupa/desempata) e cortada
+   no limite da janela útil (padrão 8h): o que passa fica "fora do plano" (mas continua
+   sendo de hoje). Atrasadas e a semana ficam em seções próprias na tela Hoje, de onde
+   você pode enviar ao plano quando quiser. O plano é salvo em `configuracoes` (chave
+   plano_dia): { data, projetos: [chaves selecionadas], ordem: [ids no plano] }. */
 function planoDia() { const p = getCfg('plano_dia', null); return (p && p.data === hoje() && Array.isArray(p.ordem)) ? p : null; }
 function salvarPlanoDia(projetos, ordem) { setCfg('plano_dia', { data: hoje(), projetos, ordem }); }
+function janelaMin() { return Math.max(1, Number(getCfg('janela_util', 8))) * 60; }
 function planejarDia() {
-  const pend = tarefasPendentes().filter(t => t.vencimento && t.vencimento <= hoje());
+  const doDia = tarefasPendentes().filter(t => t.vencimento === hoje());  // só de hoje (atrasadas ficam à parte)
   const grupos = {};
-  for (const t of pend) { const k = t.projeto_id || '__none__'; (grupos[k] = grupos[k] || []).push(t); }
-  const chaves = Object.keys(grupos);
+  for (const t of doDia) { const k = t.projeto_id || '__none__'; (grupos[k] = grupos[k] || []).push(t); }
+  const chaves = Object.keys(grupos).sort((a, b) => (a === '__none__') - (b === '__none__')
+    || (byId('projetos', a) ? norm(byId('projetos', a).nome) : '').localeCompare(byId('projetos', b) ? norm(byId('projetos', b).nome) : ''));
   if (!chaves.length) {
     modal('<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-      + '<div class="empty"><span class="em">🌤️</span>Nenhuma tarefa pendente para hoje.<br>Crie tarefas com vencimento hoje (ou atrasadas) e volte aqui.</div>'
+      + '<div class="empty"><span class="em">🌤️</span>Nenhuma tarefa com vencimento hoje.<br>Crie tarefas para hoje (ou envie atrasadas/da semana ao plano) e volte aqui.</div>'
       + '<div class="bx-foot"><button class="btn primary" data-act="m-close">Fechar</button></div>');
     return;
   }
-  // ordem inicial: reaproveita o ranking anterior do dia; senão, projeto com mais tarefas primeiro
   const ant = planoDia();
-  chaves.sort((a, b) => {
-    if (ant && Array.isArray(ant.projetos)) {
-      const ia = ant.projetos.indexOf(a), ib = ant.projetos.indexOf(b);
-      if (ia >= 0 || ib >= 0) return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    }
-    return grupos[b].length - grupos[a].length;
-  });
-  window._plan = { ordem: chaves, grupos };
+  const previas = ant && Array.isArray(ant.projetos) ? ant.projetos.filter(k => grupos[k]) : null;
+  const sel = new Set(previas && previas.length ? previas : chaves);   // tudo marcado por padrão
+  window._plan = { grupos, chaves, sel };
   modal('<div id="plan-box"></div>', { onMount: () => planDraw(), fixo: true });
+}
+/* tarefas dos projetos selecionados, já na ordem do dia */
+function _planOrdenado() { const P = window._plan; return P.chaves.filter(k => P.sel.has(k)).flatMap(k => P.grupos[k]).slice().sort(ordDia); }
+/* corte pela janela: enche na ordem até estourar; garante ao menos a 1ª. Retorna índice de corte + soma no plano */
+function _planCorte(tarefas, janela) {
+  let soma = 0, cut = tarefas.length;
+  for (let i = 0; i < tarefas.length; i++) { const d = estMin(tarefas[i]); if (i === 0 || soma + d <= janela) soma += d; else { cut = i; break; } }
+  return { cut, soma };
 }
 function planDraw() {
   const box = $('#plan-box'); if (!box) return;
-  const P = window._plan;
-  const linhas = P.ordem.map((k, i) => {
-    const ts = P.grupos[k];
-    const proj = k === '__none__' ? null : byId('projetos', k);
-    const totMin = sum(ts.map(estMin));
-    return '<div class="item" style="cursor:default">'
-      + '<span class="badge acc" style="min-width:28px;justify-content:center;font-size:13px">'+(i+1)+'</span>'
-      + '<div class="grow"><div class="ttl">'+(proj ? projLabelHTML(proj) : '📥 Sem projeto')+'</div>'
-      + '<div class="sub">'+ts.length+' tarefa'+(ts.length===1?'':'s')+' · ⏳ '+fmtMin(totMin)+'</div></div>'
-      + '<button class="iconbtn" data-act="plan-up" data-i="'+i+'"'+(i===0?' disabled style="opacity:.3"':'')+'>▲</button>'
-      + '<button class="iconbtn" data-act="plan-down" data-i="'+i+'"'+(i===P.ordem.length-1?' disabled style="opacity:.3"':'')+'>▼</button>'
-      + '</div>';
-  }).join('');
-  const totalMin = sum(P.ordem.flatMap(k => P.grupos[k].map(estMin)));
-  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-    + '<p class="muted small" style="margin-top:0">Ordene os projetos por prioridade de <b>hoje</b> (o mais importante no topo). Dentro de cada projeto, as tarefas seguem P1→P4 e menor duração.</p>'
-    + '<div class="card pad0"><div class="list" style="padding:0 10px">'+linhas+'</div></div>'
-    + '<div class="row" style="margin:6px 0"><span class="sp"></span><span class="small muted">Total alocado: '+fmtMin(totalMin)+'</span></div>'
-    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary big" data-act="plan-concluir">✓ Montar lista do dia</button></div>';
-}
-act('plan-up', el => { const P = window._plan, i = Number(el.dataset.i); if (i > 0) { const x = P.ordem[i-1]; P.ordem[i-1] = P.ordem[i]; P.ordem[i] = x; planDraw(); } });
-act('plan-down', el => { const P = window._plan, i = Number(el.dataset.i); if (i < P.ordem.length-1) { const x = P.ordem[i+1]; P.ordem[i+1] = P.ordem[i]; P.ordem[i] = x; planDraw(); } });
-act('plan-concluir', () => {
-  const P = window._plan;
-  const ordem = [];
-  P.ordem.forEach(k => {
-    const ts = P.grupos[k].slice().sort((a, b) => (a.prioridade||4) - (b.prioridade||4) || estMin(a) - estMin(b) || String(a.vencimento||'9999').localeCompare(String(b.vencimento||'9999')));
-    ts.forEach(t => { ordem.push(t.id); if (t.vencimento !== hoje()) dbPatch('tarefas', t.id, { vencimento: hoje() }); });
+  const P = window._plan, janela = janelaMin();
+  const chips = P.chaves.map(k => {
+    const proj = k === '__none__' ? null : byId('projetos', k); const on = P.sel.has(k);
+    return '<button class="chip mini'+(on?' sel':'')+'" data-act="plan-proj" data-k="'+esc(k)+'">'+(on?'✓ ':'')
+      + (proj ? projLabelHTML(proj) : '📥 Sem projeto')+' <span class="muted tiny">'+P.grupos[k].length+'</span></button>';
+  }).join(' ');
+  const tarefas = _planOrdenado();
+  const { cut, soma } = _planCorte(tarefas, janela);
+  const linha = (t, dentro) => { const proj = byId('projetos', t.projeto_id);
+    return '<div class="item" style="cursor:default;opacity:'+(dentro?1:.5)+'">'
+      + '<span class="check p'+(t.prioridade||4)+'" style="pointer-events:none"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">'
+      + (proj ? projLabelHTML(proj)+' · ' : '') + 'P'+(t.prioridade||4)+' · ⏳ '+fmtMin(estMin(t))+'</div></div></div>'; };
+  let lista = '';
+  tarefas.forEach((t, i) => {
+    if (i === cut) lista += '<div class="tiny center" style="padding:7px 6px;color:var(--warn);border-top:1px dashed var(--border)">— limite de '+fmtMin(janela)+' atingido · o que segue fica fora do plano —</div>';
+    lista += linha(t, i < cut);
   });
-  salvarPlanoDia(P.ordem, ordem);
+  const foraN = tarefas.length - cut, over = soma > janela;
+  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="muted small" style="margin-top:0">Escolha os projetos do dia (todos já vêm marcados). A lista é montada por <b>prioridade da tarefa</b> → menor duração, até o limite de <b>'+fmtMin(janela)+'</b>. O que passar fica <b>fora do plano</b> (mas continua de hoje).</p>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:10px">'+(chips || '<span class="tiny muted">Nenhum projeto com tarefa hoje.</span>')+'</div>'
+    + '<div class="card pad0"><div class="list" style="padding:0 10px;max-height:44vh;overflow:auto">'
+    + (lista || '<div class="empty" style="padding:16px"><span class="em">🌤️</span>Nenhuma tarefa nos projetos escolhidos.</div>')+'</div></div>'
+    + '<div class="row" style="margin:8px 0"><span class="small '+(over?'err':'ok')+'">No plano: '+fmtMin(soma)+' / '+fmtMin(janela)+(over?' — acima do limite ⚠️':'')+'</span>'
+    + '<span class="sp"></span>'+(foraN?'<span class="small muted">'+foraN+' fora do plano</span>':'')+'</div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button><button class="btn primary big" data-act="plan-concluir"'+(cut?'':' disabled')+'>✓ Montar lista do dia</button></div>';
+}
+act('plan-proj', el => { const P = window._plan; const k = el.dataset.k; if (P.sel.has(k)) P.sel.delete(k); else P.sel.add(k); planDraw(); });
+act('plan-concluir', () => {
+  const P = window._plan, janela = janelaMin();
+  const tarefas = _planOrdenado();
+  const { cut } = _planCorte(tarefas, janela);
+  const ordem = tarefas.slice(0, cut).map(t => t.id);   // só o que coube no limite entra no plano
+  salvarPlanoDia([...P.sel], ordem);
   dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
   closeModal(true); render();
-  toast('Dia planejado — '+ordem.length+' tarefa'+(ordem.length===1?'':'s')+' na ordem ✓', {icone:'☀️', ms:4000});
+  const foraN = tarefas.length - cut;
+  toast('Dia planejado — '+ordem.length+' no plano'+(foraN?' · '+foraN+' fora':'')+' ✓', {icone:'☀️', ms:4000});
+});
+/* enviar uma tarefa (de hoje-fora-do-plano, atrasada ou da semana) ao plano do dia — nunca bloqueia, só avisa se estourar 8h */
+act('plan-add', el => {
+  const t = byId('tarefas', el.dataset.id); if (!t) return;
+  if (t.vencimento !== hoje()) dbPatch('tarefas', t.id, { vencimento: hoje() });
+  const p = planoDia();
+  const projs = p && Array.isArray(p.projetos) ? p.projetos.slice() : [];
+  const pk = t.projeto_id || '__none__'; if (!projs.includes(pk)) projs.push(pk);
+  const ordem = p ? p.ordem.slice() : [];
+  if (!ordem.includes(t.id)) ordem.push(t.id);
+  salvarPlanoDia(projs, ordem);
+  dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
+  const cap = capacidadeDia();
+  if (cap.pct > 1) toast('“'+esc(t.titulo)+'” no plano — dia acima de '+fmtMin(cap.janela)+' ('+fmtMin(cap.min)+') ⚠️', {icone:'⚠️', ms:3800});
+  else toast('“'+esc(t.titulo)+'” no plano ✓', {icone:'📌'});
+  render();
+});
+/* tirar do plano — a tarefa continua de hoje (some para "Hoje, fora do plano") */
+act('plan-remove', el => {
+  const p = planoDia(); if (!p) { render(); return; }
+  salvarPlanoDia(p.projetos, p.ordem.filter(id => id !== el.dataset.id));
+  render();
 });
 /* ---- Planejar (ritual antigo de 3 passos — desativado, mantido p/ referência) ---- */
 act('ritual-planejar', () => planejarDia());
