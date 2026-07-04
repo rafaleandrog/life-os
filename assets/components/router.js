@@ -30,7 +30,8 @@ window.addEventListener('hashchange', () => render()); // navegação por hash s
 
 /* ============ NAVEGAÇÃO / LAYOUT ============ */
 const MENU = [
-  ['hoje','☀️','Hoje'], ['tarefas','✅','Tarefas'], ['habitos','🔁','Hábitos'], ['agenda','📅','Agenda'],
+  ['hoje','☀️','Hoje'], ['tarefas','✅','Tarefas'], ['habitos','🔁','Hábitos'],
+  // ['agenda','📅','Agenda'],  // OCULTO (dinâmica de blocos desativada) — reative adicionando esta linha de volta ao menu
   ['treino','🏋️','Treino'], ['leitura','📖','Leitura'], ['escrita','✍️','Escrita'],
   ['metas','🎯','Metas'], ['financas','💰','Finanças'], ['dashboard','📊','Dashboard'], ['revisao','🧭','Revisão'], ['retro','🌅','Retro'], ['config','⚙️','Config']
 ];
@@ -73,7 +74,8 @@ act('nav-close', el => { closeModal(); nav(el.dataset.r); });
 const FAB_ITENS = [
   ['qa-tarefa','✅','Tarefa'], ['qa-habito','🔁','Hábito'], ['qa-treino','🏋️','Treino'],
   ['qa-corrida','🏃','Corrida'], ['qa-leitura','📖','Leitura'], ['qa-gasto','💸','Gasto'],
-  ['qa-aporte','📈','Aporte'], ['qa-peso','⚖️','Peso'], ['qa-bloco','⏱️','Bloco']
+  ['qa-aporte','📈','Aporte'], ['qa-peso','⚖️','Peso']
+  // ['qa-bloco','⏱️','Bloco']  // OCULTO junto com a Agenda (blocos de tempo desativados)
 ];
 act('fab', () => {
   modal('<div class="bx-h"><div class="h2">Adicionar</div></div><div class="fabmenu">'
