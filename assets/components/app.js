@@ -3892,36 +3892,56 @@ act('livro-abrir', el => {
       dbDelete('livros', l.id); render(); toast('Livro excluído.'); } });
 });
 
-/* ---- notas (citação / anotação / insight) ---- */
+/* ---- notas (citação / anotação / insight) ----
+   Cada tipo tem cor própria (barra lateral + ícone + chip selecionado) para ser
+   reconhecido de relance; sem cor, os três tipos ficavam visualmente idênticos. */
+const NOTA_TIPOS = [
+  { v:'citacao',  icone:'❝',  rotulo:'citação',  plural:'citações',  cor:'#5CC8FC', soft:'rgba(92,200,252,.14)' },
+  { v:'anotacao', icone:'📝', rotulo:'anotação', plural:'anotações', cor:'#FFB454', soft:'rgba(255,180,84,.14)' },
+  { v:'insight',  icone:'💡', rotulo:'insight',  plural:'insights',  cor:'#7C5CFC', soft:'rgba(124,92,252,.16)' }
+];
+const notaTipo = v => NOTA_TIPOS.find(t => t.v === v) || NOTA_TIPOS[2];
+addCSS('.nota-item{border-left:3px solid var(--border);padding-left:11px!important;border-radius:0 8px 8px 0}'
+ + '.nota-item .nota-em{font-size:15px;line-height:1.3;flex:none}'
+ + '.chip.nt{border-color:currentColor}.chip.nt:not(.sel){color:var(--txt2);border-color:var(--border)}');
 function notasListaHTML(notas) {
   if (!notas.length) return '<span class="muted tiny">nenhuma nota ainda</span>';
-  const icone = { citacao:'❝', anotacao:'📝', insight:'💡' };
-  return '<div class="list">' + ordenar(notas, n => n.criado_em||'', true).map(n =>
-    '<div class="item" style="cursor:default;align-items:flex-start"><span>'+icone[n.tipo]+'</span>'
+  return '<div class="list">' + ordenar(notas, n => n.criado_em||'', true).map(n => {
+    const tp = notaTipo(n.tipo);
+    return '<div class="item nota-item" style="cursor:default;align-items:flex-start;border-left-color:'+tp.cor+'">'
+    + '<span class="nota-em" style="color:'+tp.cor+'">'+tp.icone+'</span>'
     + '<div class="grow"><div style="white-space:pre-wrap;font-size:13.5px">'+esc(n.conteudo)+'</div>'
     + '<div class="sub">'+(n.pagina?'p. '+n.pagina+' · ':'')+(n.tags||[]).map(t => '#'+esc(t)).join(' ')
     + (n.tipo==='insight' && !n.arquivada ? ' · 🔁 revisão '+fmtData(n.proxima_revisao||hoje()) : '')+'</div></div>'
-    + '<button class="iconbtn" data-act="nota-del" data-id="'+n.id+'">✕</button></div>').join('') + '</div>';
+    + '<button class="iconbtn" data-act="nota-del" data-id="'+n.id+'">✕</button></div>'; }).join('') + '</div>';
 }
+/* Em artigos, "página" e "tags" não têm uso — o formulário mostra só tipo + texto. */
 function notaFormHTML(refTipo, refId) {
-  return '<div class="card" style="background:var(--bg);padding:12px"><div class="row" style="margin-bottom:8px" id="nota-tipos">'
-    + [['citacao','❝ citação'],['anotacao','📝 anotação'],['insight','💡 insight']].map(([v,l],i) =>
-      '<span class="chip mini'+(i===2?' sel':'')+'" data-act="nota-tipo" data-v="'+v+'">'+l+'</span>').join('') + '</div>'
+  const detalhes = refTipo !== 'artigo';
+  return '<div class="card" style="background:var(--bg);padding:12px"><div class="row wrap" style="margin-bottom:8px" id="nota-tipos">'
+    + NOTA_TIPOS.map((tp, i) => '<span class="chip mini nt'+(i===2?' sel':'')+'" data-act="nota-tipo" data-v="'+tp.v+'"'
+      + ' style="color:'+tp.cor+(i===2?';background:'+tp.soft:'')+'">'+tp.icone+' '+tp.rotulo+'</span>').join('') + '</div>'
     + '<textarea class="textarea" id="nota-txt" rows="2" placeholder="escreva a nota…"></textarea>'
-    + '<div class="row" style="margin-top:8px"><input class="input" id="nota-pag" type="number" placeholder="pág." style="width:80px">'
-    + '<input class="input" id="nota-tags" placeholder="tags, separadas, por, vírgula" style="flex:1">'
+    + '<div class="row" style="margin-top:8px">'
+    + (detalhes ? '<input class="input" id="nota-pag" type="number" placeholder="pág." style="width:80px">'
+      + '<input class="input" id="nota-tags" placeholder="tags, separadas, por, vírgula" style="flex:1">' : '<span class="sp"></span>')
     + '<button class="btn small primary" data-act="nota-add" data-rt="'+refTipo+'" data-rid="'+refId+'">＋</button></div></div>';
 }
-act('nota-tipo', el => { $$('#nota-tipos .chip').forEach(c => c.classList.remove('sel')); el.classList.add('sel'); });
+act('nota-tipo', el => {
+  $$('#nota-tipos .chip').forEach(c => { c.classList.remove('sel'); c.style.background = ''; });
+  el.classList.add('sel'); el.style.background = notaTipo(el.dataset.v).soft;
+});
 act('nota-add', el => {
   const txt = $('#nota-txt').value.trim();
   if (!txt) { toast('Escreva a nota.'); return; }
-  const tipo = ($('#nota-tipos .chip.sel')||{}).dataset ? $('#nota-tipos .chip.sel').dataset.v : 'insight';
-  criarNota({ tipo, conteudo: txt, pagina: Number($('#nota-pag').value)||null,
-    tags: $('#nota-tags').value.split(',').map(s => s.trim()).filter(Boolean),
+  const sel = $('#nota-tipos .chip.sel');
+  const tipo = sel ? sel.dataset.v : 'insight';
+  const pag = $('#nota-pag'), tags = $('#nota-tags');   // ausentes em artigos
+  criarNota({ tipo, conteudo: txt, pagina: (pag && Number(pag.value)) || null,
+    tags: tags ? tags.value.split(',').map(s => s.trim()).filter(Boolean) : [],
     livro_id: el.dataset.rt === 'livro' ? el.dataset.rid : null,
     artigo_id: el.dataset.rt === 'artigo' ? el.dataset.rid : null });
-  $('#nota-txt').value = ''; $('#nota-tags').value = ''; $('#nota-pag').value = '';
+  $('#nota-txt').value = ''; if (tags) tags.value = ''; if (pag) pag.value = '';
   toast((tipo==='insight'?'💡 Insight salvo — entra na repetição espaçada.':'Nota salva ✓'));
 });
 function criarNota(n) {
@@ -4038,14 +4058,16 @@ function insightsTabHTML() {
   const naFila = filaInsights().length;
   return (naFila ? '<div class="banner acc">💡 ' + naFila + ' insight'+(naFila>1?'s':'')+' na fila de revisão de hoje — veja na tela Hoje.</div>' : '')
     + '<div class="row wrap" style="margin-bottom:12px">'
-    + [['insight','💡 insights'],['citacao','❝ citações'],['anotacao','📝 anotações'],['todas','todas']].map(([v,l]) =>
-      '<span class="chip'+(filtro===v?' sel':'')+'" data-act="ins-filtro" data-v="'+v+'">'+l+'</span>').join('')
+    + NOTA_TIPOS.map(tp => '<span class="chip nt'+(filtro===tp.v?' sel':'')+'" data-act="ins-filtro" data-v="'+tp.v+'"'
+        + ' style="color:'+tp.cor+(filtro===tp.v?';background:'+tp.soft:'')+'">'+tp.icone+' '+tp.plural+'</span>').join('')
+    + '<span class="chip'+(filtro==='todas'?' sel':'')+'" data-act="ins-filtro" data-v="todas">todas</span>'
     + '<span class="chip'+(window._insArq?' sel':'')+'" data-act="ins-arq">📦 arquivadas</span>'
     + '<input class="input" data-inp="ins-busca" value="'+esc(busca)+'" placeholder="🔎 buscar…" style="flex:1;min-width:140px"></div>'
     + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
     + (ordenar(notas, n => n.criado_em||'', true).slice(0, 60).map(n => {
-      const fonte = fonteDaNota(n);
-      return '<div class="item" style="cursor:default;align-items:flex-start"><span>'+({citacao:'❝',anotacao:'📝',insight:'💡'}[n.tipo])+'</span>'
+      const fonte = fonteDaNota(n), tp = notaTipo(n.tipo);
+      return '<div class="item nota-item" style="cursor:default;align-items:flex-start;border-left-color:'+tp.cor+'">'
+        + '<span class="nota-em" style="color:'+tp.cor+'">'+tp.icone+'</span>'
         + '<div class="grow"><div style="white-space:pre-wrap">'+esc(n.conteudo)+'</div>'
         + '<div class="sub">'+(fonte?'— '+esc(fonte)+' · ':'')+(n.tags||[]).map(t => '#'+esc(t)).join(' ')
         + (n.tipo==='insight'?(n.arquivada?' · arquivada':' · 🔁 '+fmtData(n.proxima_revisao||hoje())):'')+'</div></div>'
@@ -4066,7 +4088,15 @@ addCSS('.ed-wrap{max-width:760px;margin:0 auto}.ed-ta{width:100%;min-height:58vh
  + '.ed-foco{position:fixed;inset:0;background:var(--bg);z-index:75;overflow:auto;padding:26px 16px}'
  + '.cap-bar{position:sticky;top:0;z-index:4;display:none;gap:8px;background:var(--elev);border:1px solid var(--acc);border-radius:10px;padding:7px 10px;margin-bottom:8px}');
 
+/* Status com cor própria: rascunho (neutro) → em revisão (âmbar) → concluído (verde).
+   Antes os três saíam com a mesma cor de accent e não davam para distinguir de relance. */
 const STATUS_TEXTO = [['rascunho','📝 rascunho'],['em_revisao','🔍 em revisão'],['concluido','✅ concluído']];
+const STATUS_TEXTO_COR = {
+  rascunho:  { cor:'#9AA0B0', soft:'rgba(154,160,176,.16)' },
+  em_revisao:{ cor:'#FFB454', soft:'rgba(255,180,84,.14)' },
+  concluido: { cor:'#3DDC97', soft:'rgba(61,220,151,.14)' }
+};
+const corStatusTexto = s => STATUS_TEXTO_COR[s] || STATUS_TEXTO_COR.rascunho;
 function escritaLog() { return getCfg('escrita_log', {}) || {}; }
 function registrarEscritaLog(delta) {
   if (!(delta > 0)) return;
@@ -4091,11 +4121,12 @@ reg('escrita', {
     const ts = ordenar(T('textos'), t => t.atualizado_em || t.criado_em || '', true); // só textos existentes (apagados não entram)
     const stk = streakEscritor();
     const statusTag = s => (STATUS_TEXTO.find(x => x[0] === s) || ['', s || 'rascunho'])[1];
-    const card = t => '<div class="txt-card" data-act="texto-abrir" data-id="'+t.id+'">'
+    const card = t => { const c = corStatusTexto(t.status);
+      return '<div class="txt-card" data-act="texto-abrir" data-id="'+t.id+'" style="border-left:3px solid '+c.cor+'">'
       + '<div class="tc-tit">'+esc(t.titulo || 'Sem título')+'</div>'
-      + '<div class="row wrap" style="gap:5px;margin-bottom:8px"><span class="tag" style="background:var(--acc-soft);color:var(--acc)">'+esc(statusTag(t.status))+'</span>'
+      + '<div class="row wrap" style="gap:5px;margin-bottom:8px"><span class="tag" style="background:'+c.soft+';color:'+c.cor+'">'+esc(statusTag(t.status))+'</span>'
       + (t.tags||[]).slice(0,3).map(tg => '<span class="tag" style="background:var(--elev);color:var(--txt2)">#'+esc(tg)+'</span>').join('')+'</div>'
-      + '<div class="tiny muted">'+fmtNum(t.palavras||0)+' palavras · '+fmtData((t.atualizado_em||t.criado_em||'').slice(0,10))+'</div></div>';
+      + '<div class="tiny muted">'+fmtNum(t.palavras||0)+' palavras · '+fmtData((t.atualizado_em||t.criado_em||'').slice(0,10))+'</div></div>'; };
     return '<div class="row" style="margin-bottom:10px"><div class="h1" style="flex:1">✍️ Escrita</div>'
       + '<button class="btn primary" data-act="texto-novo">+ Novo texto</button></div>'
       + '<div class="grid2" style="margin-bottom:4px">'
@@ -4119,7 +4150,7 @@ function editorHTML(id) {
   const edPane = '<div class="ed-pane-editor">'
     + '<div class="row wrap" style="margin-bottom:10px">'
     + '<input class="input" id="ed-titulo" data-inp="ed-mudou" value="'+esc(t.titulo)+'" style="flex:1;min-width:160px;font-weight:700;font-size:16px">'
-    + '<select class="select" id="ed-status" data-chg="ed-mudou" style="width:auto">'+STATUS_TEXTO.map(([v,l]) => '<option value="'+v+'"'+(v===t.status?' selected':'')+'>'+l+'</option>').join('')+'</select>'
+    + '<select class="select" id="ed-status" data-chg="ed-status-chg" style="width:auto;'+estiloStatusTexto(t.status)+'">'+STATUS_TEXTO.map(([v,l]) => '<option value="'+v+'"'+(v===t.status?' selected':'')+'>'+l+'</option>').join('')+'</select>'
     + '</div>'
     + '<div class="row wrap" style="margin-bottom:10px">'
     + '<input class="input" id="ed-tags" data-inp="ed-mudou" value="'+esc((t.tags||[]).join(', '))+'" placeholder="tags, por, vírgula" style="flex:1;min-width:120px">'
@@ -4150,6 +4181,10 @@ act('ed-input', () => {
   _edSaveTimer = setTimeout(edSalvar, 1500); // autosave debounce ~1,5s (regra 9)
 });
 act('ed-mudou', () => { clearTimeout(_edSaveTimer); _edSaveTimer = setTimeout(edSalvar, 800); });
+/* o seletor de status muda de cor junto com o valor escolhido */
+/* background-color (não `background`) para não apagar a seta do .select */
+const estiloStatusTexto = s => { const c = corStatusTexto(s); return 'color:'+c.cor+';border-color:'+c.cor+';background-color:'+c.soft; };
+act('ed-status-chg', el => { el.setAttribute('style', 'width:auto;'+estiloStatusTexto(el.value)); Actions['ed-mudou'](); });
 function edSalvar() {
   const t = edTextoAtual(); if (!t) return;
   const ta = $('#ed-area');
