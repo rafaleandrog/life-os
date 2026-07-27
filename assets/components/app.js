@@ -841,10 +841,10 @@ function seedData() {
   dbUpsert('contas_financeiras', {id:detUUID('conta:principal'), nome:'Conta principal', tipo:'conta'});
   dbUpsert('contas_financeiras', {id:detUUID('conta:carteira'), nome:'Carteira', tipo:'dinheiro'});
   const proj = dbUpsert('projetos', {id:detUUID('proj:comecar'), area_id:aP.id, nome:'Começar no Life OS', status:'ativo'});
-  const sec = dbUpsert('secoes', {id:detUUID('sec:primeiros'), projeto_id:proj.id, nome:'Primeiros passos', ordem:0});
-  dbUpsert('tarefas', {titulo:'Explorar a tela Hoje', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:2, estimativa_min:10, ordem:0});
-  dbUpsert('tarefas', {titulo:'Criar meu primeiro hábito', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:hoje(), prioridade:3, estimativa_min:5, ordem:1});
-  dbUpsert('tarefas', {titulo:'Fazer um backup (Config → Exportar)', projeto_id:proj.id, secao_id:sec.id, area_id:aP.id, vencimento:addDias(hoje(), 7), prioridade:4, estimativa_min:5, ordem:2});
+  // sem seção criada à mão: a seção vem da data de vencimento (#24)
+  dbUpsert('tarefas', {titulo:'Explorar a tela Hoje', projeto_id:proj.id, area_id:aP.id, vencimento:hoje(), prioridade:2, estimativa_min:10, ordem:0});
+  dbUpsert('tarefas', {titulo:'Criar meu primeiro hábito', projeto_id:proj.id, area_id:aP.id, vencimento:hoje(), prioridade:3, estimativa_min:5, ordem:1});
+  dbUpsert('tarefas', {titulo:'Fazer um backup (Config → Exportar)', projeto_id:proj.id, area_id:aP.id, vencimento:addDias(hoje(), 7), prioridade:4, estimativa_min:5, ordem:2});
   dbUpsert('habitos', {nome:'Beber água', icone:'💧', area_id:aS.id, tipo:'quantidade', meta_quantidade:8, unidade:'copos'});
   dbUpsert('habitos', {nome:'Meditar', icone:'🧘', area_id:aM.id, tipo:'diario'});
   dbUpsert('habitos', {nome:'Treinar', icone:'🏋️', area_id:aS.id, tipo:'semanal', freq_semanal:3, fonte_auto:'treino'});
@@ -1759,12 +1759,12 @@ function abrirTarefa(id) {
     + '<div class="field"><textarea class="textarea" id="td-desc" rows="2" placeholder="Descrição…">'+esc(t.descricao||'')+'</textarea></div>'
     + '<div class="frow"><div class="field"><label>Projeto</label><select class="select" id="td-proj" data-chg="td-proj-chg">'
     + optsProjetos().map(o => '<option value="'+o.v+'"'+(o.v===(t.projeto_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('') + '</select></div>'
-    + '<div class="field"><label>Seção</label><select class="select" id="td-sec">'+secaoOpts(t.projeto_id, t.secao_id)+'</select></div></div>'
+    + '<div class="field"><label>Seção (pela data)</label><div class="input" id="td-sec" style="display:flex;align-items:center">'+secaoAtualHTML(t)+'</div></div></div>'
     + '<div class="frow"><div class="field"><label>Área</label><select class="select" id="td-area">'
     + optsAreas().map(o => '<option value="'+o.v+'"'+(o.v===(t.area_id||'')?' selected':'')+'>'+esc(o.t)+'</option>').join('') + '</select></div>'
     + '<div class="field"><label>Prioridade</label><select class="select" id="td-pri">'
     + [1,2,3,4].map(p => '<option value="'+p+'"'+(p===(t.prioridade||4)?' selected':'')+'>P'+p+(p===1?' — máxima':p===4?' — normal':'')+'</option>').join('') + '</select></div></div>'
-    + '<div class="frow"><div class="field"><label>Vencimento</label><input type="date" class="input" id="td-venc" value="'+(t.vencimento||'')+'"></div>'
+    + '<div class="frow"><div class="field"><label>Vencimento</label><input type="date" class="input" id="td-venc" data-chg="td-venc-chg" value="'+(t.vencimento||'')+'"></div>'
     + '<div class="field"><label>Hora (entra na agenda)</label><input type="time" class="input" id="td-hora" value="'+(fmtHora(t.hora)||'')+'"></div></div>'
     + '<div class="frow"><div class="field"><label>Estimativa (min)</label><input type="number" class="input" id="td-est" value="'+(t.estimativa_min||'')+'"></div>'
     + '<div class="field"><label>Recorrência</label><select class="select" id="td-rec">'
@@ -1787,9 +1787,11 @@ function abrirTarefa(id) {
   modal(html, { wide:true });
   window._tdId = id;
 }
-function secaoOpts(projId, secId) {
-  const secs = ordenar(T('secoes').filter(s => s.projeto_id === projId), s => s.ordem||0);
-  return '<option value="">— sem seção —</option>' + secs.map(s => '<option value="'+s.id+'"'+(s.id===secId?' selected':'')+'>'+esc(s.nome)+'</option>').join('');
+/* A seção não se escolhe: ela é lida da data de vencimento (#24). Aqui é só espelho. */
+function secaoAtualHTML(t) {
+  const g = secaoPadraoDe(t);
+  return '<span class="'+g.cls+'">'+g.icone+' '+g.nome+'</span>'
+    + '<span class="tiny muted" style="margin-left:8px">'+g.regra+'</span>';
 }
 function recExtraHTML(rec) {
   if (!rec) return '';
@@ -1799,7 +1801,9 @@ function recExtraHTML(rec) {
   if (rec.tipo === 'mensal') return '<div class="field"><label>Dia do mês</label><input type="number" class="input" id="td-rec-dia-mes" min="1" max="31" value="'+(rec.dia||1)+'"></div>';
   return '';
 }
-act('td-proj-chg', el => { $('#td-sec').innerHTML = secaoOpts(el.value || null, null); });
+/* a seção acompanha a data, não o projeto — o espelho é atualizado ao mexer no vencimento */
+act('td-venc-chg', () => { const c = $('#td-sec'); if (c) c.innerHTML = secaoAtualHTML({ vencimento: $('#td-venc').value || null }); });
+act('td-proj-chg', () => {});
 act('td-rec', () => {});
 document.addEventListener('change', e => {
   if (e.target.id === 'td-rec') {
@@ -1857,7 +1861,6 @@ act('td-save', () => {
     titulo: $('#td-titulo').value.trim() || t.titulo,
     descricao: $('#td-desc').value.trim() || null,
     projeto_id: $('#td-proj').value || null,
-    secao_id: $('#td-sec').value || null,
     area_id: $('#td-area').value || null,
     prioridade: Number($('#td-pri').value) || 4,
     vencimento: $('#td-venc').value || null,
@@ -2004,30 +2007,46 @@ function vistaFeitasHTML() {
   if (aband.length) html += '<details class="help"><summary>🕊️ Abandonadas ('+aband.length+') — decisões legítimas, não falhas</summary><div class="list">'+aband.map(t => taskItemHTML(t)).join('')+'</div></details>';
   return html;
 }
+/* ---- seções padrão do projeto (#24) ----
+   A seção deixa de ser um rótulo criado à mão e passa a ser DERIVADA da data de
+   vencimento da tarefa: a classificação é sempre a mesma em todo projeto e não
+   depende de o usuário lembrar de arrastar nada. Arrastar uma tarefa para outra
+   seção reprograma a data (é o que a seção significa agora).
+   `destino` = nova data ao soltar a tarefa ali; null = seção não recebe solturas. */
+const SECOES_PADRAO = [
+  { id:'atrasadas', icone:'⏰', nome:'Atrasadas', cls:'err', regra:'venceram antes de hoje',
+    teste: t => !!t.vencimento && t.vencimento < hoje(), destino: null },
+  { id:'hoje', icone:'☀️', nome:'Hoje', cls:'ok', regra:'vencem hoje',
+    teste: t => t.vencimento === hoje(), destino: () => hoje() },
+  { id:'proximos', icone:'📆', nome:'Próximos dias', cls:'', regra:'vencem depois de hoje',
+    teste: t => !!t.vencimento && t.vencimento > hoje(), destino: t => (t.vencimento && t.vencimento > hoje()) ? t.vencimento : addDias(hoje(), 1) },
+  { id:'sem_data', icone:'📥', nome:'Sem data', cls:'muted', regra:'ainda não têm data',
+    teste: t => !t.vencimento, destino: () => null }
+];
+const secaoPadrao = id => SECOES_PADRAO.find(s => s.id === id);
+const secaoPadraoDe = t => (SECOES_PADRAO.find(s => s.teste(t)) || SECOES_PADRAO[3]);
 function vistaProjetoHTML(pid) {
   const p = byId('projetos', pid);
   if (!p) return '<div class="empty">Projeto não encontrado.</div>';
   const todas = T('tarefas').filter(t => t.projeto_id === pid && !t.abandonada);
   const feitas = todas.filter(t => t.concluida).length;
   const pct = todas.length ? Math.round(feitas/todas.length*100) : 0;
-  const secs = ordenar(T('secoes').filter(s => s.projeto_id === pid), s => s.ordem||0);
   let html = '<div class="row" style="margin-bottom:6px"><div class="h1" style="flex:1">'+projLabelHTML(p)+'</div>'
-    + '<button class="btn small" data-act="proj-edit" data-id="'+pid+'">✏️</button>'
-    + '<button class="btn small" data-act="sec-add" data-id="'+pid+'">+ Seção</button></div>'
+    + '<button class="btn small" data-act="proj-edit" data-id="'+pid+'">✏️</button></div>'
     + '<div class="row" style="margin-bottom:10px">'+areaChipHTML(p.area_id)
     + '<span class="badge'+(p.status==='ativo'?' ok':'')+'">'+esc(p.status||'ativo')+'</span>'
     + (p.prazo?'<span class="badge">até '+fmtData(p.prazo)+'</span>':'')
     + '<div class="bar" style="flex:1;max-width:200px"><i style="width:'+pct+'%"></i></div><span class="tiny muted">'+pct+'%</span></div>'
     + '<div class="card">'+quickAddHTML({projeto_id:pid, area_id:p.area_id, ph:'+ tarefa neste projeto…'})+'</div>';
-  const grupos = [{id:null, nome:null}, ...secs];
-  for (const g of grupos) {
-    const ts = ordenar(todas.filter(t => !t.concluida && (g.id ? t.secao_id === g.id : !t.secao_id)), t => t.ordem||0);
-    if (g.id) {
-      html += '<div class="sec-head collap" data-act="sec-collap"><span class="arr">▼</span> '+esc(g.nome)+' <span class="badge">'+ts.length+'</span><span class="sp"></span>'
-        + '<button class="iconbtn" data-act="sec-edit" data-id="'+g.id+'">✏️</button></div>';
-    } else if (ts.length) html += '<div class="sec-head">— sem seção</div>';
-    html += '<div class="card pad0 sec-body" data-sec="'+(g.id||'')+'" data-proj="'+pid+'"><div class="list" style="padding:2px 10px;min-height:14px">'
-      + ts.map(t => taskItemHTML(t, {semProjeto:true, drag:true})).join('') + '</div></div>';
+  const pendentes = todas.filter(t => !t.concluida);
+  for (const g of SECOES_PADRAO) {
+    const ts = ordenar(pendentes.filter(g.teste), t => t.ordem||0);
+    html += '<div class="sec-head collap" data-act="sec-collap"><span class="arr">▼</span> '
+      + '<span class="'+g.cls+'">'+g.icone+' '+g.nome+'</span> <span class="badge">'+ts.length+'</span>'
+      + '<span class="sp"></span><span class="tiny muted">'+g.regra+'</span></div>'
+      + '<div class="card pad0 sec-body" data-secp="'+g.id+'" data-proj="'+pid+'"><div class="list" style="padding:2px 10px;min-height:14px">'
+      + (ts.map(t => taskItemHTML(t, {semProjeto:true, drag:true})).join('')
+         || '<div class="tiny muted" style="padding:9px 6px">nenhuma tarefa aqui</div>') + '</div></div>';
   }
   const conc = todas.filter(t => t.concluida);
   if (conc.length) html += '<details class="help"><summary>✔️ Concluídas ('+conc.length+')</summary><div class="list">'+conc.slice(0,40).map(t => taskItemHTML(t,{semProjeto:true})).join('')+'</div></details>';
@@ -2126,30 +2145,9 @@ act('proj-edit', el => {
       toast('Projeto excluído. As tarefas foram para a caixa de entrada.');
     } });
 });
-act('sec-add', el => {
-  const pid = el.dataset.id;
-  editModal({ titulo:'Nova seção', fields:[{k:'nome', l:'Nome', req:1, foco:1, ph:'ex.: Backlog / Fazendo / Feito'}],
-    onSave: v => { dbUpsert('secoes', {projeto_id: pid, nome: v.nome, ordem: T('secoes').filter(s=>s.projeto_id===pid).length}); render(); } });
-});
-act('sec-edit', el => {
-  const s = byId('secoes', el.dataset.id);
-  const irmas = ordenar(T('secoes').filter(x => x.projeto_id === s.projeto_id), x => x.ordem||0);
-  const idx = irmas.findIndex(x => x.id === s.id);
-  editModal({ titulo:'Seção', fields:[{k:'nome', l:'Nome', req:1, foco:1}], vals: s,
-    extra: '<div class="row" style="margin-bottom:10px"><button type="button" class="btn small" data-act="sec-move" data-id="'+s.id+'" data-d="-1"'+(idx<=0?' disabled':'')+'>↑ subir</button>'
-      + '<button type="button" class="btn small" data-act="sec-move" data-id="'+s.id+'" data-d="1"'+(idx>=irmas.length-1?' disabled':'')+'>↓ descer</button></div>',
-    onSave: v => { dbPatch('secoes', s.id, v); render(); },
-    onDelete: () => { T('tarefas').filter(t => t.secao_id === s.id).forEach(t => dbPatch('tarefas', t.id, {secao_id:null}));
-      dbDelete('secoes', s.id); render(); toast('Seção excluída (tarefas mantidas no projeto).'); } });
-});
-act('sec-move', el => {
-  const s = byId('secoes', el.dataset.id); const d = Number(el.dataset.d);
-  const irmas = ordenar(T('secoes').filter(x => x.projeto_id === s.projeto_id), x => x.ordem||0);
-  const i = irmas.findIndex(x => x.id === s.id), j = i + d;
-  if (j < 0 || j >= irmas.length) return;
-  dbPatch('secoes', irmas[i].id, {ordem:j}); dbPatch('secoes', irmas[j].id, {ordem:i});
-  closeModal(); render();
-});
+/* Seções criadas à mão saíram de cena com o padrão automático (#24). A tabela
+   `secoes` e o campo `tarefas.secao_id` continuam existindo e não são apagados —
+   nenhum dado se perde e a mudança é reversível. */
 
 /* ---- drag & drop (desktop) ---- */
 let _dragTaskId = null;
@@ -2162,24 +2160,33 @@ function bindTaskDnD() {
     el.addEventListener('drop', e => { e.preventDefault(); soltarTarefa(el.dataset.tid, el.closest('.sec-body')); });
   });
   $$('.sec-body').forEach(sec => {
+    const g = secaoPadrao(sec.dataset.secp);
+    if (g && !g.destino) return;   // "Atrasadas" não recebe solturas: não dá para agendar para o passado
     sec.addEventListener('dragover', e => { e.preventDefault(); sec.classList.add('drag-over'); });
     sec.addEventListener('dragleave', () => sec.classList.remove('drag-over'));
     sec.addEventListener('drop', e => { e.preventDefault(); if (e.target.closest('.task')) return; soltarTarefa(null, sec); });
   });
 }
+/* Como a seção agora é derivada da data, mover a tarefa de seção = reprogramá-la. */
 function soltarTarefa(antesDeId, secBody) {
   if (!_dragTaskId || !secBody) return;
-  const secId = secBody.dataset.sec || null;
+  const secId = secBody.dataset.secp || '';
+  const g = secaoPadrao(secId);
+  const arrastada = byId('tarefas', _dragTaskId);
+  if (!arrastada || (g && !g.destino)) { _dragTaskId = null; render(); return; }
   const projId = secBody.dataset.proj;
-  const ids = $$('.sec-body[data-sec="'+(secId||'')+'"] .task').map(el => el.dataset.tid).filter(i => i !== _dragTaskId);
+  const ids = $$('.sec-body[data-secp="'+secId+'"] .task').map(el => el.dataset.tid).filter(i => i !== _dragTaskId);
   const pos = antesDeId ? ids.indexOf(antesDeId) : ids.length;
   ids.splice(pos < 0 ? ids.length : pos, 0, _dragTaskId);
+  const novaData = g ? g.destino(arrastada) : arrastada.vencimento;
+  const mudouData = g && novaData !== arrastada.vencimento;
   ids.forEach((tid, i) => { const t = byId('tarefas', tid); if (!t) return;
     const patch = {ordem: i*10};
-    if (tid === _dragTaskId) { patch.secao_id = secId; patch.projeto_id = projId; }
+    if (tid === _dragTaskId) { patch.projeto_id = projId; if (g) patch.vencimento = novaData; }
     dbPatch('tarefas', tid, patch);
   });
   _dragTaskId = null;
+  if (mudouData) toast('“'+esc(arrastada.titulo)+'” → '+g.icone+' '+g.nome+(novaData?' ('+fmtData(novaData)+')':''), {icone:'📅'});
   render();
 }
 
