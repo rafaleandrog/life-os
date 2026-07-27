@@ -1436,8 +1436,12 @@ BootHooks.push(() => {
 });
 /* ════════════════ ETAPA 3 — TAREFAS (Todoist completo) ════════════════ */
 function addCSS(css) { const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s); }
-addCSS('.tar-grid{display:grid;grid-template-columns:235px 1fr;gap:18px;align-items:start}'
- + '@media(max-width:899px){.tar-grid{grid-template-columns:1fr}.tar-aside{display:none}}'
+/* minmax(0,…) nas colunas: sem isso a trilha do grid não encolhe abaixo da largura
+   intrínseca do conteúdo (a régua de chips), e a tela inteira de Tarefas ficava
+   ~200px mais larga que o celular. */
+addCSS('.tar-grid{display:grid;grid-template-columns:235px minmax(0,1fr);gap:18px;align-items:start}'
+ + '.tar-grid>*{min-width:0}'
+ + '@media(max-width:899px){.tar-grid{grid-template-columns:minmax(0,1fr)}.tar-aside{display:none}}'
  + '.tar-aside .navit{padding:7px 10px;font-size:13.5px}'
  + '.tar-vistas{display:none}@media(max-width:899px){.tar-vistas{display:flex;gap:7px;overflow-x:auto;padding:2px 0 10px;-webkit-overflow-scrolling:touch}}'
  + '.sec-head{display:flex;align-items:center;gap:8px;padding:10px 4px 4px;font-weight:700;font-size:13px;color:var(--txt2)}'
@@ -2877,9 +2881,11 @@ reg('hoje', {
 const diaRow = data => byId('dias', data || hoje());
 function ritualBotoesHTML() {
   const d = diaRow() || {};
-  return '<div class="row" style="margin-bottom:14px">'
-    + '<button class="btn '+(d.planejado?'ok':'primary')+'" data-act="ritual-planejar" style="flex:1">'+(d.planejado?'✓ Dia planejado':'▶ Planejar o dia')+'</button>'
-    + '<button class="btn '+(d.encerrado?'ok':'')+'" data-act="ritual-encerrar" style="flex:1">'+(d.encerrado?'✓ Dia encerrado':'◼ Encerrar o dia')+'</button></div>';
+  // flex-basis + wrap: lado a lado quando cabe, empilhados em telas estreitas
+  // (com nowrap no .btn, forçá-los em uma linha só estourava a largura em 320px)
+  return '<div class="row wrap" style="margin-bottom:14px">'
+    + '<button class="btn '+(d.planejado?'ok':'primary')+'" data-act="ritual-planejar" style="flex:1 1 150px">'+(d.planejado?'✓ Dia planejado':'▶ Planejar o dia')+'</button>'
+    + '<button class="btn '+(d.encerrado?'ok':'')+'" data-act="ritual-encerrar" style="flex:1 1 150px">'+(d.encerrado?'✓ Dia encerrado':'◼ Encerrar o dia')+'</button></div>';
 }
 /* ---- Planejar o dia — SELEÇÃO DE PROJETOS + CORTE DE 8h (sem blocos, sem SQL) ----
    Abre com os projetos que têm tarefa para HOJE já marcados. A lista é montada por

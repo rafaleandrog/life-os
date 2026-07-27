@@ -22,6 +22,11 @@ body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--font);font
   -webkit-font-smoothing:antialiased;overscroll-behavior:none;overflow-x:clip;-webkit-tap-highlight-color:transparent}
 /* feel-de-app no mobile: sem realce azul no toque e sem seleção/menu de texto nos controles (texto comum continua selecionável) */
 .navit,.tb,.btn,.chip,.badge,.iconbtn,.seg-b,.bloco-head,.fab,.fab-desktop{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+/* toque responde na hora: sem espera de duplo-toque-para-zoom, que é o atraso
+   que mais denuncia "site aberto no celular" em vez de aplicativo */
+button,.navit,.tb,.chip,.item,.check,.fab,.fab-desktop,.iconbtn,.seg button,summary,label,a{touch-action:manipulation}
+/* tabela larga rola dentro do próprio card, nunca empurra a página */
+.tbl{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap}
 button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 a{color:var(--acc);text-decoration:none}
 ::selection{background:var(--acc-soft)}
@@ -48,9 +53,15 @@ a{color:var(--acc);text-decoration:none}
 
 @media (max-width:899px){
   #sidebar{display:none}
-  #main{margin-left:0;padding:14px 14px 130px;max-width:none}
+  /* respeita o recorte lateral da tela (notch em paisagem) além do inferior */
+  #main{margin-left:0;max-width:none;
+    padding:14px calc(14px + env(safe-area-inset-right)) 130px calc(14px + env(safe-area-inset-left))}
+  /* #topbar é irmão de #main (não filho): as margens negativas de -14px foram
+     escritas para cancelar o padding do #main, que não o afeta — só deixavam a
+     barra 28px mais larga que a tela e criavam rolagem horizontal no app todo.
+     Sem elas a barra já ocupa exatamente a largura da tela. */
   #topbar{display:flex;position:sticky;top:0;z-index:30;background:rgba(14,15,19,.92);backdrop-filter:blur(10px);
-    margin:calc(-14px - env(safe-area-inset-top)) -14px 10px;padding:calc(13px + env(safe-area-inset-top)) 16px 13px;
+    margin:0 0 10px;padding:calc(13px + env(safe-area-inset-top)) 16px 13px;
     align-items:center;gap:10px;border-bottom:1px solid var(--border)}
   #topbar .t{font-weight:700;font-size:17px;flex:1}
   #tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;height:calc(var(--tabbar-h) + env(safe-area-inset-bottom));
