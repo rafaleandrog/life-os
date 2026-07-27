@@ -1882,43 +1882,67 @@ reg('tarefas', {
     bindTaskDnD();
   }
 });
-function tarAsideHTML(vista) {
+/* Emoji do filtro (#31): guardado dentro de `criterios` (jsonb) para não exigir
+   migração de schema — `avaliarFiltro` só lê as chaves de critério que conhece. */
+const iconeFiltro = f => (f && f.criterios && f.criterios.icone) || '🔍';
+const EMOJIS_FILTRO = ['🔍','🔥','⚡','⭐','🎯','🚩','💼','🏠','📞','💡','🧠','🧹','💸','❤️','🌱','⏰'];
+
+/* Contagem de cada item da lateral de Tarefas (#25) — sempre o mesmo número que
+   a visão correspondente mostra ao ser aberta. */
+function contagensTarefas() {
   const pend = tarefasPendentes();
-  const nHoje = pend.filter(t => t.vencimento && t.vencimento <= hoje()).length;
-  const nInbox = pend.filter(t => !t.projeto_id).length;
+  const limiteSemana = addDias(hoje(), 6);
+  return {
+    pend,
+    inbox:  pend.filter(t => !t.projeto_id).length,
+    hoje:   pend.filter(t => t.vencimento && t.vencimento <= hoje()).length,
+    semana: pend.filter(t => t.vencimento && t.vencimento <= limiteSemana).length,
+    feitas: T('tarefas').filter(t => t.concluida).length,
+    projeto: pid => pend.filter(t => t.projeto_id === pid).length,
+    etiqueta: nome => pend.filter(t => (t.etiquetas||[]).includes(nome)).length,
+    filtro: f => T('tarefas').filter(t => avaliarFiltro(f.criterios, t)).length
+  };
+}
+function tarAsideHTML(vista) {
+  const c = contagensTarefas();
   const li = (rota, em, nome, n) => '<button class="navit'+(vista===rota?' on':'')+'" data-act="nav" data-r="tarefas/'+rota+'"><span class="em">'+em+'</span><span style="flex:1">'+nome+'</span>'+(n?'<span class="badge">'+n+'</span>':'')+'</button>';
-  let html = li('v/inbox','📥','Caixa de entrada',nInbox) + li('v/hoje','☀️','Hoje',nHoje) + li('v/semana','📆','Próximos 7 dias','') + li('v/feitas','✔️','Concluídas','');
+  let html = li('v/inbox','📥','Caixa de entrada',c.inbox) + li('v/hoje','☀️','Hoje',c.hoje)
+    + li('v/semana','📆','Próximos 7 dias',c.semana) + li('v/feitas','✔️','Concluídas',c.feitas);
   const filtros = ordenar(T('filtros'), f => f.ordem||0);
   html += '<div class="sec-head">Filtros <span class="sp"></span><button class="iconbtn" data-act="filtro-add" title="novo filtro">＋</button></div>';
-  html += filtros.map(f => li('filtro/'+f.id,'🔍',esc(f.nome),'')).join('') || '<span class="tiny muted" style="padding:0 12px">crie filtros salvos</span>';
+  html += filtros.map(f => li('filtro/'+f.id, iconeFiltro(f), esc(f.nome), c.filtro(f))).join('') || '<span class="tiny muted" style="padding:0 12px">crie filtros salvos</span>';
   html += '<div class="sec-head">Projetos <span class="sp"></span><button class="iconbtn" data-act="proj-add" title="novo projeto">＋</button></div>';
   const areasOrd = ordenar(T('areas'), a => a.ordem||0);
   for (const a of [...areasOrd, null]) {
     const projs = T('projetos').filter(p => (a ? p.area_id === a.id : !p.area_id) && p.status !== 'arquivado');
     if (!projs.length) continue;
     if (a) html += '<div class="tiny" style="padding:6px 12px 0;color:'+a.cor+';font-weight:700">'+a.icone+' '+esc(a.nome).toUpperCase()+'</div>';
-    html += projs.map(p => li('projeto/'+p.id, projIconeHTML(p), esc(p.nome), pend.filter(t=>t.projeto_id===p.id).length)).join('');
+    html += projs.map(p => li('projeto/'+p.id, projIconeHTML(p), esc(p.nome), c.projeto(p.id))).join('');
   }
   const tagsUsadas = ordenar(T('etiquetas'), e => e.nome);
   if (tagsUsadas.length) {
-    html += '<div class="sec-head">Etiquetas</div>' + tagsUsadas.map(e => li('etiqueta/'+encodeURIComponent(e.nome),'🏷️','@'+esc(e.nome), '')).join('');
+    html += '<div class="sec-head">Etiquetas</div>' + tagsUsadas.map(e => li('etiqueta/'+encodeURIComponent(e.nome),'🏷️','@'+esc(e.nome), c.etiqueta(e.nome))).join('');
   }
   return html;
 }
+const cntHTML = n => n ? ' <span class="badge">'+n+'</span>' : '';
 function tarVistasMobileHTML(vista) {
-  const chip = (rota, l) => '<span class="chip'+(vista===rota?' sel':'')+'" data-act="nav" data-r="tarefas/'+rota+'">'+l+'</span>';
-  return '<div class="tar-vistas">'+chip('v/inbox','📥 Inbox')+chip('v/hoje','☀️ Hoje')+chip('v/semana','📆 7 dias')
-    + '<span class="chip" data-act="tar-projetos-sheet">📁 Projetos</span><span class="chip" data-act="tar-mais-sheet">⋯</span>'+chip('v/feitas','✔️ Feitas')+'</div>';
+  const c = contagensTarefas();
+  const chip = (rota, l, n) => '<span class="chip'+(vista===rota?' sel':'')+'" data-act="nav" data-r="tarefas/'+rota+'">'+l+cntHTML(n)+'</span>';
+  return '<div class="tar-vistas">'+chip('v/inbox','📥 Inbox',c.inbox)+chip('v/hoje','☀️ Hoje',c.hoje)+chip('v/semana','📆 7 dias',c.semana)
+    + '<span class="chip" data-act="tar-projetos-sheet">📁 Projetos</span><span class="chip" data-act="tar-mais-sheet">⋯</span>'+chip('v/feitas','✔️ Feitas',c.feitas)+'</div>';
 }
 act('tar-projetos-sheet', () => {
+  const c = contagensTarefas();
   modal('<div class="bx-h"><div class="h2">Projetos</div><button class="btn small" data-act="proj-add">+ Novo</button></div><div class="list">'
-    + T('projetos').filter(p => p.status !== 'arquivado').map(p => '<div class="item" data-act="nav-close" data-r="tarefas/projeto/'+p.id+'"><span>'+projIconeHTML(p)+'</span><div class="grow"><div class="ttl">'+esc(p.nome)+'</div><div class="sub">'+(areaDe(p.area_id)?areaChipHTML(p.area_id):'')+'</div></div></div>').join('')
+    + T('projetos').filter(p => p.status !== 'arquivado').map(p => '<div class="item" data-act="nav-close" data-r="tarefas/projeto/'+p.id+'"><span>'+projIconeHTML(p)+'</span><div class="grow"><div class="ttl">'+esc(p.nome)+'</div><div class="sub">'+(areaDe(p.area_id)?areaChipHTML(p.area_id):'')+'</div></div><span class="badge">'+c.projeto(p.id)+'</span></div>').join('')
     + '</div>');
 });
 act('tar-mais-sheet', () => {
+  const c = contagensTarefas();
   modal('<div class="bx-h"><div class="h2">Etiquetas e filtros</div><button class="btn small" data-act="filtro-add">+ Filtro</button></div>'
-    + '<div class="h3">Filtros</div><div class="row wrap">'+ (T('filtros').map(f => '<span class="chip" data-act="nav-close" data-r="tarefas/filtro/'+f.id+'">🔍 '+esc(f.nome)+'</span>').join('') || '<span class="muted small">nenhum</span>') +'</div><hr class="sep">'
-    + '<div class="h3">Etiquetas</div><div class="row wrap">'+ (T('etiquetas').map(e => '<span class="chip" data-act="nav-close" data-r="tarefas/etiqueta/'+encodeURIComponent(e.nome)+'">@'+esc(e.nome)+'</span>').join('') || '<span class="muted small">nenhuma</span>') +'</div>');
+    + '<div class="h3">Filtros</div><div class="row wrap">'+ (ordenar(T('filtros'), f => f.ordem||0).map(f => '<span class="chip" data-act="nav-close" data-r="tarefas/filtro/'+f.id+'">'+iconeFiltro(f)+' '+esc(f.nome)+cntHTML(c.filtro(f))+'</span>').join('') || '<span class="muted small">nenhum</span>') +'</div><hr class="sep">'
+    + '<div class="h3">Etiquetas</div><div class="row wrap">'+ (T('etiquetas').map(e => '<span class="chip" data-act="nav-close" data-r="tarefas/etiqueta/'+encodeURIComponent(e.nome)+'">@'+esc(e.nome)+cntHTML(c.etiqueta(e.nome))+'</span>').join('') || '<span class="muted small">nenhuma</span>') +'</div>');
 });
 function tarConteudoHTML(vista) {
   const [tipo, arg] = vista.split('/');
@@ -2033,7 +2057,8 @@ function vistaFiltroHTML(fid) {
   const f = byId('filtros', fid);
   if (!f) return '<div class="empty">Filtro não encontrado.</div>';
   const ts = ordenar(T('tarefas').filter(t => avaliarFiltro(f.criterios, t)), ordTarefa);
-  return '<div class="row" style="margin-bottom:8px"><div class="h1" style="flex:1">🔍 '+esc(f.nome)+'</div>'
+  return '<div class="row" style="margin-bottom:8px"><div class="h1" style="flex:1">'+iconeFiltro(f)+' '+esc(f.nome)
+    + ' <span class="badge">'+ts.length+'</span></div>'
     + '<button class="btn small" data-act="filtro-edit" data-id="'+fid+'">✏️ Editar</button></div>'
     + '<div class="card pad0"><div class="list" style="padding:4px 10px">'
     + (ts.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🔍</span>Nada bate com este filtro.</div>') + '</div></div>';
@@ -2041,8 +2066,13 @@ function vistaFiltroHTML(fid) {
 function filtroModal(f) {
   const c = (f && f.criterios) || {};
   const chips = (lista, sels, attr) => lista.map(([v,l]) => '<span class="chip mini'+((sels||[]).includes(v)?' sel':'')+'" data-fl="'+attr+'" data-v="'+esc(v)+'">'+l+'</span>').join('');
+  const ic = iconeFiltro(f);
   modal('<div class="bx-h"><div class="h2">'+(f?'Editar':'Novo')+' filtro</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-    + '<div class="field"><label>Nome *</label><input class="input" id="fl-nome" value="'+esc(f?f.nome:'')+'" placeholder="ex.: Urgente do trabalho esta semana" autofocus></div>'
+    + '<div class="frow"><div class="field" style="flex:0 0 92px"><label>Emoji</label>'
+    + '<input class="input center" id="fl-icone" value="'+esc(ic)+'" maxlength="4" style="font-size:20px"></div>'
+    + '<div class="field" style="flex:1"><label>Nome *</label><input class="input" id="fl-nome" value="'+esc(f?f.nome:'')+'" placeholder="ex.: Urgente do trabalho esta semana" autofocus></div></div>'
+    + '<div class="row wrap" style="gap:5px;margin:-4px 0 12px">'
+    + EMOJIS_FILTRO.map(e => '<span class="chip mini" data-act="fl-emoji" data-e="'+e+'" style="font-size:15px;padding:3px 7px">'+e+'</span>').join('')+'</div>'
     + '<div class="field"><label>Prioridades</label><div class="row wrap">'+chips([[1,'P1'],[2,'P2'],[3,'P3'],[4,'P4']], c.prioridades, 'pri')+'</div></div>'
     + '<div class="field"><label>Áreas</label><div class="row wrap">'+chips(T('areas').map(a=>[a.id, a.icone+' '+esc(a.nome)]), c.areas, 'area')+'</div></div>'
     + '<div class="field"><label>Projetos</label><div class="row wrap">'+chips(T('projetos').filter(p=>p.status!=='arquivado').map(p=>[p.id, esc(p.nome)]), c.projetos, 'proj')+'</div></div>'
@@ -2057,12 +2087,16 @@ function filtroModal(f) {
 }
 act('filtro-add', () => filtroModal(null));
 act('filtro-edit', el => filtroModal(byId('filtros', el.dataset.id)));
+act('fl-emoji', el => { $('#fl-icone').value = el.dataset.e; });
 act('filtro-save', el => {
   const nome = $('#fl-nome').value.trim(); if (!nome) { toast('Dê um nome ao filtro.'); return; }
   const pega = attr => $$('.chip.sel[data-fl="'+attr+'"]').map(c => attr==='pri' ? Number(c.dataset.v) : c.dataset.v);
   const criterios = { prioridades: pega('pri'), areas: pega('area'), projetos: pega('proj'), etiquetas: pega('tag'),
-    venc: $('#fl-venc').value || null, incluir_concluidas: $('#fl-conc').checked };
-  const f = dbUpsert('filtros', { id: el.dataset.id || undefined, nome, criterios, ordem: T('filtros').length });
+    venc: $('#fl-venc').value || null, incluir_concluidas: $('#fl-conc').checked,
+    icone: ($('#fl-icone').value || '').trim() || '🔍' };
+  const anterior = el.dataset.id ? byId('filtros', el.dataset.id) : null;
+  const f = dbUpsert('filtros', { id: el.dataset.id || undefined, nome, criterios,
+    ordem: anterior ? (anterior.ordem || 0) : T('filtros').length });
   closeModal(); nav('tarefas/filtro/'+f.id);
 });
 act('filtro-del', el => { const f = {...byId('filtros', el.dataset.id)}; dbDelete('filtros', el.dataset.id); closeModal(); nav('tarefas');
