@@ -1961,15 +1961,20 @@ function tarConteudoHTML(vista) {
 const ordTarefa = t => (t.hora ? '1'+t.hora : '2') + (t.prioridade||4) + (t.vencimento||'9999');
 function vistaHojeHTML() {
   const pend = tarefasPendentes();
-  const atrasadas = ordenar(pend.filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
-  const deHoje = ordenar(pend.filter(t => t.vencimento === hoje()), ordTarefa);
+  const gAtr = secaoPadrao('atrasadas'), gHoje = secaoPadrao('hoje'), gBack = secaoPadrao('backlog');
+  const atrasadas = ordenar(pend.filter(gAtr.teste), t => t.vencimento);
+  const deHoje = ordenar(pend.filter(gHoje.teste), ordTarefa);
+  const backlog = ordenar(pend.filter(gBack.teste), t => t.ordem||0);
   const feitasHoje = T('tarefas').filter(t => t.concluida && (t.concluida_em||'').slice(0,10) === hoje());
   let html = '<div class="h1">☀️ Hoje <span class="muted" style="font-weight:400;font-size:14px">'+fmtData(hoje(),{semHoje:1})+'</span></div>';
   html += '<div class="card">'+quickAddHTML({def_venc: hoje()})+'</div>';
-  if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px"><span class="err">⏰ Atrasadas ('+atrasadas.length+')</span></div><div class="list" style="padding:0 10px 8px">'
+  if (atrasadas.length) html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px"><span class="'+gAtr.cls+'">'+gAtr.icone+' '+gAtr.nome+' ('+atrasadas.length+')</span></div><div class="list" style="padding:0 10px 8px">'
     + atrasadas.map(t => taskItemHTML(t, {rollover:true})).join('') + '</div></div>';
-  html += '<div class="card pad0"><div class="list" style="padding:4px 10px">'
-    + (deHoje.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🌤️</span>Nada para hoje. Adicione acima ou puxe do backlog.</div>') + '</div></div>';
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px"><span class="'+gHoje.cls+'">'+gHoje.icone+' '+gHoje.nome+' ('+deHoje.length+')</span></div><div class="list" style="padding:0 10px 8px">'
+    + (deHoje.map(t => taskItemHTML(t)).join('') || '<div class="empty"><span class="em">🌤️</span>Nada para hoje. Adicione acima ou puxe do Backlog.</div>') + '</div></div>';
+  // Backlog visível aqui também: dar data é o que tira a tarefa de lá (#26)
+  if (backlog.length) html += '<details class="help"><summary>'+gBack.icone+' '+gBack.nome+' ('+backlog.length+') <span class="tiny muted">— '+gBack.regra+'</span></summary>'
+    + '<div class="list">'+backlog.slice(0, 30).map(t => taskItemHTML(t)).join('')+'</div></details>';
   if (feitasHoje.length) html += '<details class="help"><summary>✔️ Concluídas hoje ('+feitasHoje.length+')</summary><div class="list">'+feitasHoje.map(t => taskItemHTML(t)).join('')+'</div></details>';
   return html;
 }
@@ -2007,11 +2012,13 @@ function vistaFeitasHTML() {
   if (aband.length) html += '<details class="help"><summary>🕊️ Abandonadas ('+aband.length+') — decisões legítimas, não falhas</summary><div class="list">'+aband.map(t => taskItemHTML(t)).join('')+'</div></details>';
   return html;
 }
-/* ---- seções padrão do projeto (#24) ----
+/* ---- seções padrão do projeto (#24 + #26) ----
    A seção deixa de ser um rótulo criado à mão e passa a ser DERIVADA da data de
    vencimento da tarefa: a classificação é sempre a mesma em todo projeto e não
-   depende de o usuário lembrar de arrastar nada. Arrastar uma tarefa para outra
-   seção reprograma a data (é o que a seção significa agora).
+   depende de o usuário lembrar de arrastar nada. A data é a única porta de
+   entrada — sem data a tarefa cai no Backlog; com data, a seção é escolhida
+   pela comparação com hoje. Arrastar para outra seção reprograma a data (é o
+   que a seção significa agora).
    `destino` = nova data ao soltar a tarefa ali; null = seção não recebe solturas. */
 const SECOES_PADRAO = [
   { id:'atrasadas', icone:'⏰', nome:'Atrasadas', cls:'err', regra:'venceram antes de hoje',
@@ -2020,9 +2027,20 @@ const SECOES_PADRAO = [
     teste: t => t.vencimento === hoje(), destino: () => hoje() },
   { id:'proximos', icone:'📆', nome:'Próximos dias', cls:'', regra:'vencem depois de hoje',
     teste: t => !!t.vencimento && t.vencimento > hoje(), destino: t => (t.vencimento && t.vencimento > hoje()) ? t.vencimento : addDias(hoje(), 1) },
-  { id:'sem_data', icone:'📥', nome:'Sem data', cls:'muted', regra:'ainda não têm data',
+  { id:'backlog', icone:'📥', nome:'Backlog', cls:'muted', regra:'sem data — entram aqui sozinhas',
     teste: t => !t.vencimento, destino: () => null }
 ];
+/* Texto único das regras, usado no projeto e onde mais precisar explicar a divisão. */
+function regrasSecoesHTML() {
+  return '<details class="help"><summary>Como as seções funcionam</summary>'
+    + '<p class="small muted" style="margin:8px 0">A seção não se escolhe à mão: ela é a <b>data de vencimento</b> da tarefa. '
+    + 'Mudou a data, a tarefa troca de seção sozinha — e arrastar entre seções é justamente uma forma de reprogramar.</p>'
+    + '<div class="list">' + SECOES_PADRAO.map(s => '<div class="item" style="cursor:default">'
+      + '<span>'+s.icone+'</span><div class="grow"><div class="ttl '+s.cls+'">'+s.nome+'</div>'
+      + '<div class="sub">'+s.regra+'</div></div></div>').join('') + '</div>'
+    + '<p class="tiny muted" style="margin:8px 0 2px">Toda tarefa nova sem data começa no <b>📥 Backlog</b>. '
+    + 'Dar uma data é o que a tira de lá.</p></details>';
+}
 const secaoPadrao = id => SECOES_PADRAO.find(s => s.id === id);
 const secaoPadraoDe = t => (SECOES_PADRAO.find(s => s.teste(t)) || SECOES_PADRAO[3]);
 function vistaProjetoHTML(pid) {
@@ -2037,7 +2055,8 @@ function vistaProjetoHTML(pid) {
     + '<span class="badge'+(p.status==='ativo'?' ok':'')+'">'+esc(p.status||'ativo')+'</span>'
     + (p.prazo?'<span class="badge">até '+fmtData(p.prazo)+'</span>':'')
     + '<div class="bar" style="flex:1;max-width:200px"><i style="width:'+pct+'%"></i></div><span class="tiny muted">'+pct+'%</span></div>'
-    + '<div class="card">'+quickAddHTML({projeto_id:pid, area_id:p.area_id, ph:'+ tarefa neste projeto…'})+'</div>';
+    + '<div class="card">'+quickAddHTML({projeto_id:pid, area_id:p.area_id, ph:'+ tarefa neste projeto…'})+'</div>'
+    + regrasSecoesHTML();
   const pendentes = todas.filter(t => !t.concluida);
   for (const g of SECOES_PADRAO) {
     const ts = ordenar(pendentes.filter(g.teste), t => t.ordem||0);
@@ -2524,21 +2543,32 @@ function hojeForaPlanoHTML() {
   return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">📋 Hoje, fora do plano <span class="muted tiny">'+fora.length+'</span></div>'
     + '<div class="list" style="padding:0 10px 8px">'+fora.map(t => taskItemHTML(t, {planAdd:true})).join('')+'</div></div>';
 }
-/* Seção 3 — Atrasadas (venc. < hoje). */
+/* Seção 3 — Atrasadas (venc. < hoje). Mesmo rótulo/cor da seção padrão do projeto. */
 function hojeAtrasadasHTML() {
-  const atr = ordenar(tarefasPendentes().filter(t => t.vencimento && t.vencimento < hoje()), t => t.vencimento);
+  const g = secaoPadrao('atrasadas');
+  const atr = ordenar(tarefasPendentes().filter(g.teste), t => t.vencimento);
   if (!atr.length) return '';
-  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="err">⏰ Atrasadas</span> <span class="muted tiny">'+atr.length+'</span></div>'
+  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px"><span class="'+g.cls+'">'+g.icone+' '+g.nome+'</span> <span class="muted tiny">'+atr.length+'</span></div>'
     + '<div class="list" style="padding:0 10px 8px">'+atr.slice(0, 12).map(t => taskItemHTML(t, {planAdd:true, rollover:true})).join('')
     + (atr.length > 12 ? '<div class="tiny muted center" style="padding:6px">+'+(atr.length-12)+' na visão Tarefas</div>' : '')+'</div></div>';
 }
-/* Seção 4 — Restante da semana (amanhã até domingo). */
+/* Seção 4 — Próximos dias, recortado no fim da semana. */
 function hojeSemanaHTML() {
-  const fim = fimSemana(hoje());
-  const sem = ordenar(tarefasPendentes().filter(t => t.vencimento && t.vencimento > hoje() && t.vencimento <= fim), t => t.vencimento).slice(0, 20);
+  const g = secaoPadrao('proximos'), fim = fimSemana(hoje());
+  const sem = ordenar(tarefasPendentes().filter(t => g.teste(t) && t.vencimento <= fim), t => t.vencimento).slice(0, 20);
   if (!sem.length) return '';
-  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">📆 Restante da semana <span class="muted tiny">até '+fmtDataCurta(fim)+'</span></div>'
+  return '<div class="card pad0"><div class="sec-head" style="padding:10px 14px 2px">'+g.icone+' '+g.nome+' <span class="muted tiny">até '+fmtDataCurta(fim)+'</span></div>'
     + '<div class="list" style="padding:0 10px 8px">'+sem.map(t => taskItemHTML(t, {planAdd:true})).join('')+'</div></div>';
+}
+/* Seção 5 — Backlog (#26): tarefas sem data nunca apareciam na tela Hoje e ficavam
+   esquecidas. Aparecem aqui, recolhidas, prontas para serem puxadas ao dia. */
+function hojeBacklogHTML() {
+  const g = secaoPadrao('backlog');
+  const bl = ordenar(tarefasPendentes().filter(g.teste), t => t.ordem||0);
+  if (!bl.length) return '';
+  return '<details class="help"><summary>'+g.icone+' '+g.nome+' ('+bl.length+') <span class="tiny muted">— '+g.regra+'</span></summary>'
+    + '<div class="list">'+bl.slice(0, 20).map(t => taskItemHTML(t, {planAdd:true})).join('')
+    + (bl.length > 20 ? '<div class="tiny muted center" style="padding:6px">+'+(bl.length-20)+' na visão Tarefas</div>' : '')+'</div></details>';
 }
 /* ---- KPI velocímetro por bloco (Etapa D) ---- */
 function gaugeHTML(pct, label, sub, cor) {
@@ -2834,6 +2864,7 @@ reg('hoje', {
     html += '</div><div>'
       + hojeAtrasadasHTML()
       + hojeSemanaHTML()
+      + hojeBacklogHTML()
       + '<div class="card"><div class="h3">🔁 Hábitos de hoje</div>'+(habitoChipsHTML() || '<span class="muted small">Nenhum hábito ativo.</span>')+'</div>'
       + timerCardHTML() + '</div></div>';
     return html;
