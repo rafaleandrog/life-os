@@ -5043,6 +5043,7 @@ function fluxoTabHTML(ym) {
     + '<button class="btn primary" data-act="qa-gasto">+ Gasto</button>'
     + '<button class="btn" data-act="lc-nova-entrada">+ Entrada</button>'
     + '<button class="btn" data-act="lc-completo">+ Conta a pagar / recorrente</button>'
+    + '<button class="btn" data-act="fin-import">📥 Importar CSV</button>'
     + '<button class="btn ghost" data-act="fin-cats">🏷️ Categorias</button>'
     + '<button class="btn ghost" data-act="fin-contas">🏦 Contas</button></div>';
   // contas a pagar / receber
@@ -5131,6 +5132,195 @@ function salvarLancCompleto(v, existente) {
     recorrencia: v.recorrente ? { freq:'mensal', dia: pDate(v.data || hoje()).getDate() } : null });
   render();
 }
+/* ════════ IMPORTAÇÃO DE CSV (#27) ════════
+   Caminho curto para subir listas de gastos e receitas sem digitar uma a uma.
+   Tudo é resolvido no cliente e gravado pelo dbUpsert de sempre, então os
+   registros entram no Supabase pela fila de sincronização normal — nenhum SQL
+   novo, nenhuma coluna nova, nada para o usuário configurar.
+   Colunas aceitas: data, descricao, valor, tipo, categoria, conta, status.
+   Categorias e contas citadas que ainda não existem são criadas na hora. */
+const CSV_COLS = {
+  data:      ['data','date','dia','vencimento','data_lancamento'],
+  descricao: ['descricao','descrição','description','historico','histórico','memo','titulo','título'],
+  valor:     ['valor','value','amount','quantia','montante','preco','preço'],
+  tipo:      ['tipo','type','natureza','entrada_saida'],
+  categoria: ['categoria','category','segmento','segmentacao','segmentação','classificacao','classificação'],
+  conta:     ['conta','account','banco','carteira'],
+  status:    ['status','pago','situacao','situação','pago_recebido']
+};
+const CSV_MODELO = 'data;descricao;valor;tipo;categoria;conta;status\n'
+  + '2026-07-01;Salário;7500,00;entrada;Salário;Conta principal;pago\n'
+  + '2026-07-03;Mercado do mês;842,35;saida;Mercado;Conta principal;pago\n'
+  + '2026-07-05;Assinatura streaming;39,90;saida;Assinaturas;Conta principal;pago\n'
+  + '2026-07-10;Aluguel;2200,00;saida;Moradia;Conta principal;pendente\n'
+  + '2026-07-15;Freela projeto X;1200,00;entrada;Extra;Carteira;pendente\n';
+
+/* separa uma linha respeitando aspas; aceita ; ou , como separador */
+function csvLinha(linha, sep) {
+  const out = []; let atual = '', aspas = false;
+  for (let i = 0; i < linha.length; i++) {
+    const c = linha[i];
+    if (c === '"') { if (aspas && linha[i+1] === '"') { atual += '"'; i++; } else aspas = !aspas; }
+    else if (c === sep && !aspas) { out.push(atual); atual = ''; }
+    else atual += c;
+  }
+  out.push(atual);
+  return out.map(s => s.trim());
+}
+const csvSeparador = cab => (cab.split(';').length >= cab.split(',').length ? ';' : ',');
+/* "1.234,56" (BR) e "1,234.56" (US) → número. Parênteses ou sinal = saída. */
+function csvValor(bruto) {
+  let s = String(bruto || '').replace(/\s|R\$/gi, '');
+  if (!s) return { valor: NaN, negativo: false };
+  const negativo = /^\(.*\)$/.test(s) || s.startsWith('-');
+  s = s.replace(/[()\-+]/g, '');
+  const ultVirg = s.lastIndexOf(','), ultPonto = s.lastIndexOf('.');
+  if (ultVirg > ultPonto) s = s.replace(/\./g, '').replace(',', '.');   // BR
+  else s = s.replace(/,/g, '');                                        // US
+  return { valor: Math.abs(Number(s)), negativo };
+}
+/* aceita AAAA-MM-DD, DD/MM/AAAA e DD-MM-AAAA */
+function csvData(bruto) {
+  const s = String(bruto || '').trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + '-' + pad2(+m[2]) + '-' + pad2(+m[3]);
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (m) { const a = m[3].length === 2 ? '20' + m[3] : m[3]; return a + '-' + pad2(+m[2]) + '-' + pad2(+m[1]); }
+  return null;
+}
+function csvMapearColunas(cabecalho) {
+  const norms = cabecalho.map(c => norm(c).replace(/^"|"$/g, ''));
+  const mapa = {};
+  for (const [campo, nomes] of Object.entries(CSV_COLS)) {
+    const i = norms.findIndex(c => nomes.some(n => c === norm(n)));
+    if (i >= 0) mapa[campo] = i;
+  }
+  return mapa;
+}
+/* texto → {linhas:[{...}], erros:[...]}; não grava nada, só interpreta */
+function csvInterpretar(texto) {
+  const cru = texto.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+  if (cru.length < 2) return { linhas: [], erros: ['O arquivo precisa ter o cabeçalho e ao menos uma linha.'], mapa: {} };
+  const sep = csvSeparador(cru[0]);
+  const mapa = csvMapearColunas(csvLinha(cru[0], sep));
+  const faltando = ['data','valor'].filter(c => mapa[c] === undefined);
+  if (faltando.length) return { linhas: [], mapa, erros: ['Faltam colunas obrigatórias no cabeçalho: ' + faltando.join(', ') + '. Baixe a planilha padrão para ver o formato.'] };
+  const linhas = [], erros = [];
+  cru.slice(1).forEach((l, i) => {
+    const c = csvLinha(l, sep);
+    const pega = k => mapa[k] !== undefined ? (c[mapa[k]] || '') : '';
+    const data = csvData(pega('data'));
+    const { valor, negativo } = csvValor(pega('valor'));
+    if (!data) { erros.push('Linha ' + (i+2) + ': data inválida ("' + pega('data') + '").'); return; }
+    if (!(valor > 0)) { erros.push('Linha ' + (i+2) + ': valor inválido ("' + pega('valor') + '").'); return; }
+    const tipoTxt = norm(pega('tipo'));
+    const tipo = tipoTxt ? (/entrada|receita|credito|crédito|receb/.test(tipoTxt) ? 'entrada' : 'saida')
+                         : (negativo ? 'saida' : 'entrada');   // sem coluna tipo: sinal do valor decide
+    const st = norm(pega('status'));
+    linhas.push({ data, valor, tipo,
+      descricao: pega('descricao') || null,
+      categoria: pega('categoria') || null,
+      conta: pega('conta') || null,
+      pago: st ? !/pendente|aberto|previsto|nao|não|a pagar|a receber/.test(st) : true });
+  });
+  return { linhas, erros, mapa };
+}
+/* já existe lançamento igual (mesma data, valor, tipo e descrição)? evita importar 2x */
+const csvDuplicado = r => T('lancamentos_financeiros').some(l => l.data === r.data && Number(l.valor) === Number(r.valor)
+  && l.tipo === r.tipo && norm(l.descricao || '') === norm(r.descricao || ''));
+
+function acharOuCriarCategoria(nome, tipo) {
+  if (!nome) return null;
+  const achou = T('categorias_financeiras').find(c => norm(c.nome) === norm(nome));
+  if (achou) return achou.id;
+  return dbUpsert('categorias_financeiras', { nome: ucfirst(nome), tipo, cor: tipo === 'entrada' ? '#3DDC97' : '#5CC8FC', orcamento_mensal: null }).id;
+}
+function acharOuCriarConta(nome) {
+  if (!nome) return null;
+  const achou = T('contas_financeiras').find(c => norm(c.nome) === norm(nome));
+  if (achou) return achou.id;
+  return dbUpsert('contas_financeiras', { nome: ucfirst(nome), tipo: 'conta' }).id;
+}
+
+act('fin-import', () => {
+  window._csv = null;
+  modal('<div id="csv-box"></div>', { onMount: () => csvDraw(), wide: true });
+});
+act('fin-csv-modelo', () => baixarArquivo('life-os-modelo-financas.csv', CSV_MODELO, 'text/csv;charset=utf-8'));
+function csvDraw() {
+  const box = $('#csv-box'); if (!box) return;
+  const r = window._csv;
+  let corpo;
+  if (!r) {
+    corpo = '<p class="muted small" style="margin-top:0">Suba um arquivo <b>.csv</b> com seus gastos e receitas. '
+      + 'Colunas aceitas: <kbd>data</kbd> <kbd>descricao</kbd> <kbd>valor</kbd> <kbd>tipo</kbd> <kbd>categoria</kbd> <kbd>conta</kbd> <kbd>status</kbd> '
+      + '— só <b>data</b> e <b>valor</b> são obrigatórias. Aceita <code>;</code> ou <code>,</code> como separador, valores em 1.234,56 ou 1,234.56, e datas em AAAA-MM-DD ou DD/MM/AAAA.</p>'
+      + '<div class="row wrap" style="margin-bottom:12px"><button class="btn" data-act="fin-csv-modelo">⬇️ Baixar planilha padrão</button></div>'
+      + '<div class="field"><label>Arquivo CSV</label><input class="input" type="file" id="csv-file" accept=".csv,text/csv"></div>'
+      + '<div class="field"><label>ou cole o conteúdo aqui</label><textarea class="textarea" id="csv-txt" rows="5" placeholder="data;descricao;valor;tipo;categoria;conta;status"></textarea></div>'
+      + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button>'
+      + '<button class="btn primary" data-act="csv-analisar">Analisar →</button></div>';
+  } else {
+    const novas = r.linhas.filter(l => !l.dup), dups = r.linhas.filter(l => l.dup);
+    const entradas = sum(novas.filter(l => l.tipo === 'entrada').map(l => l.valor));
+    const saidas = sum(novas.filter(l => l.tipo === 'saida').map(l => l.valor));
+    const catsNovas = [...new Set(novas.map(l => l.categoria).filter(c => c && !T('categorias_financeiras').some(x => norm(x.nome) === norm(c))))];
+    const contasNovas = [...new Set(novas.map(l => l.conta).filter(c => c && !T('contas_financeiras').some(x => norm(x.nome) === norm(c))))];
+    corpo = '<div class="grid4" style="margin-bottom:12px">'
+      + '<div class="kpi"><div class="l">a importar</div><div class="v">'+novas.length+'</div></div>'
+      + '<div class="kpi"><div class="l">entradas</div><div class="v ok" style="font-size:17px">'+fmtBRL(entradas)+'</div></div>'
+      + '<div class="kpi"><div class="l">saídas</div><div class="v err" style="font-size:17px">'+fmtBRL(saidas)+'</div></div>'
+      + '<div class="kpi"><div class="l">já existiam</div><div class="v">'+dups.length+'</div></div></div>'
+      + (r.erros.length ? '<div class="banner warn">⚠️ '+r.erros.length+' linha'+(r.erros.length>1?'s':'')+' ignorada'+(r.erros.length>1?'s':'')+':<br>'
+          + r.erros.slice(0, 5).map(esc).join('<br>') + (r.erros.length > 5 ? '<br>…' : '') + '</div>' : '')
+      + (dups.length ? '<div class="banner acc">'+dups.length+' lançamento'+(dups.length>1?'s':'')+' já existia'+(dups.length>1?'m':'')+' (mesma data, valor, tipo e descrição) e não '+(dups.length>1?'serão duplicados':'será duplicado')+'.</div>' : '')
+      + (catsNovas.length ? '<div class="banner ok">🏷️ Categorias que serão criadas: '+catsNovas.map(esc).join(', ')+'</div>' : '')
+      + (contasNovas.length ? '<div class="banner ok">🏦 Contas que serão criadas: '+contasNovas.map(esc).join(', ')+'</div>' : '')
+      + (novas.length ? '<div class="card pad0"><div class="list" style="padding:0 10px;max-height:38vh;overflow:auto">'
+        + novas.slice(0, 60).map(l => '<div class="item" style="cursor:default"><span>'+(l.tipo==='saida'?'💸':'💵')+'</span>'
+          + '<div class="grow"><div class="ttl">'+esc(l.descricao || '(sem descrição)')+'</div>'
+          + '<div class="sub">'+fmtData(l.data)+(l.categoria?' · '+esc(l.categoria):'')+(l.conta?' · '+esc(l.conta):'')
+          + ' · '+(l.pago?'<span class="ok">pago</span>':'<span class="warn">pendente</span>')+'</div></div>'
+          + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+fmtBRL(l.valor)+'</b></div>').join('')
+        + (novas.length > 60 ? '<div class="tiny muted center" style="padding:6px">+'+(novas.length-60)+' não mostrada(s) — todas serão importadas</div>' : '')
+        + '</div></div>' : '<div class="empty"><span class="em">🤷</span>Nada novo para importar.</div>')
+      + '<div class="bx-foot"><button class="btn ghost" data-act="csv-voltar">← Trocar arquivo</button><span class="sp"></span>'
+      + '<button class="btn primary big" data-act="csv-confirmar"'+(novas.length?'':' disabled')+'>✓ Importar '+novas.length+' lançamento'+(novas.length===1?'':'s')+'</button></div>';
+  }
+  box.innerHTML = '<div class="bx-h"><div class="h2">📥 Importar CSV de finanças</div><button class="iconbtn" data-act="m-close">✕</button></div>' + corpo;
+}
+act('csv-voltar', () => { window._csv = null; csvDraw(); });
+act('csv-analisar', async () => {
+  const inp = $('#csv-file'), ta = $('#csv-txt');
+  let texto = (ta && ta.value.trim()) || '';
+  if (!texto && inp && inp.files && inp.files[0]) texto = await inp.files[0].text();
+  if (!texto) { toast('Escolha um arquivo ou cole o conteúdo.', {icone:'📄'}); return; }
+  const r = csvInterpretar(texto);
+  if (!r.linhas.length && r.erros.length) { toast(r.erros[0], {icone:'⚠️', ms:5000}); return; }
+  r.linhas.forEach(l => { l.dup = csvDuplicado(l); });
+  window._csv = r;
+  csvDraw();
+});
+act('csv-confirmar', () => {
+  const r = window._csv; if (!r) return;
+  const novas = r.linhas.filter(l => !l.dup);
+  const criados = [];
+  for (const l of novas) {
+    criados.push(dbUpsert('lancamentos_financeiros', {
+      tipo: l.tipo, valor: l.valor, data: l.data,
+      categoria_id: acharOuCriarCategoria(l.categoria, l.tipo),
+      conta_id: acharOuCriarConta(l.conta),
+      descricao: l.descricao, pago: l.pago, recorrencia: null
+    }).id);
+  }
+  window._csv = null;
+  closeModal(true);
+  nav('financas/fluxo/' + mesDe(novas[0] ? novas[0].data : hoje()));
+  render();
+  toast(criados.length + ' lançamento' + (criados.length===1?'':'s') + ' importado' + (criados.length===1?'':'s') + ' ✓', { icone:'📥', ms:5000,
+    undo: () => { criados.forEach(id => dbDelete('lancamentos_financeiros', id)); render(); toast('Importação desfeita.'); } });
+});
+
 /* categorias e contas */
 const catFinFields = [
   {k:'nome', l:'Nome', req:1, foco:1},
