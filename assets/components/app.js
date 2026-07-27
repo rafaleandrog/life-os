@@ -2891,24 +2891,75 @@ function ritualBotoesHTML() {
 function planoDia() { const p = getCfg('plano_dia', null); return (p && p.data === hoje() && Array.isArray(p.ordem)) ? p : null; }
 function salvarPlanoDia(projetos, ordem) { setCfg('plano_dia', { data: hoje(), projetos, ordem }); }
 function janelaMin() { return Math.max(1, Number(getCfg('janela_util', 8))) * 60; }
+/* ---- Passo 1 do ritual: decidir as atrasadas (#23) ----
+   Atrasadas ficavam fora do "Planejar o dia" e eram esquecidas. Agora são a
+   PRIMEIRA decisão: o usuário escolhe quais entram no dia; as escolhidas passam
+   a valer como tarefas de hoje e seguem, daí em diante, todas as regras atuais
+   (prioridade → duração, corte na janela útil). As não escolhidas continuam
+   atrasadas, intactas, para decidir depois na tela Hoje. */
 function planejarDia() {
-  const doDia = tarefasPendentes().filter(t => t.vencimento === hoje());  // só de hoje (atrasadas ficam à parte)
+  const atrasadas = ordenar(tarefasPendentes().filter(secaoPadrao('atrasadas').teste), t => t.vencimento);
+  window._planAtr = { lista: atrasadas, sel: new Set() };
+  if (!atrasadas.length) { planejarProjetos(); return; }
+  modal('<div id="plan-box"></div>', { onMount: () => planAtrasadasDraw(), fixo: true });
+}
+function planAtrasadasDraw() {
+  const box = $('#plan-box'); if (!box) return;
+  const A = window._planAtr;
+  const linha = t => {
+    const on = A.sel.has(t.id), proj = byId('projetos', t.projeto_id), dias = diffDias(t.vencimento, hoje());
+    return '<div class="item" data-act="plan-atr-tog" data-id="'+t.id+'">'
+      + '<span class="check p'+(t.prioridade||4)+(on?' ck':'')+'" style="pointer-events:none"></span>'
+      + '<div class="grow"><div class="ttl">'+esc(t.titulo)+'</div><div class="sub">'
+      + '<span class="err">'+dias+' dia'+(dias===1?'':'s')+' atrás</span>'
+      + (proj ? ' · '+projLabelHTML(proj) : '') + ' · P'+(t.prioridade||4)+' · ⏳ '+fmtMin(estMin(t))+'</div></div></div>';
+  };
+  const escolhidas = A.lista.filter(t => A.sel.has(t.id));
+  const soma = sum(escolhidas.map(estMin)), janela = janelaMin();
+  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ 1/2 · Atrasadas</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + '<p class="muted small" style="margin-top:0">Antes de montar o dia: <b>quais destas '+A.lista.length+' atrasada'+(A.lista.length===1?'':'s')+' entram hoje?</b> '
+    + 'As escolhidas passam a valer como tarefas de hoje e seguem as regras normais do planejamento. As demais continuam atrasadas — dá para decidir depois na tela Hoje.</p>'
+    + '<div class="row wrap" style="gap:6px;margin-bottom:8px"><button class="btn small" data-act="plan-atr-todas">Selecionar todas</button>'
+    + '<button class="btn small ghost" data-act="plan-atr-nenhuma">Nenhuma</button><span class="sp"></span>'
+    + '<span class="small '+(soma > janela ? 'err' : 'muted')+'">'+escolhidas.length+' escolhida'+(escolhidas.length===1?'':'s')+' · ⏳ '+fmtMin(soma)+'</span></div>'
+    + '<div class="card pad0"><div class="list" style="padding:0 10px;max-height:46vh;overflow:auto">'+A.lista.map(linha).join('')+'</div></div>'
+    + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button>'
+    + '<button class="btn primary big" data-act="plan-atr-ok">Continuar →</button></div>';
+}
+act('plan-atr-tog', el => { const A = window._planAtr, id = el.dataset.id;
+  if (A.sel.has(id)) A.sel.delete(id); else A.sel.add(id); planAtrasadasDraw(); });
+act('plan-atr-todas', () => { const A = window._planAtr; A.lista.forEach(t => A.sel.add(t.id)); planAtrasadasDraw(); });
+act('plan-atr-nenhuma', () => { window._planAtr.sel.clear(); planAtrasadasDraw(); });
+act('plan-atr-ok', () => planejarProjetos());
+
+/* ---- Passo 2: projetos + corte da janela (regras atuais, inalteradas) ---- */
+function planejarProjetos() {
+  const A = window._planAtr || { sel: new Set() };
+  // as atrasadas escolhidas entram no mesmo bolo das de hoje
+  const doDia = tarefasPendentes().filter(t => t.vencimento === hoje() || A.sel.has(t.id));
   const grupos = {};
   for (const t of doDia) { const k = t.projeto_id || '__none__'; (grupos[k] = grupos[k] || []).push(t); }
   const chaves = Object.keys(grupos).sort((a, b) => (a === '__none__') - (b === '__none__')
     || (byId('projetos', a) ? norm(byId('projetos', a).nome) : '').localeCompare(byId('projetos', b) ? norm(byId('projetos', b).nome) : ''));
+  const veioDoPasso1 = !!$('#plan-box');   // já existe caixa aberta: reaproveita em vez de empilhar
   if (!chaves.length) {
-    modal('<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
-      + '<div class="empty"><span class="em">🌤️</span>Nenhuma tarefa com vencimento hoje.<br>Crie tarefas para hoje (ou envie atrasadas/da semana ao plano) e volte aqui.</div>'
-      + '<div class="bx-foot"><button class="btn primary" data-act="m-close">Fechar</button></div>');
+    const vazio = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<div class="empty"><span class="em">🌤️</span>Nenhuma tarefa com vencimento hoje.'
+      + (A.lista && A.lista.length ? '<br>Você deixou todas as atrasadas de fora — volte e escolha alguma, ou crie tarefas para hoje.' : '<br>Crie tarefas para hoje (ou envie atrasadas/da semana ao plano) e volte aqui.')
+      + '</div><div class="bx-foot">'
+      + (A.lista && A.lista.length ? '<button class="btn ghost" data-act="plan-voltar-atr">← Atrasadas</button><span class="sp"></span>' : '')
+      + '<button class="btn primary" data-act="m-close">Fechar</button></div>';
+    if (veioDoPasso1) $('#plan-box').innerHTML = vazio; else modal(vazio);
     return;
   }
   const ant = planoDia();
   const previas = ant && Array.isArray(ant.projetos) ? ant.projetos.filter(k => grupos[k]) : null;
   const sel = new Set(previas && previas.length ? previas : chaves);   // tudo marcado por padrão
   window._plan = { grupos, chaves, sel };
-  modal('<div id="plan-box"></div>', { onMount: () => planDraw(), fixo: true });
+  if (veioDoPasso1) planDraw();
+  else modal('<div id="plan-box"></div>', { onMount: () => planDraw(), fixo: true });
 }
+act('plan-voltar-atr', () => planAtrasadasDraw());
 /* tarefas dos projetos selecionados, já na ordem do dia */
 function _planOrdenado() { const P = window._plan; return P.chaves.filter(k => P.sel.has(k)).flatMap(k => P.grupos[k]).slice().sort(ordDia); }
 /* corte pela janela: enche na ordem até estourar; garante ao menos a 1ª. Retorna índice de corte + soma no plano */
@@ -2938,7 +2989,13 @@ function planDraw() {
     lista += linha(t, i < cut);
   });
   const foraN = tarefas.length - cut, over = soma > janela;
-  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+  const A = window._planAtr || { lista: [], sel: new Set() };
+  const temPasso1 = !!(A.lista && A.lista.length);
+  box.innerHTML = '<div class="bx-h"><div class="h2">☀️ '+(temPasso1?'2/2 · ':'')+'Planejar o dia</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+    + (temPasso1 ? '<div class="banner '+(A.sel.size?'acc':'warn')+'">'+(A.sel.size
+        ? '⏰ '+A.sel.size+' atrasada'+(A.sel.size===1?'':'s')+' entra'+(A.sel.size===1?'':'m')+' no dia — passam a valer como de hoje ao confirmar.'
+        : '⏰ Nenhuma atrasada escolhida — elas continuam atrasadas.')
+      + '<span class="sp"></span><button class="btn small ghost" data-act="plan-voltar-atr">rever</button></div>' : '')
     + '<p class="muted small" style="margin-top:0">Escolha os projetos do dia (todos já vêm marcados). A lista é montada por <b>prioridade da tarefa</b> → menor duração, até o limite de <b>'+fmtMin(janela)+'</b>. O que passar fica <b>fora do plano</b> (mas continua de hoje).</p>'
     + '<div class="row wrap" style="gap:6px;margin-bottom:10px">'+(chips || '<span class="tiny muted">Nenhum projeto com tarefa hoje.</span>')+'</div>'
     + '<div class="card pad0"><div class="list" style="padding:0 10px;max-height:44vh;overflow:auto">'
@@ -2950,14 +3007,18 @@ function planDraw() {
 act('plan-proj', el => { const P = window._plan; const k = el.dataset.k; if (P.sel.has(k)) P.sel.delete(k); else P.sel.add(k); planDraw(); });
 act('plan-concluir', () => {
   const P = window._plan, janela = janelaMin();
+  const A = window._planAtr || { sel: new Set() };
   const tarefas = _planOrdenado();
   const { cut } = _planCorte(tarefas, janela);
   const ordem = tarefas.slice(0, cut).map(t => t.id);   // só o que coube no limite entra no plano
+  // só agora as atrasadas escolhidas viram tarefas de hoje: cancelar no meio não mexe em nada
+  let repro = 0;
+  for (const t of tarefas) if (A.sel.has(t.id) && t.vencimento !== hoje()) { dbPatch('tarefas', t.id, { vencimento: hoje() }); repro++; }
   salvarPlanoDia([...P.sel], ordem);
   dbUpsert('dias', { data: hoje(), ...(diaRow()||{}), planejado: true });
   closeModal(true); render();
   const foraN = tarefas.length - cut;
-  toast('Dia planejado — '+ordem.length+' no plano'+(foraN?' · '+foraN+' fora':'')+' ✓', {icone:'☀️', ms:4000});
+  toast('Dia planejado — '+ordem.length+' no plano'+(foraN?' · '+foraN+' fora':'')+(repro?' · '+repro+' atrasada'+(repro===1?'':'s')+' para hoje':'')+' ✓', {icone:'☀️', ms:4000});
 });
 /* enviar uma tarefa (de hoje-fora-do-plano, atrasada ou da semana) ao plano do dia — nunca bloqueia, só avisa se estourar 8h */
 act('plan-add', el => {
