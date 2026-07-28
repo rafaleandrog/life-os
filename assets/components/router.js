@@ -9,13 +9,17 @@ function rotaAtual() {
   return { nome: nome || 'hoje', params };
 }
 let _renderizando = false;
+/* No mobile quem rola é o #main (app shell), no desktop é a janela.
+   Ler/escrever nos dois cobre os dois casos: no elemento que não rola vira no-op. */
+function scrollAtual() { const m = $('#main'); return (m && m.scrollTop) || window.scrollY || window.pageYOffset || 0; }
+function irParaScroll(y) { const m = $('#main'); if (m) m.scrollTop = y; window.scrollTo(0, y); }
 // opts.manterScroll: não volta o scroll ao topo (sincronização em background)
 // opts.semFade: sem animação de entrada (evita "piscar" no refresh em background)
 function render(opts) {
   if (_renderizando) return; _renderizando = true;
   const manterScroll = !!(opts && opts.manterScroll);
   const semFade = !!(opts && opts.semFade);
-  const sy = manterScroll ? (window.scrollY || window.pageYOffset || 0) : 0;
+  const sy = manterScroll ? scrollAtual() : 0;
   try {
     const r = rotaAtual();
     const v = Views[r.nome] || Views.hoje;
@@ -23,7 +27,7 @@ function render(opts) {
     if (v.mount) v.mount(r.params);
     renderNav(r.nome);
     if (window.renderTimerPill) renderTimerPill();
-    window.scrollTo(0, manterScroll ? sy : 0);
+    irParaScroll(manterScroll ? sy : 0);
   } finally { _renderizando = false; }
 }
 window.addEventListener('hashchange', () => render()); // navegação por hash sempre volta ao topo

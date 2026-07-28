@@ -1562,33 +1562,48 @@ function proximaData(rec, apos) { // regra 1
 const recLabel = r => !r ? '' : r.tipo === 'diaria' ? 'todo dia' : r.tipo === 'intervalo' ? 'a cada '+r.intervalo+'d'
   : r.tipo === 'semanal' ? (r.dias||[]).map(d => DIAS_SEM[d]).join(',') : 'todo dia '+(r.dia||1);
 
-/* ---- Quick add (registro ≤ 5s) ---- */
+/* ---- Quick add (registro ≤ 5s) ----
+   Cada quick-add é uma INSTÂNCIA isolada (.qa-box) com o contexto embutido.
+   Antes os ids eram fixos (#qa-inp/#qa-ac/#qa-toks) e o FAB abre um modal por
+   cima de telas que já têm um quick-add: com dois elementos de mesmo id,
+   $('#qa-inp') devolvia o PRIMEIRO do documento — o da tela de trás, vazio —
+   e a criação era recusada pedindo o título. Nada aqui usa id global. */
 function quickAddHTML(ctx) {
-  window._qaCtx = ctx || {};
-  return '<div class="qa-box"><form data-sub="qa-sub"><div class="qa-inwrap">'
-    + '<input class="input" id="qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(ctx && ctx.ph || '+ ex.: Pagar internet amanhã 9h d30 #casa @contas p2')+'">'
-    + '<div class="qa-ac" id="qa-ac" hidden></div></div>'
-    + '</form><div class="qa-tokens" id="qa-toks"></div></div>';
+  const c = ctx || {};
+  return '<div class="qa-box" data-ctx="'+esc(JSON.stringify(c))+'"><form data-sub="qa-sub"><div class="qa-inwrap">'
+    + '<input class="input qa-inp" data-inp="qa-parse" autocomplete="off" placeholder="'+esc(c.ph || '+ ex.: Pagar internet amanhã 9h d30 #casa @contas p2')+'">'
+    + '<div class="qa-ac" hidden></div></div>'
+    + '</form><div class="qa-tokens"></div></div>';
 }
+const qaBox = el => (el && el.closest) ? el.closest('.qa-box') : null;
+const qaInp = box => box && box.querySelector('.qa-inp');
+const qaCtx = box => { try { return JSON.parse((box && box.dataset.ctx) || '{}'); } catch (_) { return {}; } };
+/* a caixa em uso é a do modal mais recente; sem modal, a da própria tela */
+function qaAtiva() { const m = $$('#overlays .qa-box'); return m.length ? m[m.length-1] : $('.qa-box'); }
 act('qa-parse', el => {
+  const box = qaBox(el); if (!box) return;
   const p = parseNL(el.value);
   const cls = {data:'dt', hora:'hr', dur:'dur', rec:'rec', proj:'proj', tag:'tag', pri:'pri', link:'tag'};
-  $('#qa-toks').innerHTML = p.tokens.map(t =>
+  box.querySelector('.qa-tokens').innerHTML = p.tokens.map(t =>
     '<span class="tok '+(cls[t.tipo]||'')+'">'+esc(t.label)+(t.raw?'<button type="button" data-act="qa-tok-rm" data-raw="'+esc(t.raw)+'">✕</button>':'')+'</span>').join('');
   acAtualizar(el);
 });
-act('qa-tok-rm', el => { const inp = $('#qa-inp'); inp.value = inp.value.replace(el.dataset.raw, ' ').replace(/\s+/g,' '); Actions['qa-parse'](inp); inp.focus(); });
-act('qa-sub', () => {
-  const inp = $('#qa-inp'); const p = parseNL(inp.value);
+act('qa-tok-rm', el => { const inp = qaInp(qaBox(el)); if (!inp) return;
+  inp.value = inp.value.replace(el.dataset.raw, ' ').replace(/\s+/g,' '); Actions['qa-parse'](inp); inp.focus(); });
+act('qa-sub', el => {
+  const box = qaBox(el) || qaAtiva(); const inp = qaInp(box);
+  if (!inp) return;
+  const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
   acFechar();
-  const concluir = () => { criarTarefaParseada(p, window._qaCtx || {}); window._qaRefoco = true; render(); };
+  const ctx = qaCtx(box);
+  const concluir = () => { criarTarefaParseada(p, ctx); window._qaRefoco = true; render(); };
   if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
 
 /* ---- Autocomplete de # (projetos) e @ (etiquetas) — Tab/Enter completa, ↑/↓ navega ---- */
 function acAtualizar(inp) {
-  const ac = $('#qa-ac'); if (!ac) return;
+  const box = qaBox(inp); const ac = box && box.querySelector('.qa-ac'); if (!ac) return;
   const pos = inp.selectionStart != null ? inp.selectionStart : inp.value.length;
   const m = inp.value.slice(0, pos).match(/([#@])([\p{L}\d_-]*)$/u);
   if (!m) { acFechar(); return; }
@@ -1599,15 +1614,22 @@ function acAtualizar(inp) {
   else itens = ordenar(T('etiquetas').filter(e => norm(e.nome).includes(norm(frag))), e => e.nome)
     .slice(0, 6).map(e => ({ valor: e.nome, html: '<span class="dot" style="background:' + (e.cor || '#9AA0B0') + '"></span> @' + esc(e.nome) }));
   if (!itens.length) { acFechar(); return; }
-  window._ac = { aberto: true, tipo, start: pos - m[0].length, len: m[0].length, itens, idx: 0 };
+  window._ac = { aberto: true, box, tipo, start: pos - m[0].length, len: m[0].length, itens, idx: 0 };
   acRender();
 }
 function acRender() {
-  const ac = $('#qa-ac'), st = window._ac; if (!ac || !st || !st.aberto) return;
+  const st = window._ac; if (!st || !st.aberto) return;
+  const ac = st.box && st.box.querySelector('.qa-ac'); if (!ac) return;
   ac.innerHTML = st.itens.map((it, i) => '<div class="qa-ac-item' + (i === st.idx ? ' on' : '') + '" data-act="qa-ac-pick" data-i="' + i + '">' + it.html + '</div>').join('');
   ac.hidden = false;
 }
-function acFechar() { const ac = $('#qa-ac'); if (ac) { ac.hidden = true; ac.innerHTML = ''; } if (window._ac) window._ac.aberto = false; }
+function acFechar() {
+  const st = window._ac;
+  const ac = st && st.box ? st.box.querySelector('.qa-ac') : null;
+  if (ac) { ac.hidden = true; ac.innerHTML = ''; }
+  else $$('.qa-ac').forEach(a => { a.hidden = true; a.innerHTML = ''; });
+  if (st) st.aberto = false;
+}
 function acCompletar(inp, i) {
   const st = window._ac; if (!st || !st.aberto) return false;
   const it = st.itens[i == null ? st.idx : i]; if (!it) return false;
@@ -1619,16 +1641,17 @@ function acCompletar(inp, i) {
   Actions['qa-parse'](inp); inp.focus();
   return true;
 }
-act('qa-ac-pick', el => acCompletar($('#qa-inp'), Number(el.dataset.i)));
+act('qa-ac-pick', el => acCompletar(qaInp(qaBox(el)), Number(el.dataset.i)));
+const ehQaInp = t => !!(t && t.classList && t.classList.contains('qa-inp'));
 document.addEventListener('keydown', e => {
-  if (!e.target || e.target.id !== 'qa-inp') return;
+  if (!ehQaInp(e.target)) return;
   const st = window._ac; if (!st || !st.aberto) return;
   if (e.key === 'ArrowDown') { e.preventDefault(); st.idx = (st.idx + 1) % st.itens.length; acRender(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); st.idx = (st.idx - 1 + st.itens.length) % st.itens.length; acRender(); }
   else if (e.key === 'Tab' || e.key === 'Enter') { if (acCompletar(e.target)) { e.preventDefault(); e.stopPropagation(); } }
   else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); acFechar(); }
 }, true);
-document.addEventListener('click', e => { if (window._ac && window._ac.aberto && !e.target.closest('#qa-ac') && e.target.id !== 'qa-inp') acFechar(); });
+document.addEventListener('click', e => { if (window._ac && window._ac.aberto && !e.target.closest('.qa-ac') && !ehQaInp(e.target)) acFechar(); });
 function ofereceCriarProjeto(p, depois) {
   const nome = p.projetoDesconhecido;
   modal('<div class="bx-h"><div class="h2">Projeto não existe</div></div>'
@@ -1885,7 +1908,7 @@ reg('tarefas', {
       + '<div>'+tarVistasMobileHTML(vista)+'<div id="tar-conteudo">'+tarConteudoHTML(vista)+'</div></div></div>';
   },
   mount: () => {
-    if (window._qaRefoco) { window._qaRefoco = false; const i = $('#qa-inp'); if (i) i.focus(); }
+    if (window._qaRefoco) { window._qaRefoco = false; const i = qaInp(qaAtiva()); if (i) i.focus(); }
     bindTaskDnD();
   }
 });
@@ -2220,13 +2243,17 @@ act('qa-tarefa', () => {
     + quickAddHTML({ph:'ex.: Reunião sexta 14:30 #trabalho @urgente p1'})
     + '<p class="tiny muted" style="margin:10px 2px 0">Entendo: <kbd>amanhã</kbd> <kbd>sexta 14:30</kbd> <kbd>d30</kbd> (duração) <kbd>a cada 3 dias</kbd> <kbd>dia 15</kbd> <kbd>#projeto</kbd> <kbd>@etiqueta</kbd> <kbd>p1</kbd>–<kbd>p4</kbd></p>'
     + '<div class="bx-foot"><button class="btn primary" data-act="qa-sub-modal">Criar tarefa</button></div>',
-    { onMount: ov => setTimeout(() => { const i = ov.querySelector('#qa-inp'); if (i) i.focus(); }, 80) });
+    { onMount: ov => setTimeout(() => { const i = ov.querySelector('.qa-inp'); if (i) i.focus(); }, 80) });
 });
-act('qa-sub-modal', () => {
-  const inp = $('#qa-inp'); const p = parseNL(inp.value);
+act('qa-sub-modal', el => {
+  // a caixa é a DESTE modal — nunca a da tela que ficou atrás
+  const box = (el.closest('.box') && el.closest('.box').querySelector('.qa-box')) || qaAtiva();
+  const inp = qaInp(box); if (!inp) return;
+  const p = parseNL(inp.value);
   if (!p.titulo) { toast('Escreva o título da tarefa.', {icone:'✍️'}); return; }
   acFechar();
-  const concluir = () => { criarTarefaParseada(p, {}); closeModal(); render(); };
+  const ctx = qaCtx(box);
+  const concluir = () => { criarTarefaParseada(p, ctx); closeModal(); render(); };
   if (p.projetoDesconhecido) ofereceCriarProjeto(p, concluir); else concluir();
 });
 /* ════════════════ ETAPA 4 — HÁBITOS (3 tipos, streaks, heatmap, fonte_auto) ════════════════ */
@@ -2874,7 +2901,7 @@ reg('hoje', {
     return html;
   },
   mount: () => {
-    if (window._qaRefoco) { window._qaRefoco = false; const i = $('#qa-inp'); if (i) i.focus(); }
+    if (window._qaRefoco) { window._qaRefoco = false; const i = qaInp(qaAtiva()); if (i) i.focus(); }
   }
 });
 /* ════════════════ ETAPA 6 — RITUAL DIÁRIO (planejar / encerrar — opcional, sem punição) ════════════════ */

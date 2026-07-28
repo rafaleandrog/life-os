@@ -218,7 +218,33 @@ document.addEventListener('keydown', e => {
 });
 
 /* ============ MODAIS / SHEETS ============ */
+/* Botão Voltar do Android (tecla ou gesto): com um modal aberto, Voltar tem de
+   FECHAR O MODAL — não sair da tela nem do app. Cada modal empilha uma entrada
+   de histórico; o Voltar consome essa entrada e o popstate fecha o modal. Quando
+   o modal é fechado pela interface (✕ / toque fora), desfazemos as entradas que
+   empilhamos com history.go, e _pulaPop ignora os popstate que nós mesmos
+   provocamos — senão o app navegaria para trás sem o usuário ter pedido. */
 const _modals = [];
+let _histReal = 0;       // entradas de histórico que empilhamos para os modais
+let _pulaPop = 0;        // popstate(s) provocados por nós, a ignorar
+let _sincAgendada = false;
+/* Reconcilia "entradas empilhadas" com "modais abertos", SEMPRE de forma diferida.
+   O diferimento é essencial: várias ações fazem closeModal() e logo em seguida
+   modal() no mesmo clique (o FAB, por exemplo). Reconciliando só no fim do tick,
+   fechar-e-abrir se anula e o histórico não é mexido — se fosse imediato, o
+   history.go assíncrono do fechamento cancelaria a entrada recém-empilhada. */
+function _sincHist() {
+  _sincAgendada = false;
+  const alvo = _modals.length;
+  if (_histReal < alvo) {
+    for (let i = _histReal; i < alvo; i++) { try { history.pushState({ lifeosModal: i + 1 }, ''); } catch (_) {} }
+    _histReal = alvo;
+  } else if (_histReal > alvo) {
+    const d = _histReal - alvo; _histReal = alvo; _pulaPop += d;
+    try { history.go(-d); } catch (_) { _pulaPop -= d; }
+  }
+}
+function _agendarSincHist() { if (!_sincAgendada) { _sincAgendada = true; Promise.resolve().then(_sincHist); } }
 function modal(html, o={}) {
   const ov = document.createElement('div');
   ov.className = 'overlay';
@@ -226,6 +252,7 @@ function modal(html, o={}) {
   ov.addEventListener('mousedown', e => { if (e.target === ov && o.fixo !== true) closeModal(); });
   $('#overlays').appendChild(ov);
   _modals.push({ el: ov, onClose: o.onClose });
+  _agendarSincHist();
   if (o.onMount) o.onMount(ov);
   const foco = ov.querySelector('[autofocus]'); if (foco) setTimeout(() => foco.focus(), 60);
   return ov;
@@ -233,7 +260,16 @@ function modal(html, o={}) {
 function closeModal(all) {
   if (!_modals.length) return;
   do { const m = _modals.pop(); m.el.remove(); if (m.onClose) m.onClose(); } while (all && _modals.length);
+  _agendarSincHist();
 }
+/* Voltar do Android (tecla ou gesto): com modal aberto, fecha o modal em vez de
+   sair da tela ou do app; sem modal, é navegação de rota normal. */
+window.addEventListener('popstate', () => {
+  if (_pulaPop > 0) { _pulaPop--; return; }          // veio do nosso próprio history.go
+  if (!_modals.length) return;
+  _histReal = Math.max(0, _histReal - 1);            // o Voltar já consumiu a entrada
+  const m = _modals.pop(); m.el.remove(); if (m.onClose) m.onClose();
+});
 function confirmBox(msg, onYes, o={}) {
   modal('<div class="bx-h"><div class="h2">'+esc(o.titulo||'Confirmar')+'</div></div><p class="muted">'+msg+'</p>'
     + '<div class="bx-foot"><button class="btn ghost" data-act="m-close">Cancelar</button>'
