@@ -53,8 +53,21 @@ a{color:var(--acc);text-decoration:none}
 
 @media (max-width:899px){
   #sidebar{display:none}
+  /* ---- App shell: o DOCUMENTO nunca rola, só o painel de conteúdo ----
+     Com a página inteira rolando, a barra de endereço do celular colapsa e
+     reaparece a cada gesto e a tela "pula" — é o que mais denuncia site em vez
+     de aplicativo. Fixando html/body e deixando só o #main rolar, o cabeçalho
+     e a barra de abas ficam imóveis, sem pulo, sem bounce e sem
+     puxar-para-recarregar. */
+  /* height+overflow bastam para travar o documento; sem position:fixed no body,
+     que no iOS empurra a tela para fora quando o teclado abre */
+  html,body{height:100%;overflow:hidden}
+  #app{height:100dvh;display:flex;flex-direction:column}
+  #topbar{flex:none}
   /* respeita o recorte lateral da tela (notch em paisagem) além do inferior */
-  #main{margin-left:0;max-width:none;
+  #main{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+    overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+    margin-left:0;max-width:none;
     padding:14px calc(14px + env(safe-area-inset-right)) 130px calc(14px + env(safe-area-inset-left))}
   /* #topbar é irmão de #main (não filho): as margens negativas de -14px foram
      escritas para cancelar o padding do #main, que não o afeta — só deixavam a
