@@ -641,6 +641,18 @@ function usuarioAtual() {
 }
 function logout() { if (window.LifeOSAuth && window.LifeOSAuth.logout) window.LifeOSAuth.logout(); }
 act('auth-login', () => { if (window.LifeOSAuth && window.LifeOSAuth.loginGoogle) window.LifeOSAuth.loginGoogle(); });
+/* mostra quanto falta para o login vencer — a regra dos N dias é nossa, não do
+   Supabase, então precisa estar à vista para não parecer defeito */
+function validadeLoginHTML() {
+  const A = window.LifeOSAuth;
+  if (!A || !A.diasRestantesLogin) return '';
+  const dias = A.diasRestantesLogin();
+  if (dias === null) return '';
+  const txt = dias >= 1 ? Math.floor(dias) + ' dia' + (Math.floor(dias) === 1 ? '' : 's')
+            : dias > 0 ? 'menos de 1 dia' : 'agora';
+  return '<p class="tiny muted" style="margin:6px 0 0">🔐 Por segurança, o login vale '
+    + A.DIAS_ATE_REAUTENTICAR + ' dias. Próxima autenticação em <b>' + txt + '</b>.</p>';
+}
 act('auth-logout', () => confirmBox('Sair da conta Google? Os dados locais continuam neste dispositivo; a sincronização pausa até entrar de novo.', () => logout()));
 act('auth-copy-url', () => { const u = new URL('.', location.href); u.hash=''; u.search=''; copiarTexto(u.href, 'URL do app copiada — cole em Site URL no Supabase.'); });
 async function sincronizarNuvemInicial(silencioso) {
@@ -732,6 +744,15 @@ act('pwa-instalar', async () => {
   _pwaPrompt = null; mostrarBotaoInstalar(false);
 });
 BootHooks.push(() => { if (pwaInstalado()) mostrarBotaoInstalar(false); });
+/* Armazenamento persistente: sem isso o Android pode descartar o localStorage do
+   app sob pressão de espaço, levando junto a sessão do Google e a fila offline —
+   o que reapareceria como "está me pedindo login de novo". Em PWA instalado o
+   Chrome costuma conceder sozinho, sem perguntar nada. */
+BootHooks.push(() => {
+  const s = navigator.storage;
+  if (!s || !s.persist || !s.persisted) return;
+  s.persisted().then(ja => (ja ? null : s.persist())).catch(() => {});
+});
 // data+hora no fuso de Brasília, formato BR (ex.: 14/06/2026 23:57)
 function fmtDataHoraBR(iso) {
   if (!iso) return '—';
@@ -1156,6 +1177,7 @@ reg('config', {
           + '<div class="grow"><div style="font-weight:700">'+esc(u.nome || 'Conectado')+'</div><div class="small muted">'+esc(u.email||'')+'</div></div>'
           + '<button class="btn small" data-act="auth-logout">Sair</button></div>'
           + '<p class="tiny muted" style="margin:0">Seus dados são gravados na sua conta e protegidos por usuário (RLS). Cada alteração é salva no banco automaticamente.</p>'
+          + validadeLoginHTML()
         : '<p class="small muted" style="margin:0 0 10px">Entre com o Google para sincronizar com a nuvem. Sem login, o app continua funcionando neste dispositivo e guarda tudo numa fila.</p>'
           + '<div class="row"><button class="gbtn" data-act="auth-login">'+G_ICON+' Entrar com Google</button></div>')
       + '<details class="help" style="margin-top:10px"><summary>Login não funciona? Confira as URLs no Supabase</summary>'
@@ -5850,9 +5872,14 @@ reg('conquistas', {
   }
 });
 
-/* lembrete na Hoje: entrar com o Google quando a sincronização estiver pausada */
+/* lembrete na Hoje: entrar com o Google quando a sincronização estiver pausada.
+   Só acusa falta de login DEPOIS de a sessão ter sido verificada (state.ready) —
+   a tela é desenhada antes de o Supabase responder, e sem essa checagem o aviso
+   aparecia mesmo com sessão válida, pedindo login a cada abertura do app. */
 HojeExtras.alertas.push(() => {
-  if (!CFG.url || !CFG.key || usuarioAutenticado()) return '';
+  if (!CFG.url || !CFG.key) return '';
+  const auth = window.LifeOSAuth && window.LifeOSAuth.state;
+  if (!auth || !auth.ready || auth.user) return '';
   return '<div class="banner warn" data-act="auth-login" style="cursor:pointer">🔑 Sincronização pausada — toque para entrar com o Google e salvar tudo na nuvem →</div>';
 });
 
