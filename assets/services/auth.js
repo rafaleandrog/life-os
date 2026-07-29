@@ -1,5 +1,38 @@
 'use strict';
 /* ============ AUTENTICAÇÃO SUPABASE / GOOGLE ============ */
+
+/* ---- Validade do login (regra do usuário) ----
+   O Supabase não impõe prazo nenhum: a sessão se renova sozinha e dura
+   indefinidamente. Esta é uma regra NOSSA, deliberada: passados N dias desde o
+   login, o app encerra a sessão e pede o Google de novo.
+   Para mudar o intervalo, troque só o número abaixo. 0 desliga a regra. */
+const DIAS_ATE_REAUTENTICAR = 7;
+const CHAVE_LOGIN = 'lifeos.loginEm';
+
+function lerRegistroLogin() {
+  try { return JSON.parse(localStorage.getItem(CHAVE_LOGIN) || 'null'); } catch (_) { return null; }
+}
+function marcarLoginSeNovo(userId) {
+  const reg = lerRegistroLogin();
+  if (reg && reg.userId === userId) return reg;                   // já contando para este usuário
+  const novo = { userId, em: Date.now() };                        // 1ª vez que vemos esta conta: começa agora
+  try { localStorage.setItem(CHAVE_LOGIN, JSON.stringify(novo)); } catch (_) {}
+  return novo;
+}
+function esquecerRegistroLogin() { try { localStorage.removeItem(CHAVE_LOGIN); } catch (_) {} }
+/* dias restantes até precisar reautenticar (null = regra desligada / sem registro) */
+function diasRestantesLogin() {
+  if (!(DIAS_ATE_REAUTENTICAR > 0)) return null;
+  const reg = lerRegistroLogin();
+  if (!reg) return null;
+  return Math.max(0, DIAS_ATE_REAUTENTICAR - (Date.now() - reg.em) / 864e5);
+}
+function loginVencido(userId) {
+  if (!(DIAS_ATE_REAUTENTICAR > 0)) return false;
+  const reg = marcarLoginSeNovo(userId);
+  return (Date.now() - reg.em) > DIAS_ATE_REAUTENTICAR * 864e5;
+}
+
 const AUTH_STATE = {
   ready: false,
   session: null,
@@ -17,12 +50,25 @@ function setAuthButtonVisible(visible) {
   btn.hidden = !visible;
 }
 
+let _authPintado = false;   // a tela já foi redesenhada sabendo quem está logado?
 function updateAuthSession(session) {
+  const antes = AUTH_STATE.user ? AUTH_STATE.user.id : null;
   AUTH_STATE.ready = true;
   AUTH_STATE.session = session || null;
   AUTH_STATE.user = session && session.user ? session.user : null;
+  const agora = AUTH_STATE.user ? AUTH_STATE.user.id : null;
   setAuthButtonVisible(!AUTH_STATE.user);
   if (typeof window.atualizarSyncUI === 'function') window.atualizarSyncUI();
+  // O boot renderiza ANTES de a sessão ser conhecida, então tudo que depende de
+  // "está logado?" foi desenhado no escuro. Repinta na primeira resolução e
+  // sempre que a conta mudar — mas não a cada renovação de token, para não
+  // interromper o uso de hora em hora.
+  if (!_authPintado || antes !== agora) {
+    _authPintado = true;
+    if (typeof window.render === 'function') {
+      try { window.render({ manterScroll: true, semFade: true }); } catch (_) {}
+    }
+  }
   if (typeof window.LifeOSAfterAuthChange === 'function') window.LifeOSAfterAuthChange(AUTH_STATE);
 }
 
@@ -90,6 +136,7 @@ async function logout() {
     toast('Falha ao sair: ' + error.message, { icone: '❌' });
     return;
   }
+  esquecerRegistroLogin();   // próximo login recomeça a contagem dos N dias
   updateAuthSession(null);
   toast('Sessão encerrada.', { icone: '👋' });
 }
@@ -117,6 +164,24 @@ async function restoreSession() {
   }
 }
 
+/* Aplica a regra dos N dias: se o login já passou da validade, encerra a sessão
+   e pede o Google de novo. Os dados locais e a fila offline não são tocados —
+   só a sincronização pausa até entrar outra vez. */
+async function aplicarValidadeLogin() {
+  const client = window.supabaseClient;
+  const user = AUTH_STATE.user;
+  if (!client || !client.auth || !user) return false;
+  if (!loginVencido(user.id)) return false;
+  esquecerRegistroLogin();
+  try { await client.auth.signOut(); } catch (error) { console.error('Falha ao encerrar sessão vencida:', error); }
+  updateAuthSession(null);
+  if (typeof toast === 'function') {
+    toast('Passaram-se ' + DIAS_ATE_REAUTENTICAR + ' dias desde o último login — entre com o Google de novo para retomar a sincronização.',
+      { icone: '🔐', ms: 6000 });
+  }
+  return true;
+}
+
 async function initAuth() {
   const btn = authButton();
   if (btn) btn.addEventListener('click', loginGoogle);
@@ -128,6 +193,7 @@ async function initAuth() {
 
   await consumeOAuthRedirect();
   await restoreSession();
+  await aplicarValidadeLogin();
 }
 
 window.LifeOSAuth = {
@@ -137,5 +203,8 @@ window.LifeOSAuth = {
   logout,
   restoreSession,
   getOAuthRedirectUrl,
-  consumeOAuthRedirect
+  consumeOAuthRedirect,
+  DIAS_ATE_REAUTENTICAR,
+  diasRestantesLogin,
+  aplicarValidadeLogin
 };
