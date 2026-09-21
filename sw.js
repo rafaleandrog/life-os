@@ -5,7 +5,7 @@
    o activate apaga caches antigos e assume o controle sem travar. */
 'use strict';
 
-const VERSION = 'lifeos-v4.24.0';
+const VERSION = 'lifeos-v4.25.0';
 const CORE = [
   './',
   './index.html',
@@ -16,6 +16,7 @@ const CORE = [
   './assets/state/store.js',
   './assets/components/ui.js',
   './assets/components/router.js',
+  './assets/state/movimentacoes.js',
   './assets/components/app.js',
   './assets/icons/icon-192.png',
   './assets/icons/icon-512.png',
