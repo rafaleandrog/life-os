@@ -5141,33 +5141,26 @@ function fluxoTabHTML(ym) {
         + '<div class="bar"><i class="'+corOrcamento(pct)+'" style="width:'+clamp(pct*100,2,100)+'%"></i></div></div>';
     }).join('') + '<div class="tiny muted">Aportes em investimentos nunca entram aqui — patrimônio não é consumo.</div></div>';
   }
-  // entradas × saídas (6 meses) — a partir de MOV.mensal
-  let barras = '';
-  const grupos = []; for (let i = 5; i >= 0; i--) grupos.push(movMesAdd(ym, -i));
-  const series = grupos.map(g => MOV.mensal[g] || movMensalZero(g));
-  const maxV = Math.max(...series.map(rr => Math.max(Number(rr.entradas_operacionais), Number(rr.saidas_operacionais))), 1);
-  series.forEach((rr, i) => {
-    const ent = Number(rr.entradas_operacionais), sai = Number(rr.saidas_operacionais);
-    const x = 30 + i * 86;
-    barras += '<rect x="'+x+'" y="'+(150 - ent/maxV*130)+'" width="26" height="'+Math.max(1, ent/maxV*130)+'" rx="4" fill="var(--ok)"/>'
-      + '<rect x="'+(x+30)+'" y="'+(150 - sai/maxV*130)+'" width="26" height="'+Math.max(1, sai/maxV*130)+'" rx="4" fill="var(--err)"/>'
-      + '<text x="'+(x+28)+'" y="166" font-size="10" fill="#9AA0B0" text-anchor="middle">'+MESES_C[Number(grupos[i].slice(5,7))-1]+'</text>';
-  });
-  html += '<div class="card"><div class="h2">📊 Entradas × saídas (6 meses)</div><div class="chartbox"><svg viewBox="0 0 560 172">'+barras+'</svg></div>'
-    + '<div class="legend"><span><i class="dot" style="background:var(--ok)"></i>entradas</span><span><i class="dot" style="background:var(--err)"></i>saídas</span></div></div>';
-  // fora do orçamento (empréstimos / investimentos)
+  // lançamentos do mês (usado aqui e no bloco "fora do orçamento" logo abaixo)
+  const todos = MOV.lancamentos[ym] || [];
+  // fora do orçamento (empréstimos / investimentos) — totais + os lançamentos exatos que ficam de fora
+  const foraItens = ordenar(todos.filter(l => l.grupo_fluxo !== 'operacional'), l => l.data, true);
   html += '<div class="card"><div class="h2">📦 Fora do orçamento</div><div class="row wrap" style="gap:22px">'
     + '<div><div class="tiny muted">empréstimo recebido</div><div class="v ok">'+fmtBRL(mv.emprestimos_recebidos)+'</div></div>'
     + '<div><div class="tiny muted">empréstimo pago</div><div class="v err">'+fmtBRL(mv.emprestimos_pagos)+'</div></div>'
     + '<div><div class="tiny muted">aportes</div><div class="v acc">'+fmtBRL(mv.aportes_investimento)+'</div></div>'
     + '<div><div class="tiny muted">resgates</div><div class="v acc">'+fmtBRL(mv.resgates_investimento)+'</div></div></div>'
-    + '<div class="tiny muted" style="margin-top:8px">Empréstimos e aportes nunca entram em entradas/saídas do orçamento.</div></div>';
-  // saídas (e entradas) por categoria — v_movimentacoes_categoria_mes, com drill-down grupo › subgrupo
+    + '<div class="tiny muted" style="margin:8px 0">Empréstimos e aportes nunca entram em entradas/saídas do orçamento — são estes lançamentos:</div>'
+    + (foraItens.length ? '<div class="list">' + foraItens.map(l => '<div class="item"><span>'+(l.tipo==='despesa'?'💸':'💵')+'</span>'
+        + '<div class="grow"><div class="ttl">'+esc(l.descricao)+' <span class="badge acc">'+esc(l.grupo_fluxo)+'</span></div>'
+        + '<div class="sub">'+fmtData(l.data)+' · '+esc(l.categoria_geral)+' › '+esc(l.categoria_especifica)+'</div></div>'
+        + '<b class="'+(l.tipo==='despesa'?'err':'ok')+'">'+(l.tipo==='despesa'?'−':'+')+fmtBRL(l.valor)+'</b></div>').join('') + '</div>'
+      : '<div class="tiny muted">'+(carregando?'Carregando…':'Nenhum lançamento fora do orçamento neste mês.')+'</div>') + '</div>';
+  // saídas (e entradas) por categoria — v_movimentacoes_categoria_mes, com drill-down grupo › subgrupo (pizza + linhas)
   const categorias = MOV.categorias[ym] || [];
   html += movCategoriaCardHTML(ym, categorias, 'despesa', '🥧 Saídas por categoria', 'err')
     + movCategoriaCardHTML(ym, categorias, 'receita', '💵 Entradas por categoria', 'ok');
   // lançamentos do mês
-  const todos = MOV.lancamentos[ym] || [];
   const filtrados = todos.filter(l => {
     if (l.grupo_fluxo !== 'operacional' && !MOV_UI.foraOrcamento) return false;
     if (MOV_UI.filtroTipo !== 'todos' && l.tipo !== MOV_UI.filtroTipo) return false;
