@@ -5091,8 +5091,10 @@ function fluxoTabHTML(ym) {
   const mv = MOV.mensal[ym] || movMensalZero(ym);
   const manualEntradas = sum(lancDoMes(ym).filter(l => l.tipo === 'entrada' && l.pago).map(l => l.valor));
   const manualSaidas = sum(lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor));
-  const entradas = Number(mv.entradas_operacionais) + manualEntradas;
-  const saidas = Number(mv.saidas_operacionais) + manualSaidas;
+  // empréstimo recebido/pago (financiamento) conta como entrada/saída real; só aportes/resgates
+  // (investimento) ficam de fora, por serem movimento de patrimônio, não consumo/renda.
+  const entradas = Number(mv.entradas_operacionais) + Number(mv.emprestimos_recebidos) + manualEntradas;
+  const saidas = Number(mv.saidas_operacionais) + Number(mv.emprestimos_pagos) + manualSaidas;
   const saldo = entradas - saidas;
   const mesAnt = movMesAdd(ym, -1), mesProx = movMesAdd(ym, 1);
   let html = '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesAnt+'">←</button>'
@@ -5143,26 +5145,26 @@ function fluxoTabHTML(ym) {
   }
   // lançamentos do mês (usado aqui e no bloco "fora do orçamento" logo abaixo)
   const todos = MOV.lancamentos[ym] || [];
-  // fora do orçamento (empréstimos / investimentos) — totais + os lançamentos exatos que ficam de fora
-  const foraItens = ordenar(todos.filter(l => l.grupo_fluxo !== 'operacional'), l => l.data, true);
-  html += '<div class="card"><div class="h2">📦 Fora do orçamento</div><div class="row wrap" style="gap:22px">'
-    + '<div><div class="tiny muted">empréstimo recebido</div><div class="v ok">'+fmtBRL(mv.emprestimos_recebidos)+'</div></div>'
-    + '<div><div class="tiny muted">empréstimo pago</div><div class="v err">'+fmtBRL(mv.emprestimos_pagos)+'</div></div>'
+  // fora do orçamento: só investimento (aporte/resgate) — patrimônio, não consumo/renda.
+  // Financiamento (empréstimo) já soma em entradas/saídas acima, então não entra mais aqui.
+  const foraItens = ordenar(todos.filter(l => l.grupo_fluxo === 'investimento'), l => l.data, true);
+  html += '<div class="card"><div class="h2">📦 Fora do orçamento (investimentos)</div><div class="row wrap" style="gap:22px">'
     + '<div><div class="tiny muted">aportes</div><div class="v acc">'+fmtBRL(mv.aportes_investimento)+'</div></div>'
     + '<div><div class="tiny muted">resgates</div><div class="v acc">'+fmtBRL(mv.resgates_investimento)+'</div></div></div>'
-    + '<div class="tiny muted" style="margin:8px 0">Empréstimos e aportes nunca entram em entradas/saídas do orçamento — são estes lançamentos:</div>'
+    + '<div class="tiny muted" style="margin:8px 0">Aportes e resgates nunca entram em entradas/saídas — são estes lançamentos:</div>'
     + (foraItens.length ? '<div class="list">' + foraItens.map(l => '<div class="item"><span>'+(l.tipo==='despesa'?'💸':'💵')+'</span>'
         + '<div class="grow"><div class="ttl">'+esc(l.descricao)+' <span class="badge acc">'+esc(l.grupo_fluxo)+'</span></div>'
         + '<div class="sub">'+fmtData(l.data)+' · '+esc(l.categoria_geral)+' › '+esc(l.categoria_especifica)+'</div></div>'
         + '<b class="'+(l.tipo==='despesa'?'err':'ok')+'">'+(l.tipo==='despesa'?'−':'+')+fmtBRL(l.valor)+'</b></div>').join('') + '</div>'
-      : '<div class="tiny muted">'+(carregando?'Carregando…':'Nenhum lançamento fora do orçamento neste mês.')+'</div>') + '</div>';
+      : '<div class="tiny muted">'+(carregando?'Carregando…':'Nenhum aporte/resgate neste mês.')+'</div>') + '</div>';
   // saídas (e entradas) por categoria — v_movimentacoes_categoria_mes, com drill-down grupo › subgrupo (pizza + linhas)
+  // inclui operacional + financiamento (empréstimos), já que agora somam em entradas/saídas; investimento fica de fora.
   const categorias = MOV.categorias[ym] || [];
   html += movCategoriaCardHTML(ym, categorias, 'despesa', '🥧 Saídas por categoria', 'err')
     + movCategoriaCardHTML(ym, categorias, 'receita', '💵 Entradas por categoria', 'ok');
   // lançamentos do mês
   const filtrados = todos.filter(l => {
-    if (l.grupo_fluxo !== 'operacional' && !MOV_UI.foraOrcamento) return false;
+    if (l.grupo_fluxo === 'investimento' && !MOV_UI.foraOrcamento) return false;
     if (MOV_UI.filtroTipo !== 'todos' && l.tipo !== MOV_UI.filtroTipo) return false;
     if (MOV_UI.filtroFluxo !== 'todos' && l.grupo_fluxo !== MOV_UI.filtroFluxo) return false;
     return true;
@@ -5176,7 +5178,7 @@ function fluxoTabHTML(ym) {
     + '<button class="'+(MOV_UI.filtroFluxo==='operacional'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="operacional">operacional</button>'
     + '<button class="'+(MOV_UI.filtroFluxo==='investimento'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="investimento">investimento</button>'
     + '<button class="'+(MOV_UI.filtroFluxo==='financiamento'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="financiamento">financiamento</button></div>'
-    + '<label class="checkline tiny"><input type="checkbox" data-chg="mov-toggle-fora" '+(MOV_UI.foraOrcamento?'checked':'')+'> mostrar fora do orçamento</label></div>'
+    + '<label class="checkline tiny"><input type="checkbox" data-chg="mov-toggle-fora" '+(MOV_UI.foraOrcamento?'checked':'')+'> mostrar investimentos (fora do orçamento)</label></div>'
     + '<div class="list" style="padding:0 10px 8px">'
     + (filtrados.map(l => {
         const badges = [];
@@ -5193,7 +5195,7 @@ function fluxoTabHTML(ym) {
   return html;
 }
 function movCategoriaCardHTML(ym, categorias, tipo, titulo, cor) {
-  const linhas = categorias.filter(c => c.tipo === tipo && c.grupo_fluxo === 'operacional');
+  const linhas = categorias.filter(c => c.tipo === tipo && c.grupo_fluxo !== 'investimento');
   const porApp = {};
   linhas.forEach(l => {
     const k = l.categoria_app || '(sem categoria)';
