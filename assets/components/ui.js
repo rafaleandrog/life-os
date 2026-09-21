@@ -117,6 +117,32 @@ function svgBarras(itens, o={}) { // [{x,y,cor?}] ou (valores, labels, opções)
   }).join('');
   return '<div class="chartbox"><svg viewBox="0 0 '+W+' '+H+'">'+bars+'</svg></div>';
 }
+function svgBarrasEmpilhadas(cats, series, o={}) {
+  // cats: ['2026-03', …]; series: [{nome, cor, valores:{cat: num}}]. Uma barra por
+  // categoria, com as séries empilhadas — mostra total, proporção entre as séries e a
+  // variação de cada uma sem precisar de um gráfico por série (que perde a comparação).
+  if (!cats.length) return '<div class="empty small">sem dados ainda</div>';
+  const W = o.w||560, H = o.h||170, PB = 22, PT = 14, P = 8;
+  const totais = cats.map(c => sum(series.map(s => s.valores[c] || 0)));
+  const mx = Math.max(...totais, 1);
+  const fmt = o.fmt || (v => fmtNum(v));
+  const larg = (W-P*2)/cats.length, bw = Math.min(46, larg - 10);
+  const corpo = cats.map((c, i) => {
+    const x = P + i*larg + (larg-bw)/2;
+    let y = H-PB;
+    const segs = series.map(s => {
+      const v = s.valores[c] || 0;
+      if (!v) return '';
+      const h = v/mx*(H-PB-PT);
+      y -= h;
+      return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+h.toFixed(1)+'" fill="'+s.cor+'"><title>'+esc(s.nome+': '+fmt(v))+'</title></rect>';
+    }).join('');
+    return segs
+      + (totais[i] ? '<text x="'+(x+bw/2)+'" y="'+(y-4).toFixed(1)+'" font-size="9" fill="#9AA0B0" text-anchor="middle">'+esc(fmt(totais[i]))+'</text>' : '')
+      + '<text x="'+(x+bw/2)+'" y="'+(H-6)+'" font-size="9.5" fill="#9AA0B0" text-anchor="middle">'+esc(o.rotulo ? o.rotulo(c) : c)+'</text>';
+  }).join('');
+  return '<div class="chartbox"><svg viewBox="0 0 '+W+' '+H+'">'+corpo+'</svg></div>';
+}
 function svgPizza(itens, o={}) { // [{label, valor, cor}]
   itens = itens.filter(i => i.valor > 0);
   if (!itens.length) return '<div class="empty small">sem dados ainda</div>';

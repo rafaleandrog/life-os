@@ -2,11 +2,14 @@
 /* ════════════════ FINANÇAS · FLUXO — dados de `movimentacoes` (Supabase) ════════════════
    Somente leitura: nunca usa dbUpsert/dbPatch/dbDelete, nunca entra em TABLES/pullAll/
    enqueue/flush. As consultas usam sb() (definida em app.js) diretamente contra as views
-   v_movimentacoes_mensal / v_movimentacoes_categoria_mes / v_movimentacoes_cobertura e as
-   tabelas movimentacoes / movimentacoes_detalhe, filtradas por ano_mes no servidor.
-   Cache só em memória (nunca localStorage) — recarregado a cada sessão. */
+   v_movimentacoes_mensal / v_movimentacoes_cobertura e as tabelas movimentacoes /
+   movimentacoes_detalhe, filtradas por ano_mes no servidor.
+   Cache só em memória (nunca localStorage) — recarregado a cada sessão.
+   v_movimentacoes_categoria_mes não é mais lida: ela agrega e perde `descricao`, sem a
+   qual não dá para separar os pagadores do salário nem listar lançamentos no drill-down.
+   A agregação por categoria é feita no cliente, sobre as linhas de `movimentacoes`. */
 
-const MOV = { mensal: {}, categorias: {}, cobertura: {}, lancamentos: {}, detalhe: {}, status: {}, erro: {} };
+const MOV = { mensal: {}, cobertura: {}, lancamentos: {}, detalhe: {}, salario: {}, status: {}, erro: {} };
 
 function movMensalZero(ym) {
   return { ano_mes: ym, entradas_operacionais: 0, saidas_operacionais: 0, saldo_operacional: 0,
@@ -40,12 +43,6 @@ async function fetchMovSerie(ateYm, n) {
   }
   return metas.map(m => MOV.mensal[m]);
 }
-async function fetchMovCategorias(ym) {
-  if (MOV.categorias[ym]) return MOV.categorias[ym];
-  const linhas = await sb('GET', 'v_movimentacoes_categoria_mes?ano_mes=eq.' + encodeURIComponent(ym) + '&select=*');
-  MOV.categorias[ym] = linhas || [];
-  return MOV.categorias[ym];
-}
 async function fetchMovCobertura(ym) {
   if (MOV.cobertura[ym] !== undefined) return MOV.cobertura[ym];
   const linhas = await sb('GET', 'v_movimentacoes_cobertura?ano_mes=eq.' + encodeURIComponent(ym) + '&select=*');
@@ -64,10 +61,26 @@ async function fetchMovDetalhe(chave) {
   MOV.detalhe[chave] = linhas || [];
   return MOV.detalhe[chave];
 }
+/* Série de salário dos últimos n meses, para o card "Salário por fonte". As views
+   agregadas não trazem `descricao`, que é o único campo que identifica o pagador, então
+   esta é a única consulta que precisa ir à tabela — ~2 linhas por mês. Somente leitura. */
+async function fetchMovSalarioSerie(ym, n) {
+  n = n || 6;
+  const chave = ym + ':' + n;
+  if (MOV.salario[chave]) return MOV.salario[chave];
+  const metas = [];
+  for (let i = n - 1; i >= 0; i--) metas.push(movMesAdd(ym, -i));
+  const lista = metas.map(m => encodeURIComponent(m)).join(',');
+  const linhas = await sb('GET', 'movimentacoes?tipo=eq.receita&categoria_app=eq.' + encodeURIComponent('Salário')
+    + '&ano_mes=in.(' + lista + ')&select=ano_mes,data,descricao,descricao_normalizada,valor&order=data.asc');
+  MOV.salario[chave] = { meses: metas, linhas: linhas || [] };
+  return MOV.salario[chave];
+}
+
 async function movCarregarMes(ym) {
   MOV.status[ym] = 'carregando'; MOV.erro[ym] = null;
   try {
-    await Promise.all([fetchMovMensal(ym), fetchMovSerie(ym, 6), fetchMovCategorias(ym), fetchMovCobertura(ym), fetchMovLancamentos(ym)]);
+    await Promise.all([fetchMovMensal(ym), fetchMovSerie(ym, 6), fetchMovCobertura(ym), fetchMovLancamentos(ym), fetchMovSalarioSerie(ym, 6)]);
     MOV.status[ym] = 'ok';
   } catch (e) {
     MOV.status[ym] = 'erro';
@@ -76,7 +89,8 @@ async function movCarregarMes(ym) {
 }
 function movInvalidarMes(ym) {
   for (let i = 0; i < 6; i++) delete MOV.mensal[movMesAdd(ym, -i)];
-  delete MOV.categorias[ym]; delete MOV.cobertura[ym]; delete MOV.lancamentos[ym];
+  delete MOV.cobertura[ym]; delete MOV.lancamentos[ym];
+  MOV.salario = {};   // qualquer janela de 6 meses pode conter `ym`; o refetch é barato
   delete MOV.status[ym]; delete MOV.erro[ym];
 }
 
@@ -84,12 +98,67 @@ function movInvalidarMes(ym) {
 const MOV_EMISSOR_LABEL = { nubank: 'Nubank', bipa: 'Bipa', xp: 'XP', bradescard: 'Bradescard', varios: 'vários', nao_identificado: 'cartão' };
 const movEmissorLabel = l => l.meio === 'conta' ? 'conta' : (MOV_EMISSOR_LABEL[l.emissor] || l.emissor || 'cartão');
 
-/* Cores fixas por categoria_app (não há coluna de cor nas views) */
+/* ── Categorias de exibição ──────────────────────────────────────────────────────
+   `categoria_app` vem grossa demais do banco: a função Postgres mov_app() joga em
+   'Miscelaneous' toda despesa cujo categoria_geral não esteja na whitelist de seis
+   grupos, o que na prática é TODO o grupo 'Despesas Financeiras' — impostos,
+   empréstimos e transferências familiares caíam na mesma fatia cinza, sem grupo
+   visual próprio. Como mov_app() roda no INSERT (sem trigger), mexer nela não
+   reclassificaria o histórico; então a categoria mostrada é derivada aqui, de
+   (categoria_geral, categoria_especifica), que já vêm nas views e nos lançamentos.
+   Nada é gravado — este módulo continua somente leitura. */
+const MOV_CAT_REMAP = {
+  'Despesas Financeiras|Impostos': 'Impostos',
+  'Despesas Financeiras|Empréstimo': 'Dívidas e Empréstimos',
+  'Despesas Financeiras|Empréstimo pago': 'Dívidas e Empréstimos',
+  'Despesas Financeiras|Transferência Familiar': 'Transferência Familiar',
+  'Despesas Financeiras|Taxas e Tarifas': 'Despesas Financeiras',
+  'Despesas Financeiras|Serviços Digitais': 'Despesas Financeiras',
+  'Despesas Financeiras|Outros': 'Despesas Financeiras'
+  /* 'Despesas Financeiras|Investimento' não entra: já sai pelo filtro de grupo_fluxo. */
+};
+
+/* Fontes de salário. São dois pagadores e o nome de quem pagou só existe no texto da
+   descrição — nem `categoria_especifica` (sempre 'Salário') nem `emissor` (sempre o
+   banco que recebeu) distinguem os dois. O histórico tem variações de grafia
+   ('PARANOAZINHO S A', 'PARANOAZINHO SA', 'S/A', 'Wise Brasil Corretora de Câmbio',
+   'Wise Brasil Instituicao de Pagamento'), por isso o casamento é por regex sobre
+   descricao_normalizada (minúscula, sem acento). A regra só vale dentro de Salário:
+   a UP também paga reembolsos, que devem continuar em 'Outras fontes de renda'. */
+const MOV_FONTES_SALARIO = [
+  { re: /urbanizadora\s*paranoazinho/, nome: 'Salário · UP' },
+  { re: /\bwise\b/,                   nome: 'Salário · Tipolis' }
+];
+function movFonteSalario(l) {
+  const n = l.descricao_normalizada || norm(l.descricao || '');
+  if (!n) return 'Salário';            // linha agregada (sem descrição): não dá para separar
+  const f = MOV_FONTES_SALARIO.find(f => f.re.test(n));
+  return f ? f.nome : 'Salário · outros';
+}
+
+/* Categoria mostrada nos cards "por categoria". Aceita tanto um lançamento de
+   `movimentacoes` quanto uma linha de v_movimentacoes_categoria_mes. */
+function movCatExibicao(l) {
+  if (l.categoria_app === 'Salário') return movFonteSalario(l);
+  return MOV_CAT_REMAP[l.categoria_geral + '|' + l.categoria_especifica] || l.categoria_app || '(sem categoria)';
+}
+
+/* Cores fixas por categoria (não há coluna de cor nas views) */
 const MOV_CAT_CORES = {
   'Alimentação': '#FFB454', 'Transporte': '#C084FC', 'Saúde': '#FF5C7A', 'Educação': '#38BDF8', 'Moradia': '#5CC8FC',
-  'Entretenimento': '#F472B6', 'Miscelaneous': '#9AA0B0', 'Salário': '#3DDC97', 'Rendimentos': '#A3E635', 'Outras fontes de renda': '#FB923C'
+  'Entretenimento': '#F472B6', 'Rendimentos': '#A3E635', 'Outras fontes de renda': '#FB923C',
+  /* grupos que saíram de dentro do antigo 'Miscelaneous' */
+  'Impostos': '#FACC15', 'Dívidas e Empréstimos': '#EF4444', 'Transferência Familiar': '#2DD4BF',
+  'Despesas Financeiras': '#9AA0B0',
+  /* salário por fonte */
+  'Salário · UP': '#3DDC97', 'Salário · Tipolis': '#22D3EE', 'Salário · outros': '#86EFAC',
+  /* fallbacks: só aparecem se o remap acima não pegar a linha */
+  'Miscelaneous': '#9AA0B0', 'Salário': '#3DDC97'
 };
 const movCatCor = nome => MOV_CAT_CORES[nome] || '#7C5CFC';
+
+/* rótulo curto de mês para eixo de gráfico: '2026-08' → 'ago/26' */
+const movMesCurto = ym => MESES_C[Number(ym.slice(5, 7)) - 1] + '/' + ym.slice(2, 4);
 
 /* Notas de cobertura por mês — texto de auditoria (não existe coluna equivalente nas
    views; vem da conferência manual feita na carga dos dados, ver life_os_cobertura_mensal.csv).
