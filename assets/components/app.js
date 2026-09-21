@@ -5064,6 +5064,7 @@ act('lc-salvar', el => {
 });
 
 /* ---- página FINANÇAS (abas Fluxo | Investimentos) ---- */
+const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos' };
 reg('financas', {
   titulo: 'Finanças',
   render: (params) => {
@@ -5073,21 +5074,44 @@ reg('financas', {
       + '<button class="'+(aba==='investimentos'?'on':'')+'" data-act="nav" data-r="financas/investimentos">📈 Investimentos</button></div></div>';
     if (aba === 'investimentos') return html + (window.investTabHTML ? investTabHTML(params) : '<div class="card"><div class="empty"><span class="em">🚧</span>Investimentos chegam na próxima etapa.</div></div>');
     return html + fluxoTabHTML(params[1] || mesDe(hoje()));
+  },
+  mount: (params) => {
+    if (params[0] === 'investimentos') return;
+    const ym = params[1] || mesDe(hoje());
+    if (MOV.status[ym] === 'ok' || MOV.status[ym] === 'carregando') return;
+    movCarregarMes(ym).then(() => {
+      const r = rotaAtual();
+      if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
+    });
   }
 });
 function fluxoTabHTML(ym) {
-  const r = resumoMes(ym);
-  const [y, m] = ym.split('-').map(Number);
-  const mesAnt = m === 1 ? (y-1)+'-12' : y+'-'+pad2(m-1);
-  const mesProx = m === 12 ? (y+1)+'-01' : y+'-'+pad2(m+1);
+  const carregando = MOV.status[ym] === 'carregando' || MOV.status[ym] === undefined;
+  const erro = MOV.status[ym] === 'erro' ? MOV.erro[ym] : null;
+  const mv = MOV.mensal[ym] || movMensalZero(ym);
+  const manualEntradas = sum(lancDoMes(ym).filter(l => l.tipo === 'entrada' && l.pago).map(l => l.valor));
+  const manualSaidas = sum(lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor));
+  const entradas = Number(mv.entradas_operacionais) + manualEntradas;
+  const saidas = Number(mv.saidas_operacionais) + manualSaidas;
+  const saldo = entradas - saidas;
+  const mesAnt = movMesAdd(ym, -1), mesProx = movMesAdd(ym, 1);
   let html = '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesAnt+'">←</button>'
-    + '<b style="flex:1;text-align:center">'+ucfirst(fmtMes(ym))+'</b>'
-    + '<button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesProx+'">→</button></div>'
-    + '<div class="grid4">'
-    + '<div class="kpi"><div class="l">entradas</div><div class="v ok">'+fmtBRL(r.entradas)+'</div></div>'
-    + '<div class="kpi"><div class="l">saídas</div><div class="v err">'+fmtBRL(r.saidas)+'</div></div>'
-    + '<div class="kpi"><div class="l">saldo do mês</div><div class="v '+(r.saldo>=0?'ok':'err')+'">'+fmtBRL(r.saldo)+'</div></div>'
-    + '<div class="kpi" style="border-color:rgba(124,92,252,.5)"><div class="l acc">📈 investido no mês</div><div class="v acc">'+fmtBRL(r.investido)+'</div><div class="d muted tiny">aporte não é despesa</div></div></div>'
+    + '<b style="flex:1;text-align:center">'+ucfirst(fmtMes(ym))+(carregando?' <span class="muted tiny">carregando…</span>':'')+'</b>'
+    + '<button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesProx+'">→</button>'
+    + '<button class="iconbtn" data-act="mov-recarregar" data-ym="'+ym+'" title="Recarregar dados do mês">⟳</button></div>';
+  if (erro) html += '<div class="banner err">⚠️ Não consegui carregar os dados deste mês do Supabase: '+esc(erro)+' <span class="x" data-act="mov-recarregar" data-ym="'+ym+'">tentar de novo</span></div>';
+  // aviso de cobertura
+  const cob = MOV.cobertura[ym], nota = MOV_COBERTURA_NOTAS[ym];
+  if (cob && (Number(cob.qtd_receitas) === 0 || Number(cob.qtd_despesas_conta) === 0)) {
+    html += '<div class="banner warn">⚠️ Dados incompletos neste mês'+(nota?': '+esc(nota):'.')+'</div>';
+  } else if (nota) {
+    html += '<div class="banner acc">ℹ️ '+esc(nota)+'</div>';
+  }
+  html += '<div class="grid4">'
+    + '<div class="kpi"><div class="l">entradas</div><div class="v ok">'+fmtBRL(entradas)+'</div>'+(manualEntradas?'<div class="d muted tiny">inclui '+fmtBRL(manualEntradas)+' lançado manualmente</div>':'')+'</div>'
+    + '<div class="kpi"><div class="l">saídas</div><div class="v err">'+fmtBRL(saidas)+'</div>'+(manualSaidas?'<div class="d muted tiny">inclui '+fmtBRL(manualSaidas)+' lançado manualmente</div>':'')+'</div>'
+    + '<div class="kpi"><div class="l">saldo do mês</div><div class="v '+(saldo>=0?'ok':'err')+'">'+fmtBRL(saldo)+'</div></div>'
+    + '<div class="kpi" style="border-color:rgba(124,92,252,.5)"><div class="l acc">📈 investido no mês</div><div class="v acc">'+fmtBRL(aportadoNoMes(ym))+'</div><div class="d muted tiny">aporte não é despesa</div></div></div>'
     + '<div class="row wrap" style="margin:2px 0 14px">'
     + '<button class="btn primary" data-act="qa-gasto">+ Gasto</button>'
     + '<button class="btn" data-act="lc-nova-entrada">+ Entrada</button>'
@@ -5095,7 +5119,7 @@ function fluxoTabHTML(ym) {
     + '<button class="btn" data-act="fin-import">📥 Importar CSV</button>'
     + '<button class="btn ghost" data-act="fin-cats">🏷️ Categorias</button>'
     + '<button class="btn ghost" data-act="fin-contas">🏦 Contas</button></div>';
-  // contas a pagar / receber
+  // contas a pagar / receber (lançamentos manuais — inalterado)
   const pend = ordenar(T('lancamentos_financeiros').filter(l => !l.pago), l => l.data).filter(l => l.data <= fimDoMes(ym));
   if (pend.length) {
     html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">📌 A pagar / receber</div><div class="list" style="padding:0 10px 8px">'
@@ -5107,7 +5131,7 @@ function fluxoTabHTML(ym) {
           + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+fmtBRL(l.valor)+'</b>'
           + '<button class="btn small ok" data-act="lc-pagar" data-id="'+l.id+'">✓ '+(l.tipo==='saida'?'pagar':'receber')+'</button></div>'; }).join('') + '</div></div>';
   }
-  // orçamento por categoria
+  // orçamento por categoria (lançamentos manuais — inalterado)
   const catsOrc = T('categorias_financeiras').filter(c => c.tipo === 'saida' && c.orcamento_mensal > 0);
   if (catsOrc.length) {
     html += '<div class="card"><div class="h2">🎯 Orçamento do mês</div>' + catsOrc.map(c => {
@@ -5117,35 +5141,115 @@ function fluxoTabHTML(ym) {
         + '<div class="bar"><i class="'+corOrcamento(pct)+'" style="width:'+clamp(pct*100,2,100)+'%"></i></div></div>';
     }).join('') + '<div class="tiny muted">Aportes em investimentos nunca entram aqui — patrimônio não é consumo.</div></div>';
   }
-  // entradas × saídas (6 meses)
-  let barras = '', mm = ym;
-  const grupos = [];
-  for (let i = 0; i < 6; i++) { grupos.unshift(mm); const [yy, mo] = mm.split('-').map(Number); mm = mo === 1 ? (yy-1)+'-12' : yy+'-'+pad2(mo-1); }
-  const maxV = Math.max(...grupos.map(g => { const rr = resumoMes(g); return Math.max(rr.entradas, rr.saidas); }), 1);
-  grupos.forEach((g, i) => {
-    const rr = resumoMes(g);
+  // entradas × saídas (6 meses) — a partir de MOV.mensal
+  let barras = '';
+  const grupos = []; for (let i = 5; i >= 0; i--) grupos.push(movMesAdd(ym, -i));
+  const series = grupos.map(g => MOV.mensal[g] || movMensalZero(g));
+  const maxV = Math.max(...series.map(rr => Math.max(Number(rr.entradas_operacionais), Number(rr.saidas_operacionais))), 1);
+  series.forEach((rr, i) => {
+    const ent = Number(rr.entradas_operacionais), sai = Number(rr.saidas_operacionais);
     const x = 30 + i * 86;
-    barras += '<rect x="'+x+'" y="'+(150 - rr.entradas/maxV*130)+'" width="26" height="'+Math.max(1, rr.entradas/maxV*130)+'" rx="4" fill="var(--ok)"/>'
-      + '<rect x="'+(x+30)+'" y="'+(150 - rr.saidas/maxV*130)+'" width="26" height="'+Math.max(1, rr.saidas/maxV*130)+'" rx="4" fill="var(--err)"/>'
-      + '<text x="'+(x+28)+'" y="166" font-size="10" fill="#9AA0B0" text-anchor="middle">'+MESES_C[Number(g.slice(5,7))-1]+'</text>';
+    barras += '<rect x="'+x+'" y="'+(150 - ent/maxV*130)+'" width="26" height="'+Math.max(1, ent/maxV*130)+'" rx="4" fill="var(--ok)"/>'
+      + '<rect x="'+(x+30)+'" y="'+(150 - sai/maxV*130)+'" width="26" height="'+Math.max(1, sai/maxV*130)+'" rx="4" fill="var(--err)"/>'
+      + '<text x="'+(x+28)+'" y="166" font-size="10" fill="#9AA0B0" text-anchor="middle">'+MESES_C[Number(grupos[i].slice(5,7))-1]+'</text>';
   });
   html += '<div class="card"><div class="h2">📊 Entradas × saídas (6 meses)</div><div class="chartbox"><svg viewBox="0 0 560 172">'+barras+'</svg></div>'
     + '<div class="legend"><span><i class="dot" style="background:var(--ok)"></i>entradas</span><span><i class="dot" style="background:var(--err)"></i>saídas</span></div></div>';
-  // pizza por categoria
-  const porCat = {};
-  lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).forEach(l => { const k = l.categoria_id || 'sem'; porCat[k] = (porCat[k]||0) + Number(l.valor); });
-  html += '<div class="card"><div class="h2">🥧 Saídas por categoria</div>'
-    + svgPizza(Object.entries(porCat).map(([k, v]) => ({ label: k === 'sem' ? 'sem categoria' : (catFin(k)||{}).nome || '?', valor: v, cor: k === 'sem' ? '#9AA0B0' : (catFin(k)||{}).cor || '#5CC8FC' })), { fmt: fmtBRL }) + '</div>';
+  // fora do orçamento (empréstimos / investimentos)
+  html += '<div class="card"><div class="h2">📦 Fora do orçamento</div><div class="row wrap" style="gap:22px">'
+    + '<div><div class="tiny muted">empréstimo recebido</div><div class="v ok">'+fmtBRL(mv.emprestimos_recebidos)+'</div></div>'
+    + '<div><div class="tiny muted">empréstimo pago</div><div class="v err">'+fmtBRL(mv.emprestimos_pagos)+'</div></div>'
+    + '<div><div class="tiny muted">aportes</div><div class="v acc">'+fmtBRL(mv.aportes_investimento)+'</div></div>'
+    + '<div><div class="tiny muted">resgates</div><div class="v acc">'+fmtBRL(mv.resgates_investimento)+'</div></div></div>'
+    + '<div class="tiny muted" style="margin-top:8px">Empréstimos e aportes nunca entram em entradas/saídas do orçamento.</div></div>';
+  // saídas (e entradas) por categoria — v_movimentacoes_categoria_mes, com drill-down grupo › subgrupo
+  const categorias = MOV.categorias[ym] || [];
+  html += movCategoriaCardHTML(ym, categorias, 'despesa', '🥧 Saídas por categoria', 'err')
+    + movCategoriaCardHTML(ym, categorias, 'receita', '💵 Entradas por categoria', 'ok');
   // lançamentos do mês
-  const doMes = ordenar(lancDoMes(ym), l => l.data + (l.criado_em||''), true);
-  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Lançamentos de '+fmtMes(ym)+' ('+doMes.length+')</div><div class="list" style="padding:0 10px 8px">'
-    + (doMes.slice(0, 60).map(l => '<div class="item" data-act="lc-edit" data-id="'+l.id+'"><span>'+(l.tipo==='saida'?'💸':'💵')+'</span>'
-      + '<div class="grow"><div class="ttl">'+esc(l.descricao||((catFin(l.categoria_id)||{}).nome)||'lançamento')+(l.recorrencia?' <span class="badge acc">🔁 modelo</span>':'')+(!l.pago?' <span class="badge warn">pendente</span>':'')+'</div>'
-      + '<div class="sub">'+fmtData(l.data)+(catFin(l.categoria_id)?' · '+esc(catFin(l.categoria_id).nome):'')+'</div></div>'
-      + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+(l.tipo==='saida'?'−':'+')+fmtBRL(l.valor)+'</b></div>').join('')
-    || '<div class="empty"><span class="em">💸</span>Nenhum lançamento neste mês.</div>') + '</div></div>';
+  const todos = MOV.lancamentos[ym] || [];
+  const filtrados = todos.filter(l => {
+    if (l.grupo_fluxo !== 'operacional' && !MOV_UI.foraOrcamento) return false;
+    if (MOV_UI.filtroTipo !== 'todos' && l.tipo !== MOV_UI.filtroTipo) return false;
+    if (MOV_UI.filtroFluxo !== 'todos' && l.grupo_fluxo !== MOV_UI.filtroFluxo) return false;
+    return true;
+  });
+  html += '<div class="card pad0"><div class="sec-head" style="padding:12px 14px 4px">Lançamentos de '+fmtMes(ym)+' ('+filtrados.length+' de '+todos.length+')</div>'
+    + '<div class="row wrap" style="gap:10px;padding:0 14px 8px;align-items:center">'
+    + '<div class="seg"><button class="'+(MOV_UI.filtroTipo==='todos'?'on':'')+'" data-act="mov-filtro-tipo" data-v="todos">todos</button>'
+    + '<button class="'+(MOV_UI.filtroTipo==='despesa'?'on':'')+'" data-act="mov-filtro-tipo" data-v="despesa">saídas</button>'
+    + '<button class="'+(MOV_UI.filtroTipo==='receita'?'on':'')+'" data-act="mov-filtro-tipo" data-v="receita">entradas</button></div>'
+    + '<div class="seg"><button class="'+(MOV_UI.filtroFluxo==='todos'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="todos">todo fluxo</button>'
+    + '<button class="'+(MOV_UI.filtroFluxo==='operacional'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="operacional">operacional</button>'
+    + '<button class="'+(MOV_UI.filtroFluxo==='investimento'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="investimento">investimento</button>'
+    + '<button class="'+(MOV_UI.filtroFluxo==='financiamento'?'on':'')+'" data-act="mov-filtro-fluxo" data-v="financiamento">financiamento</button></div>'
+    + '<label class="checkline tiny"><input type="checkbox" data-chg="mov-toggle-fora" '+(MOV_UI.foraOrcamento?'checked':'')+'> mostrar fora do orçamento</label></div>'
+    + '<div class="list" style="padding:0 10px 8px">'
+    + (filtrados.map(l => {
+        const badges = [];
+        if (l.grupo_fluxo !== 'operacional') badges.push('<span class="badge acc">'+esc(l.grupo_fluxo)+'</span>');
+        badges.push('<span class="badge">'+esc(movEmissorLabel(l))+'</span>');
+        if (l.consolidado) badges.push('<span class="badge ok">consolidado ('+l.qtd_itens+')</span>');
+        if (l.revisar) badges.push('<span class="badge warn" title="'+esc(l.motivo_revisao||'')+'">a revisar</span>');
+        const clique = l.consolidado ? ' data-act="mov-detalhe" data-chave="'+esc(l.chave_dedupe)+'" data-ym="'+ym+'"' : '';
+        return '<div class="item"'+clique+'><span>'+(l.tipo==='despesa'?'💸':'💵')+'</span>'
+          + '<div class="grow"><div class="ttl">'+esc(l.descricao)+'</div>'
+          + '<div class="sub">'+fmtData(l.data)+' · '+esc(l.categoria_geral)+' › '+esc(l.categoria_especifica)+' '+badges.join(' ')+'</div></div>'
+          + '<b class="'+(l.tipo==='despesa'?'err':'ok')+'">'+(l.tipo==='despesa'?'−':'+')+fmtBRL(l.valor)+'</b></div>';
+      }).join('') || '<div class="empty"><span class="em">💸</span>'+(carregando?'Carregando…':'Nenhum lançamento neste mês.')+'</div>') + '</div></div>';
   return html;
 }
+function movCategoriaCardHTML(ym, categorias, tipo, titulo, cor) {
+  const linhas = categorias.filter(c => c.tipo === tipo && c.grupo_fluxo === 'operacional');
+  const porApp = {};
+  linhas.forEach(l => {
+    const k = l.categoria_app || '(sem categoria)';
+    const g = porApp[k] || (porApp[k] = { total: 0, qtd: 0, subs: [] });
+    g.total += Number(l.total); g.qtd += Number(l.qtd);
+    g.subs.push({ geral: l.categoria_geral, especifica: l.categoria_especifica, total: Number(l.total) });
+  });
+  const entradas = Object.entries(porApp).sort((a, b) => b[1].total - a[1].total);
+  if (!entradas.length) return '';
+  return '<div class="card"><div class="h2">'+titulo+'</div>'
+    + svgPizza(entradas.map(([nome, g]) => ({ label: nome, valor: g.total, cor: movCatCor(nome) })), { fmt: fmtBRL })
+    + '<div class="list" style="margin-top:10px">' + entradas.map(([nome, g]) => {
+        const k = ym+':'+tipo+':'+nome, aberta = MOV_UI.catAberta[k];
+        return '<div class="item" data-act="mov-cat-toggle" data-k="'+esc(k)+'"><span class="dot" style="background:'+movCatCor(nome)+'"></span>'
+          + '<div class="grow"><div class="ttl">'+esc(nome)+' <span class="muted tiny">('+g.qtd+')</span></div>'
+          + (aberta ? '<div class="sub" style="flex-direction:column;align-items:flex-start;gap:2px">'
+              + g.subs.map(s => '<span>'+esc(s.geral)+' › '+esc(s.especifica)+' — '+fmtBRL(s.total)+'</span>').join('') + '</div>' : '')
+          + '</div><b class="'+cor+'">'+fmtBRL(g.total)+'</b></div>';
+      }).join('') + '</div></div>';
+}
+act('mov-recarregar', async el => {
+  const ym = el.dataset.ym;
+  movInvalidarMes(ym);
+  render({manterScroll:true, semFade:true});
+  await movCarregarMes(ym);
+  const r = rotaAtual();
+  if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
+});
+act('mov-cat-toggle', el => { MOV_UI.catAberta[el.dataset.k] = !MOV_UI.catAberta[el.dataset.k]; render({manterScroll:true, semFade:true}); });
+act('mov-filtro-tipo', el => { MOV_UI.filtroTipo = el.dataset.v; render({manterScroll:true, semFade:true}); });
+act('mov-filtro-fluxo', el => { MOV_UI.filtroFluxo = el.dataset.v; render({manterScroll:true, semFade:true}); });
+act('mov-toggle-fora', el => { MOV_UI.foraOrcamento = el.checked; render({manterScroll:true, semFade:true}); });
+act('mov-detalhe', async el => {
+  const chave = el.dataset.chave, ym = el.dataset.ym;
+  const linha = (MOV.lancamentos[ym] || []).find(l => l.chave_dedupe === chave);
+  const titulo = linha ? esc(linha.descricao) : 'Detalhe';
+  const ov = modal('<div class="bx-h"><div class="h2">'+titulo+'</div><button class="iconbtn" data-act="m-close">✕</button></div><div class="empty small">carregando…</div>');
+  const box = ov.querySelector('.box');
+  try {
+    const itens = await fetchMovDetalhe(chave);
+    const total = sum(itens.map(i => Number(i.valor)));
+    box.innerHTML = '<div class="grab"></div><div class="bx-h"><div class="h2">'+titulo+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<div class="list">' + itens.map(i => '<div class="item"><div class="grow"><div class="ttl">'+esc(i.descricao)+'</div><div class="sub">'+fmtData(i.data)+'</div></div><b>'+fmtBRL(i.valor)+'</b></div>').join('') + '</div>'
+      + '<div class="row" style="margin-top:8px;justify-content:space-between"><b>Total dos itens</b><b>'+fmtBRL(total)+'</b></div>';
+  } catch (e) {
+    box.innerHTML = '<div class="grab"></div><div class="bx-h"><div class="h2">'+titulo+'</div><button class="iconbtn" data-act="m-close">✕</button></div>'
+      + '<div class="banner err">Falha ao carregar itens: '+esc(e.msg || String(e))+'</div>';
+  }
+});
 act('lc-nova-entrada', () => lancRapidoModal('entrada'));
 act('lc-pagar', el => {
   const l = byId('lancamentos_financeiros', el.dataset.id);
