@@ -5110,12 +5110,13 @@ reg('financas', {
           if (r.nome === 'financas' && financasAba(r.params) === 'resumo') render({manterScroll:true, semFade:true});
         });
       }
-    }
-    if (MOV.parcelasStatus !== 'ok' && MOV.parcelasStatus !== 'carregando') {
-      movCarregarParcelas().then(() => {
-        const r = rotaAtual();
-        if (r.nome === 'financas' && financasAba(r.params) !== 'investimentos') render({manterScroll:true, semFade:true});
-      });
+      // card de parcelas só aparece no Resumo agora — sem sentido buscar em Fluxo.
+      if (MOV.parcelasStatus !== 'ok' && MOV.parcelasStatus !== 'carregando') {
+        movCarregarParcelas().then(() => {
+          const r = rotaAtual();
+          if (r.nome === 'financas' && financasAba(r.params) === 'resumo') render({manterScroll:true, semFade:true});
+        });
+      }
     }
   }
 });
