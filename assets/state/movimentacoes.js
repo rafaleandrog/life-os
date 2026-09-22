@@ -10,7 +10,8 @@
    A agregação por categoria é feita no cliente, sobre as linhas de `movimentacoes`. */
 
 const MOV = { mensal: {}, cobertura: {}, lancamentos: {}, detalhe: {}, salario: {}, status: {}, erro: {},
-  parcelasAtivas: null, parcelasPrevisaoMensal: null, parcelasStatus: undefined, parcelasErro: null };
+  parcelasAtivas: null, parcelasPrevisaoMensal: null, parcelasStatus: undefined, parcelasErro: null,
+  resumoStatus: undefined, resumoErro: null };
 
 function movMensalZero(ym) {
   return { ano_mes: ym, entradas_operacionais: 0, saidas_operacionais: 0, saldo_operacional: 0,
@@ -31,10 +32,14 @@ async function fetchMovMensal(ym) {
   MOV.mensal[ym] = (linhas && linhas[0]) || movMensalZero(ym);
   return MOV.mensal[ym];
 }
-async function fetchMovSerie(ateYm, n) {
-  n = n || 6;
+function movMesesAte(ateYm, n) {
   const metas = [];
   for (let i = n - 1; i >= 0; i--) metas.push(movMesAdd(ateYm, -i));
+  return metas;
+}
+async function fetchMovSerie(ateYm, n) {
+  n = n || 6;
+  const metas = movMesesAte(ateYm, n);
   const faltam = metas.filter(m => !MOV.mensal[m]);
   if (faltam.length) {
     const lista = faltam.map(m => encodeURIComponent(m)).join(',');
@@ -69,8 +74,7 @@ async function fetchMovSalarioSerie(ym, n) {
   n = n || 6;
   const chave = ym + ':' + n;
   if (MOV.salario[chave]) return MOV.salario[chave];
-  const metas = [];
-  for (let i = n - 1; i >= 0; i--) metas.push(movMesAdd(ym, -i));
+  const metas = movMesesAte(ym, n);
   const lista = metas.map(m => encodeURIComponent(m)).join(',');
   const linhas = await sb('GET', 'movimentacoes?tipo=eq.receita&categoria_app=eq.' + encodeURIComponent('Salário')
     + '&ano_mes=in.(' + lista + ')&select=ano_mes,data,descricao,descricao_normalizada,valor&order=data.asc');
@@ -123,6 +127,26 @@ function movInvalidarMes(ym) {
   delete MOV.cobertura[ym]; delete MOV.lancamentos[ym];
   MOV.salario = {};   // qualquer janela de 6 meses pode conter `ym`; o refetch é barato
   delete MOV.status[ym]; delete MOV.erro[ym];
+}
+
+/* Resumo geral (tela default de Finanças): histórico de 12 meses (v_movimentacoes_mensal)
+   + os lançamentos crus do mês corrente, para a segmentação por categoria/subcategoria
+   reaproveitar movCategoriaCardHTML com fidelidade total (a view agregada perde
+   `descricao`, ver comentário no topo do arquivo). Independente do mês navegado em Fluxo. */
+async function movCarregarResumo(ym) {
+  MOV.resumoStatus = 'carregando'; MOV.resumoErro = null;
+  try {
+    await Promise.all([fetchMovSerie(ym, 12), fetchMovLancamentos(ym)]);
+    MOV.resumoStatus = 'ok';
+  } catch (e) {
+    MOV.resumoStatus = 'erro';
+    MOV.resumoErro = (e && e.msg) || String(e);
+  }
+}
+function movInvalidarResumo(ym) {
+  for (let i = 0; i < 12; i++) delete MOV.mensal[movMesAdd(ym, -i)];
+  delete MOV.lancamentos[ym];
+  MOV.resumoStatus = undefined; MOV.resumoErro = null;
 }
 
 /* Emissor/meio → selo exibido na lista de lançamentos */

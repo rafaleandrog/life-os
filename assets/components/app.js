@@ -4995,6 +4995,18 @@ function gastoCategoriaMes(catId, ym) {
   return sum(lancDoMes(ym).filter(l => l.categoria_id === catId && l.tipo === 'saida' && l.pago).map(l => l.valor));
 }
 const corOrcamento = pct => pct > 1 ? 'err' : pct >= 0.8 ? 'warn' : 'ok';
+/* Totais de entradas/saídas de um mês, combinando v_movimentacoes_mensal (importado do
+   Supabase) com os lançamentos manuais da tabela local — usado tanto em Fluxo quanto no
+   Resumo geral, para os dois baterem entre si. Empréstimo recebido/pago (financiamento)
+   conta como entrada/saída real; só aportes/resgates (investimento) ficam de fora. */
+function movMesTotais(ym) {
+  const mv = MOV.mensal[ym] || movMensalZero(ym);
+  const manualEntradas = sum(lancDoMes(ym).filter(l => l.tipo === 'entrada' && l.pago).map(l => l.valor));
+  const manualSaidas = sum(lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor));
+  const entradas = Number(mv.entradas_operacionais) + Number(mv.emprestimos_recebidos) + manualEntradas;
+  const saidas = Number(mv.saidas_operacionais) + Number(mv.emprestimos_pagos) + manualSaidas;
+  return { entradas, saidas, saldo: entradas - saidas, manualEntradas, manualSaidas };
+}
 
 /* geração de recorrências na virada do mês (regra 6) */
 function gerarRecorrenciasDoMes() {
@@ -5063,46 +5075,111 @@ act('lc-salvar', el => {
   render();
 });
 
-/* ---- página FINANÇAS (abas Fluxo | Investimentos) ---- */
+/* ---- página FINANÇAS (abas Resumo | Fluxo | Investimentos) ---- */
 const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos', parcelasAbertas: false };
+const financasAba = params => params[0] === 'fluxo' ? 'fluxo' : params[0] === 'investimentos' ? 'investimentos' : 'resumo';
 reg('financas', {
   titulo: 'Finanças',
   render: (params) => {
-    const aba = params[0] === 'investimentos' ? 'investimentos' : 'fluxo';
+    const aba = financasAba(params);
+    const ymFluxo = aba === 'fluxo' ? (params[1] || mesDe(hoje())) : mesDe(hoje());
     let html = '<div class="row wrap" style="margin-bottom:10px"><div class="h1" style="flex:1">💰 Finanças</div>'
-      + '<div class="seg"><button class="'+(aba==='fluxo'?'on':'')+'" data-act="nav" data-r="financas">💸 Fluxo</button>'
+      + '<div class="seg"><button class="'+(aba==='resumo'?'on':'')+'" data-act="nav" data-r="financas">📊 Resumo</button>'
+      + '<button class="'+(aba==='fluxo'?'on':'')+'" data-act="nav" data-r="financas/fluxo/'+ymFluxo+'">💸 Fluxo</button>'
       + '<button class="'+(aba==='investimentos'?'on':'')+'" data-act="nav" data-r="financas/investimentos">📈 Investimentos</button></div></div>';
     if (aba === 'investimentos') return html + (window.investTabHTML ? investTabHTML(params) : '<div class="card"><div class="empty"><span class="em">🚧</span>Investimentos chegam na próxima etapa.</div></div>');
-    return html + fluxoTabHTML(params[1] || mesDe(hoje()));
+    if (aba === 'fluxo') return html + fluxoTabHTML(params[1] || mesDe(hoje()));
+    return html + resumoTabHTML(mesDe(hoje()));
   },
   mount: (params) => {
-    if (params[0] === 'investimentos') return;
-    const ym = params[1] || mesDe(hoje());
-    if (MOV.status[ym] !== 'ok' && MOV.status[ym] !== 'carregando') {
-      movCarregarMes(ym).then(() => {
-        const r = rotaAtual();
-        if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
-      });
+    const aba = financasAba(params);
+    if (aba === 'investimentos') return;
+    if (aba === 'fluxo') {
+      const ym = params[1] || mesDe(hoje());
+      if (MOV.status[ym] !== 'ok' && MOV.status[ym] !== 'carregando') {
+        movCarregarMes(ym).then(() => {
+          const r = rotaAtual();
+          if (r.nome === 'financas' && financasAba(r.params) === 'fluxo' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
+        });
+      }
+    } else {
+      const ym = mesDe(hoje());
+      if (MOV.resumoStatus !== 'ok' && MOV.resumoStatus !== 'carregando') {
+        movCarregarResumo(ym).then(() => {
+          const r = rotaAtual();
+          if (r.nome === 'financas' && financasAba(r.params) === 'resumo') render({manterScroll:true, semFade:true});
+        });
+      }
     }
     if (MOV.parcelasStatus !== 'ok' && MOV.parcelasStatus !== 'carregando') {
       movCarregarParcelas().then(() => {
         const r = rotaAtual();
-        if (r.nome === 'financas' && r.params[0] !== 'investimentos') render({manterScroll:true, semFade:true});
+        if (r.nome === 'financas' && financasAba(r.params) !== 'investimentos') render({manterScroll:true, semFade:true});
       });
     }
   }
+});
+/* Resumo geral (tela default de Finanças): visão de várias janelas — 6/12 meses de
+   histórico, previsão de parcelas (fixa, "a partir de hoje" — por isso pertence aqui e
+   não a um mês específico) e segmentação por categoria do mês corrente. */
+function resumoTabHTML(ymAtual) {
+  const carregando = MOV.resumoStatus === 'carregando' || MOV.resumoStatus === undefined;
+  const erro = MOV.resumoStatus === 'erro' ? MOV.resumoErro : null;
+  let html = '';
+  if (erro) html += '<div class="banner err">⚠️ Não consegui carregar o resumo: '+esc(erro)+' <span class="x" data-act="mov-resumo-recarregar">tentar de novo</span></div>';
+
+  const meses12 = movMesesAte(ymAtual, 12).map(ym => ({ ym, ...movMesTotais(ym) }));
+  const meses6 = meses12.slice(-6);
+  const temDados = meses12.some(m => m.entradas || m.saidas);
+  const entradas6 = sum(meses6.map(m => m.entradas));
+  const saidas6 = sum(meses6.map(m => m.saidas));
+  const saldo6 = entradas6 - saidas6;
+  const taxaPoupanca = entradas6 > 0 ? saldo6 / entradas6 : null;
+
+  html += '<div class="grid4">'
+    + '<div class="kpi"><div class="l">saldo acumulado (6 meses)</div><div class="v '+(saldo6>=0?'ok':'err')+'">'+fmtBRL(saldo6)+'</div></div>'
+    + '<div class="kpi"><div class="l">receita média mensal</div><div class="v ok">'+fmtBRL(entradas6/6)+'</div></div>'
+    + '<div class="kpi"><div class="l">despesa média mensal</div><div class="v err">'+fmtBRL(saidas6/6)+'</div></div>'
+    + '<div class="kpi"><div class="l">taxa de poupança</div><div class="v '+(taxaPoupanca==null?'muted':taxaPoupanca>=0?'ok':'err')+'">'
+      + (taxaPoupanca==null?'—':(taxaPoupanca>=0?'+':'')+fmtNum(taxaPoupanca*100,1)+'%')+'</div><div class="d muted tiny">últimos 6 meses</div></div></div>'
+    + '<div class="row wrap" style="margin:2px 0 14px">'
+    + '<button class="btn primary" data-act="nav" data-r="financas/fluxo/'+ymAtual+'">💸 Ver '+fmtMes(ymAtual)+' em detalhe</button>'
+    + '<button class="iconbtn" data-act="mov-resumo-recarregar" title="Recarregar resumo">⟳</button></div>';
+
+  if (temDados) {
+    html += '<div class="card"><div class="h2">📈 Evolução (12 meses)</div>'
+      + svgLinha(meses12.map(m => ({ x: movMesCurto(m.ym), y: m.saldo })), { fmt: v => 'R$'+fmtNum(v/1000,1)+'k', cor:'var(--acc)' })
+      + '<div class="tiny muted" style="margin:10px 0 6px">entradas e saídas por mês</div>'
+      + svgBarrasEmpilhadas(meses12.map(m => m.ym), [
+          { nome: 'Entradas', cor: 'var(--ok)', valores: Object.fromEntries(meses12.map(m => [m.ym, m.entradas])) },
+          { nome: 'Saídas', cor: 'var(--err)', valores: Object.fromEntries(meses12.map(m => [m.ym, m.saidas])) }
+        ], { h: 150, rotulo: movMesCurto, fmt: v => fmtNum(v/1000,1)+'k' })
+      + '</div>';
+  } else {
+    html += '<div class="card"><div class="tiny muted">'+(carregando?'carregando histórico…':'sem dados ainda')+'</div></div>';
+  }
+
+  html += movParcelasCardHTML();
+
+  const todosMes = MOV.lancamentos[ymAtual] || [];
+  html += movCategoriaCardHTML(ymAtual, todosMes, 'despesa', '🥧 Saídas por categoria ('+fmtMes(ymAtual)+')', 'err')
+    + movCategoriaCardHTML(ymAtual, todosMes, 'receita', '💵 Entradas por categoria ('+fmtMes(ymAtual)+')', 'ok');
+  if (!todosMes.length && carregando) html += '<div class="card"><div class="tiny muted">carregando categorias do mês…</div></div>';
+  return html;
+}
+act('mov-resumo-recarregar', async () => {
+  const ym = mesDe(hoje());
+  movInvalidarResumo(ym);
+  render({manterScroll:true, semFade:true});
+  await movCarregarResumo(ym);
+  const r = rotaAtual();
+  if (r.nome === 'financas' && financasAba(r.params) === 'resumo') render({manterScroll:true, semFade:true});
 });
 function fluxoTabHTML(ym) {
   const carregando = MOV.status[ym] === 'carregando' || MOV.status[ym] === undefined;
   const erro = MOV.status[ym] === 'erro' ? MOV.erro[ym] : null;
   const mv = MOV.mensal[ym] || movMensalZero(ym);
-  const manualEntradas = sum(lancDoMes(ym).filter(l => l.tipo === 'entrada' && l.pago).map(l => l.valor));
-  const manualSaidas = sum(lancDoMes(ym).filter(l => l.tipo === 'saida' && l.pago).map(l => l.valor));
-  // empréstimo recebido/pago (financiamento) conta como entrada/saída real; só aportes/resgates
-  // (investimento) ficam de fora, por serem movimento de patrimônio, não consumo/renda.
-  const entradas = Number(mv.entradas_operacionais) + Number(mv.emprestimos_recebidos) + manualEntradas;
-  const saidas = Number(mv.saidas_operacionais) + Number(mv.emprestimos_pagos) + manualSaidas;
-  const saldo = entradas - saidas;
+  const { entradas, saidas, saldo, manualEntradas, manualSaidas } = movMesTotais(ym);
   const mesAnt = movMesAdd(ym, -1), mesProx = movMesAdd(ym, 1);
   let html = '<div class="row" style="margin-bottom:10px"><button class="btn small" data-act="nav" data-r="financas/fluxo/'+mesAnt+'">←</button>'
     + '<b style="flex:1;text-align:center">'+ucfirst(fmtMes(ym))+(carregando?' <span class="muted tiny">carregando…</span>':'')+'</b>'
@@ -5128,7 +5205,6 @@ function fluxoTabHTML(ym) {
     + '<button class="btn" data-act="fin-import">📥 Importar CSV</button>'
     + '<button class="btn ghost" data-act="fin-cats">🏷️ Categorias</button>'
     + '<button class="btn ghost" data-act="fin-contas">🏦 Contas</button></div>';
-  html += movParcelasCardHTML();
   // contas a pagar / receber (lançamentos manuais — inalterado)
   const pend = ordenar(T('lancamentos_financeiros').filter(l => !l.pago), l => l.data).filter(l => l.data <= fimDoMes(ym));
   if (pend.length) {
