@@ -157,6 +157,12 @@ const MOV_CAT_CORES = {
 };
 const movCatCor = nome => MOV_CAT_CORES[nome] || '#7C5CFC';
 
+/* Categorias de despesa elegíveis para "limite por categoria" (exclui fontes de renda/
+   salário — limite é controle de gasto, não de entrada). Mesmos nomes de MOV_CAT_CORES,
+   já que é sobre esse rótulo (movCatExibicao) que o gasto real do mês é agregado. */
+const MOV_CAT_LIMITAVEIS = ['Alimentação', 'Transporte', 'Saúde', 'Educação', 'Moradia', 'Entretenimento',
+  'Impostos', 'Dívidas e Empréstimos', 'Transferência Familiar', 'Despesas Financeiras'];
+
 /* rótulo curto de mês para eixo de gráfico: '2026-08' → 'ago/26' */
 const movMesCurto = ym => MESES_C[Number(ym.slice(5, 7)) - 1] + '/' + ym.slice(2, 4);
 

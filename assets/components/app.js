@@ -4996,6 +4996,41 @@ function gastoCategoriaMes(catId, ym) {
 }
 const corOrcamento = pct => pct > 1 ? 'err' : pct >= 0.8 ? 'warn' : 'ok';
 
+/* ---- Limite por categoria (controle pessoal de gasto, sobre o gasto REAL do banco) ----
+   Substitui a antiga ideia de "cartão" por um limite mensal definido pelo usuário por
+   categoria, comparado ao gasto de `movimentacoes` (dados importados do banco — o que
+   realmente reflete o consumo, diferente do orçamento de `categorias_financeiras`, que só
+   enxerga lançamentos manuais). Guardado em `configuracoes` (chave/valor já sincronizada),
+   sem exigir tabela nova no Supabase. */
+const finLimites = () => getCfg('fin_limites_categoria', {}) || {};
+const finLimiteCategoria = nome => Number((finLimites())[nome]) || null;
+function finSetLimiteCategoria(nome, valor) {
+  const l = { ...finLimites() };
+  if (valor > 0) l[nome] = valor; else delete l[nome];
+  setCfg('fin_limites_categoria', l);
+}
+/* gasto do mês por categoria de exibição, a partir dos lançamentos já carregados (mesma
+   agregação da pizza "Saídas por categoria"): investimento fica de fora — patrimônio,
+   não consumo. */
+function movGastoPorCategoriaMes(lancamentos) {
+  const porCat = {};
+  (lancamentos || []).filter(l => l.tipo === 'despesa' && l.grupo_fluxo !== 'investimento')
+    .forEach(l => { const k = movCatExibicao(l); porCat[k] = (porCat[k] || 0) + Number(l.valor); });
+  return porCat;
+}
+/* categorias com limite definido que estouraram ou estão perto (≥80%) no mês — usado no
+   card de Finanças e no alerta da tela Hoje. */
+function finLimitesStatusMes(ym) {
+  const gastos = movGastoPorCategoriaMes(MOV.lancamentos[ym] || []);
+  const limites = finLimites();
+  const estourou = [], perto = [];
+  for (const nome of Object.keys(limites)) {
+    const pct = (gastos[nome] || 0) / limites[nome];
+    if (pct > 1) estourou.push(nome); else if (pct >= 0.8) perto.push(nome);
+  }
+  return { estourou, perto };
+}
+
 /* geração de recorrências na virada do mês (regra 6) */
 function gerarRecorrenciasDoMes() {
   const ym = mesDe(hoje());
@@ -5025,6 +5060,22 @@ HojeExtras.alertas.push(() => {
     + venc.length + ' conta'+(venc.length>1?'s':'')+' vencendo em até 3 dias ('+fmtBRL(sum(venc.map(l=>l.valor)))+')'
     + (atrasos ? ' — '+atrasos+' já vencida'+(atrasos>1?'s':'') : '') + ' →</div>';
 });
+/* alerta na Hoje: categorias com limite estourado ou perto (≥80%) no mês corrente */
+HojeExtras.alertas.push(() => {
+  const ym = mesDe(hoje());
+  if (MOV.status[ym] !== 'ok') return '';
+  const { estourou, perto } = finLimitesStatusMes(ym);
+  if (!estourou.length && !perto.length) return '';
+  const partes = [];
+  if (estourou.length) partes.push('🔴 ' + estourou.length + ' categoria'+(estourou.length>1?'s':'')+' estourou'+(estourou.length>1?'aram':'')+' o limite');
+  if (perto.length) partes.push('🟡 ' + perto.length + ' perto do limite');
+  return '<div class="banner '+(estourou.length ? 'err' : 'warn')+'" data-act="nav" data-r="financas" style="cursor:pointer">🎯 '
+    + partes.join(' · ') + ' este mês →</div>';
+});
+/* pré-carrega o mês corrente para o alerta acima funcionar mesmo sem visitar Finanças */
+BootHooks.push(() => { if (FLAGS.onboarded) movCarregarMes(mesDe(hoje())).then(() => {
+  if (rotaAtual().nome === 'hoje') render({manterScroll:true, semFade:true});
+}); });
 
 /* ---- registro rápido de gasto (FAB / atalho) ---- */
 act('qa-gasto', () => { closeModal(); lancRapidoModal('saida'); });
@@ -5133,18 +5184,10 @@ function fluxoTabHTML(ym) {
           + '<b class="'+(l.tipo==='saida'?'err':'ok')+'">'+fmtBRL(l.valor)+'</b>'
           + '<button class="btn small ok" data-act="lc-pagar" data-id="'+l.id+'">✓ '+(l.tipo==='saida'?'pagar':'receber')+'</button></div>'; }).join('') + '</div></div>';
   }
-  // orçamento por categoria (lançamentos manuais — inalterado)
-  const catsOrc = T('categorias_financeiras').filter(c => c.tipo === 'saida' && c.orcamento_mensal > 0);
-  if (catsOrc.length) {
-    html += '<div class="card"><div class="h2">🎯 Orçamento do mês</div>' + catsOrc.map(c => {
-      const gasto = gastoCategoriaMes(c.id, ym), pct = gasto / c.orcamento_mensal;
-      return '<div style="margin-bottom:10px"><div class="row tiny" style="margin-bottom:4px"><span class="dot" style="background:'+(c.cor||'#5CC8FC')+'"></span><b>'+esc(c.nome)+'</b><span class="sp"></span>'
-        + '<span class="'+corOrcamento(pct)+'">'+fmtBRL(gasto)+' / '+fmtBRL(c.orcamento_mensal)+' ('+Math.round(pct*100)+'%)</span></div>'
-        + '<div class="bar"><i class="'+corOrcamento(pct)+'" style="width:'+clamp(pct*100,2,100)+'%"></i></div></div>';
-    }).join('') + '<div class="tiny muted">Aportes em investimentos nunca entram aqui — patrimônio não é consumo.</div></div>';
-  }
-  // lançamentos do mês (usado aqui e no bloco "fora do orçamento" logo abaixo)
+  // lançamentos do mês (usado aqui, no limite por categoria e no bloco "fora do orçamento" logo abaixo)
   const todos = MOV.lancamentos[ym] || [];
+  // limite por categoria: controle pessoal de gasto sobre o gasto REAL do banco
+  html += limiteCategoriaCardHTML(ym, todos);
   // fora do orçamento: só investimento (aporte/resgate) — patrimônio, não consumo/renda.
   // Financiamento (empréstimo) já soma em entradas/saídas acima, então não entra mais aqui.
   const foraItens = ordenar(todos.filter(l => l.grupo_fluxo === 'investimento'), l => l.data, true);
@@ -5198,6 +5241,63 @@ function fluxoTabHTML(ym) {
       }).join('') || '<div class="empty"><span class="em">💸</span>'+(carregando?'Carregando…':'Nenhum lançamento neste mês.')+'</div>') + '</div></div>';
   return html;
 }
+/* Card "🎯 Limite por categoria": quanto o usuário planeja gastar por categoria no mês,
+   comparado ao gasto real (movimentacoes). Cada linha é editável (definir/ajustar/remover
+   limite); categorias sem limite aparecem só se já tiveram gasto no mês, com convite para
+   definir um. Substitui a antiga ideia de mostrar saldo de cartão de crédito — aqui o
+   controle é por categoria de consumo, não por conta/cartão. */
+function limiteCategoriaCardHTML(ym, lancamentos) {
+  const gastos = movGastoPorCategoriaMes(lancamentos);
+  const limites = finLimites();
+  const nomes = [...new Set([...Object.keys(limites), ...Object.keys(gastos)])]
+    .sort((a, b) => (gastos[b]||0)/(limites[b]||Infinity) - (gastos[a]||0)/(limites[a]||Infinity) || (gastos[b]||0) - (gastos[a]||0));
+  const semLimite = MOV_CAT_LIMITAVEIS.filter(n => !limites[n]);
+  let estourou = 0, perto = 0;
+  const linhas = nomes.map(nome => {
+    const gasto = gastos[nome] || 0, limite = limites[nome];
+    if (!limite) {
+      return '<div class="item" data-act="fin-limite-editar" data-nome="'+esc(nome)+'"><span class="dot" style="background:'+movCatCor(nome)+'"></span>'
+        + '<div class="grow"><div class="ttl">'+esc(nome)+'</div><div class="sub">'+fmtBRL(gasto)+' gasto este mês · sem limite definido</div></div>'
+        + '<span class="badge acc">🎯 definir</span></div>';
+    }
+    const pct = gasto / limite;
+    if (pct > 1) estourou++; else if (pct >= 0.8) perto++;
+    return '<div class="item" data-act="fin-limite-editar" data-nome="'+esc(nome)+'" style="display:block">'
+      + '<div class="row tiny" style="margin-bottom:4px"><span class="dot" style="background:'+movCatCor(nome)+'"></span><b>'+esc(nome)+'</b><span class="sp"></span>'
+      + '<span class="'+corOrcamento(pct)+'">'+fmtBRL(gasto)+' / '+fmtBRL(limite)+' ('+Math.round(pct*100)+'%)</span></div>'
+      + '<div class="bar"><i class="'+corOrcamento(pct)+'" style="width:'+clamp(pct*100,2,100)+'%"></i></div></div>';
+  }).join('');
+  const resumo = (estourou || perto)
+    ? '<div class="banner '+(estourou?'err':'warn')+' tiny" style="margin-bottom:10px">'
+      + (estourou ? '🔴 ' + estourou + ' categoria'+(estourou>1?'s':'')+' estourou'+(estourou>1?'aram':'')+' o limite' : '')
+      + (estourou && perto ? ' · ' : '') + (perto ? '🟡 ' + perto + ' perto do limite (≥80%)' : '') + '</div>'
+    : '';
+  return '<div class="card"><div class="card-h"><div class="h2" style="flex:1">🎯 Limite por categoria</div>'
+    + (semLimite.length ? '<button class="btn small" data-act="fin-limite-add">+ Novo limite</button>' : '')+'</div>'
+    + resumo
+    + (linhas || '<div class="empty small">Defina quanto pretende gastar por categoria este mês e acompanhe aqui.</div>')
+    + '<div class="tiny muted" style="margin-top:10px">Comparado ao gasto real importado do banco (não conta aportes/resgates de investimento).</div></div>';
+}
+act('fin-limite-add', () => {
+  const semLimite = MOV_CAT_LIMITAVEIS.filter(n => !finLimites()[n]);
+  if (!semLimite.length) { toast('Todas as categorias já têm limite definido.'); return; }
+  editModal({ titulo: '🎯 Novo limite por categoria',
+    fields: [
+      {k:'nome', t:'sel', l:'Categoria', req:1, opts: semLimite.map(n => ({v:n, t:n}))},
+      {k:'valor', t:'money', l:'Limite mensal (R$)', req:1}
+    ],
+    onSave: v => { finSetLimiteCategoria(v.nome, v.valor); render(); toast('🎯 Limite de '+esc(v.nome)+' definido ✓'); }
+  });
+});
+act('fin-limite-editar', el => {
+  const nome = el.dataset.nome, atual = finLimiteCategoria(nome);
+  editModal({ titulo: '🎯 ' + nome,
+    fields: [ {k:'valor', t:'money', l:'Limite mensal (R$)', req:1} ],
+    vals: { valor: atual },
+    onDelete: atual ? () => { finSetLimiteCategoria(nome, null); render(); toast('Limite removido.'); } : undefined,
+    onSave: v => { finSetLimiteCategoria(nome, v.valor); render(); toast('🎯 Limite de '+esc(nome)+' atualizado ✓'); }
+  });
+});
 function movCategoriaCardHTML(ym, lancamentos, tipo, titulo, cor) {
   // investimento fica de fora (patrimônio, não consumo); financiamento entra, para o
   // total do gráfico bater com os KPIs de entradas/saídas do topo.
