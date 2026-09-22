@@ -5157,12 +5157,12 @@ function fluxoTabHTML(ym) {
         + '<div class="sub">'+fmtData(l.data)+' · '+esc(l.categoria_geral)+' › '+esc(l.categoria_especifica)+'</div></div>'
         + '<b class="'+(l.tipo==='despesa'?'err':'ok')+'">'+(l.tipo==='despesa'?'−':'+')+fmtBRL(l.valor)+'</b></div>').join('') + '</div>'
       : '<div class="tiny muted">'+(carregando?'Carregando…':'Nenhum aporte/resgate neste mês.')+'</div>') + '</div>';
-  // saídas e entradas por categoria (pizza + linhas), com drill-down nos lançamentos.
+  // saídas e entradas por categoria (pizza + linhas), com drill-down por subcategoria.
   // Montados a partir de `todos`, e não de v_movimentacoes_categoria_mes: a view agrega e
-  // perde `descricao`, sem a qual não dá para separar os pagadores do salário nem listar os
-  // lançamentos. É a mesma tabela e o mesmo filtro de ano_mes, então os totais continuam
-  // batendo com os KPIs do topo. Inclui operacional + financiamento (empréstimos), já que
-  // ambos somam em entradas/saídas; investimento fica de fora (patrimônio, não consumo).
+  // perde `descricao`, sem a qual não dá para separar os pagadores do salário. É a mesma
+  // tabela e o mesmo filtro de ano_mes, então os totais continuam batendo com os KPIs do
+  // topo. Inclui operacional + financiamento (empréstimos), já que ambos somam em
+  // entradas/saídas; investimento fica de fora (patrimônio, não consumo).
   html += movCategoriaCardHTML(ym, todos, 'despesa', '🥧 Saídas por categoria', 'err')
     + movCategoriaCardHTML(ym, todos, 'receita', '💵 Entradas por categoria', 'ok')
     + movSalarioCardHTML(ym, carregando);
@@ -5221,21 +5221,17 @@ function movCategoriaCardHTML(ym, lancamentos, tipo, titulo, cor) {
           + '</div><b class="'+cor+'">'+fmtBRL(g.total)+'</b></div>';
       }).join('') + '</div></div>';
 }
-/* Drill-down de uma categoria: os lançamentos reais do mês, agrupados por subcategoria.
-   Antes saía só "Grupo › Subcategoria — total", o que em Salário repetia exatamente o
-   mesmo número (existe uma subcategoria só) e escondia quem pagou. O cabeçalho da
-   subcategoria só aparece quando ela tem mais de um lançamento — senão seria ruído. */
+/* Drill-down de uma categoria: total consolidado por subcategoria (sem listar os
+   lançamentos individuais — detalhe demais para esta tela). */
 function movCatDetalheHTML(itens) {
   const porSub = {};
   itens.forEach(l => {
     const s = (l.categoria_geral || '—') + ' › ' + (l.categoria_especifica || '—');
-    (porSub[s] || (porSub[s] = [])).push(l);
+    porSub[s] = (porSub[s] || 0) + Number(l.valor);
   });
   return Object.entries(porSub)
-    .sort((a, b) => sum(b[1].map(l => Number(l.valor))) - sum(a[1].map(l => Number(l.valor))))
-    .map(([sub, ls]) => (ls.length > 1 ? '<span class="muted">'+esc(sub)+' — '+fmtBRL(sum(ls.map(l => Number(l.valor))))+'</span>' : '')
-      + ordenar(ls, l => Number(l.valor), true)
-          .map(l => '<span>'+fmtData(l.data)+' · '+esc(l.descricao)+' — '+fmtBRL(l.valor)+'</span>').join(''))
+    .sort((a, b) => b[1] - a[1])
+    .map(([sub, total]) => '<span>'+esc(sub)+' — '+fmtBRL(total)+'</span>')
     .join('');
 }
 /* Card "Salário por fonte": a renda do mês vinha como uma linha só porque os dois
