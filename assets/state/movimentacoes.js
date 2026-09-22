@@ -9,7 +9,8 @@
    qual não dá para separar os pagadores do salário nem listar lançamentos no drill-down.
    A agregação por categoria é feita no cliente, sobre as linhas de `movimentacoes`. */
 
-const MOV = { mensal: {}, cobertura: {}, lancamentos: {}, detalhe: {}, salario: {}, status: {}, erro: {} };
+const MOV = { mensal: {}, cobertura: {}, lancamentos: {}, detalhe: {}, salario: {}, status: {}, erro: {},
+  parcelasAtivas: null, parcelasPrevisaoMensal: null, parcelasStatus: undefined, parcelasErro: null };
 
 function movMensalZero(ym) {
   return { ano_mes: ym, entradas_operacionais: 0, saidas_operacionais: 0, saldo_operacional: 0,
@@ -75,6 +76,36 @@ async function fetchMovSalarioSerie(ym, n) {
     + '&ano_mes=in.(' + lista + ')&select=ano_mes,data,descricao,descricao_normalizada,valor&order=data.asc');
   MOV.salario[chave] = { meses: metas, linhas: linhas || [] };
   return MOV.salario[chave];
+}
+
+/* Previsão de parcelas (Aux_Parcelas): independente do mês navegado em Fluxo — é uma
+   projeção "a partir de hoje", não um recorte por ano_mes. Carregada uma vez por sessão
+   (poucas linhas, ver §4 da instrução) e recarregada junto com o botão ⟳ de Fluxo. */
+async function fetchParcelasAtivas() {
+  if (MOV.parcelasAtivas) return MOV.parcelasAtivas;
+  const linhas = await sb('GET', 'v_parcelas_ativas?select=*');
+  MOV.parcelasAtivas = linhas || [];
+  return MOV.parcelasAtivas;
+}
+async function fetchParcelasPrevisaoMensal() {
+  if (MOV.parcelasPrevisaoMensal) return MOV.parcelasPrevisaoMensal;
+  const linhas = await sb('GET', 'v_parcelas_previsao_mensal?select=*&order=mes_previsto.asc');
+  MOV.parcelasPrevisaoMensal = linhas || [];
+  return MOV.parcelasPrevisaoMensal;
+}
+async function movCarregarParcelas() {
+  MOV.parcelasStatus = 'carregando'; MOV.parcelasErro = null;
+  try {
+    await Promise.all([fetchParcelasAtivas(), fetchParcelasPrevisaoMensal()]);
+    MOV.parcelasStatus = 'ok';
+  } catch (e) {
+    MOV.parcelasStatus = 'erro';
+    MOV.parcelasErro = (e && e.msg) || String(e);
+  }
+}
+function movInvalidarParcelas() {
+  MOV.parcelasAtivas = null; MOV.parcelasPrevisaoMensal = null;
+  MOV.parcelasStatus = undefined; MOV.parcelasErro = null;
 }
 
 async function movCarregarMes(ym) {

@@ -5064,7 +5064,7 @@ act('lc-salvar', el => {
 });
 
 /* ---- página FINANÇAS (abas Fluxo | Investimentos) ---- */
-const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos' };
+const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos', parcelasAbertas: false };
 reg('financas', {
   titulo: 'Finanças',
   render: (params) => {
@@ -5078,11 +5078,18 @@ reg('financas', {
   mount: (params) => {
     if (params[0] === 'investimentos') return;
     const ym = params[1] || mesDe(hoje());
-    if (MOV.status[ym] === 'ok' || MOV.status[ym] === 'carregando') return;
-    movCarregarMes(ym).then(() => {
-      const r = rotaAtual();
-      if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
-    });
+    if (MOV.status[ym] !== 'ok' && MOV.status[ym] !== 'carregando') {
+      movCarregarMes(ym).then(() => {
+        const r = rotaAtual();
+        if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
+      });
+    }
+    if (MOV.parcelasStatus !== 'ok' && MOV.parcelasStatus !== 'carregando') {
+      movCarregarParcelas().then(() => {
+        const r = rotaAtual();
+        if (r.nome === 'financas' && r.params[0] !== 'investimentos') render({manterScroll:true, semFade:true});
+      });
+    }
   }
 });
 function fluxoTabHTML(ym) {
@@ -5121,6 +5128,7 @@ function fluxoTabHTML(ym) {
     + '<button class="btn" data-act="fin-import">📥 Importar CSV</button>'
     + '<button class="btn ghost" data-act="fin-cats">🏷️ Categorias</button>'
     + '<button class="btn ghost" data-act="fin-contas">🏦 Contas</button></div>';
+  html += movParcelasCardHTML();
   // contas a pagar / receber (lançamentos manuais — inalterado)
   const pend = ordenar(T('lancamentos_financeiros').filter(l => !l.pago), l => l.data).filter(l => l.data <= fimDoMes(ym));
   if (pend.length) {
@@ -5272,11 +5280,55 @@ function movSalarioCardHTML(ym, carregando) {
              : '<div class="tiny muted">carregando histórico…</div>')
     + '</div>';
 }
+/* Card "Parcelamentos futuros" (Aux_Parcelas): quanto de compras parceladas já está
+   comprometido nos próximos meses, a partir de hoje — não muda ao navegar ← → em Fluxo
+   (v_parcelas_previsao_mensal já só traz mês atual em diante). Somente leitura. */
+function movParcelasCardHTML() {
+  const carregando = MOV.parcelasStatus === 'carregando' || MOV.parcelasStatus === undefined;
+  const erro = MOV.parcelasStatus === 'erro' ? MOV.parcelasErro : null;
+  if (erro) {
+    return '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div>'
+      + '<div class="banner err">⚠️ Não consegui carregar a previsão de parcelas: '+esc(erro)+' <span class="x" data-act="mov-parcelas-recarregar">tentar de novo</span></div></div>';
+  }
+  if (carregando) return '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div><div class="tiny muted">carregando…</div></div>';
+  const previsao = MOV.parcelasPrevisaoMensal || [];
+  const abertos = ordenar((MOV.parcelasAtivas || []).filter(p => !p.quitada && !p.desatualizada), p => p.vai_pagar_ate || '9999-99-99');
+  if (!previsao.length && !abertos.length) return '';
+  const janela = previsao.slice(0, 6);
+  const totalJanela = sum(janela.map(m => Number(m.total_previsto)));
+  const temInconsistenteJanela = janela.some(m => m.tem_inconsistente);
+  let html = '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div>'
+    + '<div class="row wrap" style="gap:22px;margin-bottom:10px"><div><div class="tiny muted">comprometido nos próximos '+janela.length+' meses</div><div class="v err">'+fmtBRL(totalJanela)+'</div></div></div>'
+    + (temInconsistenteJanela ? '<div class="banner warn" style="margin-bottom:10px">⚠️ Valores a confirmar em algum mês — série com histórico inconsistente, revisão manual pendente.</div>' : '')
+    + svgBarras(janela.map(m => ({ x: movMesCurto(String(m.mes_previsto).slice(0,7)) + (m.tem_inconsistente?' ⚠️':''), y: Number(m.total_previsto) })), { fmt: v => fmtBRL(v) });
+  if (abertos.length) {
+    html += '<div class="row" style="margin-top:12px;cursor:pointer" data-act="mov-parcelas-toggle">'
+      + '<b class="tiny">'+(MOV_UI.parcelasAbertas?'▾':'▸')+' parcelamentos em aberto ('+abertos.length+')</b></div>';
+    if (MOV_UI.parcelasAbertas) {
+      html += '<div class="list" style="margin-top:6px">' + abertos.map(p => {
+        const badge = p.inconsistente ? ' <span class="badge warn" title="valores de parcela variam demais dentro desta série — revisar manualmente">revisar</span>' : '';
+        return '<div class="item"><span>💳</span><div class="grow"><div class="ttl">'+esc(p.descricao)+badge+'</div>'
+          + '<div class="sub">'+p.parcelas_pagas+'/'+p.total_parcelas+' pagas · até '+(p.vai_pagar_ate ? fmtMes(String(p.vai_pagar_ate).slice(0,7)) : '—')+'</div></div>'
+          + '<b class="err">'+fmtBRL(p.valor_parcela)+'</b></div>';
+      }).join('') + '</div>';
+    }
+  }
+  return html + '</div>';
+}
+act('mov-parcelas-toggle', () => { MOV_UI.parcelasAbertas = !MOV_UI.parcelasAbertas; render({manterScroll:true, semFade:true}); });
+act('mov-parcelas-recarregar', async () => {
+  movInvalidarParcelas();
+  render({manterScroll:true, semFade:true});
+  await movCarregarParcelas();
+  const r = rotaAtual();
+  if (r.nome === 'financas' && r.params[0] !== 'investimentos') render({manterScroll:true, semFade:true});
+});
 act('mov-recarregar', async el => {
   const ym = el.dataset.ym;
   movInvalidarMes(ym);
+  movInvalidarParcelas();
   render({manterScroll:true, semFade:true});
-  await movCarregarMes(ym);
+  await Promise.all([movCarregarMes(ym), movCarregarParcelas()]);
   const r = rotaAtual();
   if (r.nome === 'financas' && (r.params[1] || mesDe(hoje())) === ym) render({manterScroll:true, semFade:true});
 });
