@@ -10,8 +10,8 @@
    A agregação por categoria é feita no cliente, sobre as linhas de `movimentacoes`. */
 
 const MOV = { mensal: {}, cobertura: {}, lancamentos: {}, detalhe: {}, salario: {}, status: {}, erro: {},
-  parcelasAtivas: null, parcelasPrevisaoMensal: null, parcelasStatus: undefined, parcelasErro: null,
-  resumoStatus: undefined, resumoErro: null };
+  parcelasAtivas: null, previsaoCustos: null, recorrentes: null, parcelasStatus: undefined, parcelasErro: null,
+  catSerie: {}, resumoStatus: undefined, resumoErro: null };
 
 function movMensalZero(ym) {
   return { ano_mes: ym, entradas_operacionais: 0, saidas_operacionais: 0, saldo_operacional: 0,
@@ -91,16 +91,26 @@ async function fetchParcelasAtivas() {
   MOV.parcelasAtivas = linhas || [];
   return MOV.parcelasAtivas;
 }
-async function fetchParcelasPrevisaoMensal() {
-  if (MOV.parcelasPrevisaoMensal) return MOV.parcelasPrevisaoMensal;
-  const linhas = await sb('GET', 'v_parcelas_previsao_mensal?select=*&order=mes_previsto.asc');
-  MOV.parcelasPrevisaoMensal = linhas || [];
-  return MOV.parcelasPrevisaoMensal;
+/* v_previsao_custos: uma linha por item × mês previsto, de duas fontes —
+   'parcela' (compras parceladas no cartão: parcela_atual/total_parcelas da última fatura)
+   e 'recorrente' (pix/boleto/transferência da conta que se repetem; ver a migração
+   supabase/migrations/20260923_previsao_custos.sql). Já vem com categoria. */
+async function fetchPrevisaoCustos() {
+  if (MOV.previsaoCustos) return MOV.previsaoCustos;
+  const linhas = await sb('GET', 'v_previsao_custos?select=*&order=mes_previsto.asc');
+  MOV.previsaoCustos = (linhas || []).filter(l => Number(l.valor_previsto) > 0);
+  return MOV.previsaoCustos;
+}
+async function fetchRecorrentesAtivos() {
+  if (MOV.recorrentes) return MOV.recorrentes;
+  const linhas = await sb('GET', 'v_recorrentes_ativos?select=*&order=valor_mensal.desc');
+  MOV.recorrentes = linhas || [];
+  return MOV.recorrentes;
 }
 async function movCarregarParcelas() {
   MOV.parcelasStatus = 'carregando'; MOV.parcelasErro = null;
   try {
-    await Promise.all([fetchParcelasAtivas(), fetchParcelasPrevisaoMensal()]);
+    await Promise.all([fetchParcelasAtivas(), fetchPrevisaoCustos(), fetchRecorrentesAtivos()]);
     MOV.parcelasStatus = 'ok';
   } catch (e) {
     MOV.parcelasStatus = 'erro';
@@ -108,7 +118,7 @@ async function movCarregarParcelas() {
   }
 }
 function movInvalidarParcelas() {
-  MOV.parcelasAtivas = null; MOV.parcelasPrevisaoMensal = null;
+  MOV.parcelasAtivas = null; MOV.previsaoCustos = null; MOV.recorrentes = null;
   MOV.parcelasStatus = undefined; MOV.parcelasErro = null;
 }
 
@@ -133,10 +143,30 @@ function movInvalidarMes(ym) {
    + os lançamentos crus do mês corrente, para a segmentação por categoria/subcategoria
    reaproveitar movCategoriaCardHTML com fidelidade total (a view agregada perde
    `descricao`, ver comentário no topo do arquivo). Independente do mês navegado em Fluxo. */
+/* Despesa por categoria nos últimos n meses (gráfico "custo × teto por categoria").
+   Aqui a view agregada basta: só precisa de (categoria_geral, categoria_especifica,
+   categoria_app) para movCatExibicao — a separação do salário por pagador não se aplica
+   a despesa. */
+async function fetchMovCategoriaSerie(ym, n) {
+  const chave = ym + ':' + n;
+  if (MOV.catSerie[chave]) return MOV.catSerie[chave];
+  const metas = movMesesAte(ym, n);
+  const lista = metas.map(m => encodeURIComponent(m)).join(',');
+  const linhas = await sb('GET', 'v_movimentacoes_categoria_mes?tipo=eq.despesa&grupo_fluxo=neq.investimento&ano_mes=in.(' + lista + ')'
+    + '&select=ano_mes,categoria_app,categoria_geral,categoria_especifica,total');
+  const porCat = {};
+  (linhas || []).forEach(l => {
+    const k = movCatExibicao(l);
+    const c = porCat[k] || (porCat[k] = {});
+    c[l.ano_mes] = (c[l.ano_mes] || 0) + Number(l.total);
+  });
+  MOV.catSerie[chave] = { meses: metas, porCat };
+  return MOV.catSerie[chave];
+}
 async function movCarregarResumo(ym) {
   MOV.resumoStatus = 'carregando'; MOV.resumoErro = null;
   try {
-    await Promise.all([fetchMovSerie(ym, 12), fetchMovLancamentos(ym)]);
+    await Promise.all([fetchMovSerie(ym, 12), fetchMovLancamentos(ym), fetchMovCategoriaSerie(ym, 13)]);
     MOV.resumoStatus = 'ok';
   } catch (e) {
     MOV.resumoStatus = 'erro';
@@ -146,6 +176,7 @@ async function movCarregarResumo(ym) {
 function movInvalidarResumo(ym) {
   for (let i = 0; i < 12; i++) delete MOV.mensal[movMesAdd(ym, -i)];
   delete MOV.lancamentos[ym];
+  MOV.catSerie = {};
   MOV.resumoStatus = undefined; MOV.resumoErro = null;
 }
 

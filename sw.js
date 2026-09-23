@@ -5,7 +5,7 @@
    o activate apaga caches antigos e assume o controle sem travar. */
 'use strict';
 
-const VERSION = 'lifeos-v4.26.1';
+const VERSION = 'lifeos-v4.27.0';
 const CORE = [
   './',
   './index.html',

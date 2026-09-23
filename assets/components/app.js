@@ -5020,6 +5020,26 @@ function finSetLimiteCategoria(nome, valor) {
   const l = { ...finLimites() };
   if (valor > 0) l[nome] = valor; else delete l[nome];
   setCfg('fin_limites_categoria', l);
+  // histórico com vigência mensal: o limite vale a partir do mês em que foi definido,
+  // para o gráfico de 12 meses não reescrever o passado com o limite de hoje.
+  const ym = mesDe(hoje()), h = { ...finLimitesHist() };
+  const lista = (h[nome] || []).filter(e => e.desde !== ym);
+  lista.push({ desde: ym, valor: valor > 0 ? valor : null });
+  h[nome] = lista.sort((a, b) => a.desde < b.desde ? -1 : 1);
+  setCfg('fin_limites_hist', h);
+}
+const finLimitesHist = () => getCfg('fin_limites_hist', {}) || {};
+/* limite definido que vigorava no mês `ym` (null = nenhum). Limites anteriores ao
+   histórico (só no mapa atual) valem a partir do mês corrente. */
+function finLimiteNoMes(nome, ym) {
+  const lista = finLimitesHist()[nome];
+  if (lista && lista.length) {
+    let v = null;
+    for (const e of lista) if (e.desde <= ym) v = e.valor;
+    return v > 0 ? Number(v) : null;
+  }
+  const atual = finLimiteCategoria(nome);
+  return atual && ym >= mesDe(hoje()) ? atual : null;
 }
 /* gasto do mês por categoria de exibição, a partir dos lançamentos já carregados (mesma
    agregação da pizza "Saídas por categoria"): investimento fica de fora — patrimônio,
@@ -5127,7 +5147,8 @@ act('lc-salvar', el => {
 });
 
 /* ---- página FINANÇAS (abas Resumo | Fluxo | Investimentos) ---- */
-const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos', parcelasAbertas: false };
+const MOV_UI = { catAberta: {}, foraOrcamento: true, filtroTipo: 'todos', filtroFluxo: 'todos', parcelasAbertas: false,
+  recorrentesAbertos: false, previsaoVisao: 'categoria', catTeto: null };
 const financasAba = params => params[0] === 'fluxo' ? 'fluxo' : params[0] === 'investimentos' ? 'investimentos' : 'resumo';
 reg('financas', {
   titulo: 'Finanças',
@@ -5199,17 +5220,16 @@ function resumoTabHTML(ymAtual) {
     + '<button class="iconbtn" data-act="mov-resumo-recarregar" title="Recarregar resumo">⟳</button></div>';
 
   if (temDados) {
-    html += '<div class="card"><div class="h2">📈 Evolução (12 meses)</div>'
-      + svgLinha(meses12.map(m => ({ x: movMesCurto(m.ym), y: m.saldo })), { fmt: v => 'R$'+fmtNum(v/1000,1)+'k', cor:'var(--acc)' })
-      + '<div class="tiny muted" style="margin:10px 0 6px">entradas e saídas por mês</div>'
-      + svgBarrasEmpilhadas(meses12.map(m => m.ym), [
-          { nome: 'Entradas', cor: 'var(--ok)', valores: Object.fromEntries(meses12.map(m => [m.ym, m.entradas])) },
-          { nome: 'Saídas', cor: 'var(--err)', valores: Object.fromEntries(meses12.map(m => [m.ym, m.saidas])) }
-        ], { h: 150, rotulo: movMesCurto, fmt: v => fmtNum(v/1000,1)+'k' })
+    html += '<div class="card"><div class="h2">📈 Receita, despesa e lucro (12 meses)</div>'
+      + '<div class="tiny muted" style="margin-bottom:6px">receita acima do eixo, despesa abaixo; a linha é o lucro do mês (receita − despesa)</div>'
+      + svgFluxoMensal(meses12.map(m => ({ x: movMesCurto(m.ym), receita: m.entradas, despesa: m.saidas, lucro: m.saldo })),
+          { fmt: v => (v < 0 ? '−' : '') + fmtNum(Math.abs(v)/1000, 1) + 'k' })
       + '</div>';
   } else {
     html += '<div class="card"><div class="tiny muted">'+(carregando?'carregando histórico…':'sem dados ainda')+'</div></div>';
   }
+
+  html += custoCategoriaCardHTML(ymAtual, carregando);
 
   html += movParcelasCardHTML();
 
@@ -5457,41 +5477,125 @@ function movSalarioCardHTML(ym, carregando) {
              : '<div class="tiny muted">carregando histórico…</div>')
     + '</div>';
 }
-/* Card "Parcelamentos futuros" (Aux_Parcelas): quanto de compras parceladas já está
-   comprometido nos próximos meses, a partir de hoje — não muda ao navegar ← → em Fluxo
-   (v_parcelas_previsao_mensal já só traz mês atual em diante). Somente leitura. */
+/* Card "🎯 Custo × teto por categoria" (Resumo): barras = despesa ocorrida em cada um
+   dos últimos 12 meses; linha = teto esperado. O teto é o limite definido que vigorava
+   no mês (finLimiteNoMes) ou, sem limite, a média dos 12 meses fechados anteriores ao
+   mês corrente — trecho tracejado. "Total" soma os tetos de todas as categorias. */
+function custoCategoriaCardHTML(ym, carregando) {
+  const serie = MOV.catSerie[ym + ':13'];
+  const titulo = '<div class="h2">🎯 Custo × teto por categoria</div>';
+  if (!serie) return '<div class="card">'+titulo+'<div class="tiny muted">'+(carregando?'carregando…':'sem dados ainda')+'</div></div>';
+  const meses = serie.meses.slice(-12), fechados = serie.meses.slice(0, 12).filter(m => m < ym);
+  const porCat = serie.porCat;
+  const total12 = nome => sum(meses.map(m => (porCat[nome] || {})[m] || 0));
+  const cats = [...new Set([...MOV_CAT_LIMITAVEIS.filter(n => porCat[n] || finLimiteCategoria(n)), ...Object.keys(porCat)])]
+    .sort((a, b) => total12(b) - total12(a));
+  if (!cats.length) return '';
+  const media = nome => fechados.length ? sum(fechados.map(m => (porCat[nome] || {})[m] || 0)) / fechados.length : 0;
+  const teto = (nome, m) => { const l = finLimiteNoMes(nome, m); return l ? { v: l, est: false } : { v: media(nome), est: true }; };
+  let sel = MOV_UI.catTeto;
+  if (sel !== '__total' && !cats.includes(sel)) sel = cats[0];
+  const itens = meses.map(m => {
+    let barra, linha, est;
+    if (sel === '__total') {
+      barra = sum(cats.map(c => (porCat[c] || {})[m] || 0));
+      const ts = cats.map(c => teto(c, m));
+      linha = sum(ts.map(t => t.v)); est = ts.some(t => t.est);
+    } else {
+      barra = (porCat[sel] || {})[m] || 0;
+      const t = teto(sel, m); linha = t.v; est = t.est;
+    }
+    return { x: movMesCurto(m), barra, linha, estimado: est,
+      dica: movMesCurto(m) + '\ngasto ' + fmtBRL(barra) + '\nteto ' + fmtBRL(linha) + (est ? ' (média 12m)' : ' (limite definido)') };
+  });
+  const cor = sel === '__total' ? 'var(--acc)' : movCatCor(sel);
+  const acima = itens.filter(i => i.linha > 0 && i.barra > i.linha).length;
+  const chip = (v, rot, c) => '<button class="chip mini'+(sel===v?' sel':'')+'" data-act="mov-cat-teto" data-v="'+esc(v)+'">'
+    + (c ? '<i class="dot" style="background:'+c+'"></i>' : '') + esc(rot) + '</button>';
+  return '<div class="card">'+titulo
+    + '<div class="row wrap" style="gap:6px;margin:6px 0 10px">' + chip('__total', 'Total') + cats.map(c => chip(c, c, movCatCor(c))).join('') + '</div>'
+    + svgBarrasLinha(itens, { cor, fmt: v => fmtNum(v/1000, 1) + 'k' })
+    + '<div class="legend" style="gap:14px;margin-top:4px"><span><i class="dot" style="background:'+cor+'"></i>custo ocorrido</span>'
+    + '<span><i style="display:inline-block;width:14px;height:2px;background:var(--txt);vertical-align:middle;margin-right:4px"></i>teto (limite definido)</span>'
+    + '<span><i style="display:inline-block;width:14px;height:0;border-top:2px dashed var(--txt);vertical-align:middle;margin-right:4px"></i>teto = média dos 12 meses anteriores</span></div>'
+    + '<div class="tiny muted" style="margin-top:6px">'+(acima ? '▲ ' + acima + ' de 12 meses acima do teto. ' : '')
+    + 'Média mensal (12 meses fechados): '+fmtBRL(sel === '__total' ? sum(cats.map(media)) : media(sel))
+    + ' · <span class="x" data-act="'+(sel === '__total' ? 'fin-limite-add' : 'fin-limite-editar')+'" data-nome="'+esc(sel)+'">definir limite</span></div></div>';
+}
+act('mov-cat-teto', el => { MOV_UI.catTeto = el.dataset.v; render({manterScroll:true, semFade:true}); });
+
+/* Card "🔮 Custos previstos" (Resumo): o que já dá para prever dos próximos meses, a
+   partir de hoje (não muda ao navegar em Fluxo). Duas fontes, de v_previsao_custos:
+   · parcelas — compras parceladas no cartão, pela parcela atual/total da última fatura
+     importada (custo "garantido");
+   · recorrentes — pix/boleto/transferência da conta que se repetem (≥3 dos últimos 6
+     meses), pela mediana mensal; no mês corrente só o que ainda não foi pago.
+   Visão por categoria (empilhada) ou por tipo. Somente leitura. */
+const PREV_TIPOS = { parcela: { nome: 'Parcelas no cartão', cor: '#7C5CFC' }, recorrente: { nome: 'Recorrentes (pix/boleto)', cor: '#5CC8FC' } };
 function movParcelasCardHTML() {
+  const titulo = '<div class="h2">🔮 Custos previstos</div>';
   const carregando = MOV.parcelasStatus === 'carregando' || MOV.parcelasStatus === undefined;
   const erro = MOV.parcelasStatus === 'erro' ? MOV.parcelasErro : null;
   if (erro) {
-    return '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div>'
-      + '<div class="banner err">⚠️ Não consegui carregar a previsão de parcelas: '+esc(erro)+' <span class="x" data-act="mov-parcelas-recarregar">tentar de novo</span></div></div>';
+    return '<div class="card">'+titulo
+      + '<div class="banner err">⚠️ Não consegui carregar a previsão: '+esc(erro)+' <span class="x" data-act="mov-parcelas-recarregar">tentar de novo</span></div></div>';
   }
-  if (carregando) return '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div><div class="tiny muted">carregando…</div></div>';
-  const previsao = MOV.parcelasPrevisaoMensal || [];
+  if (carregando) return '<div class="card">'+titulo+'<div class="tiny muted">carregando…</div></div>';
+  const meses = movMesesAte(movMesAdd(mesDe(hoje()), 5), 6);
+  const linhas = (MOV.previsaoCustos || []).map(l => ({ ...l, ym: String(l.mes_previsto).slice(0, 7), cat: movCatExibicao(l), v: Number(l.valor_previsto) }))
+    .filter(l => meses.includes(l.ym));
   const abertos = ordenar((MOV.parcelasAtivas || []).filter(p => !p.quitada && !p.desatualizada), p => p.vai_pagar_ate || '9999-99-99');
-  if (!previsao.length && !abertos.length) return '';
-  const janela = previsao.slice(0, 6);
-  const totalJanela = sum(janela.map(m => Number(m.total_previsto)));
-  const temInconsistenteJanela = janela.some(m => m.tem_inconsistente);
-  let html = '<div class="card"><div class="h2">🧾 Parcelamentos futuros</div>'
-    + '<div class="row wrap" style="gap:22px;margin-bottom:10px"><div><div class="tiny muted">comprometido nos próximos '+janela.length+' meses</div><div class="v err">'+fmtBRL(totalJanela)+'</div></div></div>'
-    + (temInconsistenteJanela ? '<div class="banner warn" style="margin-bottom:10px">⚠️ Valores a confirmar em algum mês — série com histórico inconsistente, revisão manual pendente.</div>' : '')
-    + svgBarras(janela.map(m => ({ x: movMesCurto(String(m.mes_previsto).slice(0,7)) + (m.tem_inconsistente?' ⚠️':''), y: Number(m.total_previsto) })), { fmt: v => fmtBRL(v) });
+  const recorrentes = MOV.recorrentes || [];
+  if (!linhas.length && !abertos.length) return '';
+  const totTipo = t => sum(linhas.filter(l => l.fonte === t).map(l => l.v));
+  const porCatTot = {};
+  linhas.forEach(l => { porCatTot[l.cat] = (porCatTot[l.cat] || 0) + l.v; });
+  const visao = MOV_UI.previsaoVisao || 'categoria';
+  const series = visao === 'tipo'
+    ? Object.entries(PREV_TIPOS).map(([k, t]) => ({ nome: t.nome, cor: t.cor, valores: agruparSoma(linhas.filter(l => l.fonte === k), l => l.ym) }))
+    : Object.keys(porCatTot).sort((a, b) => porCatTot[b] - porCatTot[a])
+        .map(c => ({ nome: c, cor: movCatCor(c), valores: agruparSoma(linhas.filter(l => l.cat === c), l => l.ym) }));
+  let html = '<div class="card"><div class="card-h">'+titulo.replace('class="h2"', 'class="h2" style="flex:1"')
+    + '<div class="seg"><button class="'+(visao==='categoria'?'on':'')+'" data-act="mov-prev-visao" data-v="categoria">por categoria</button>'
+    + '<button class="'+(visao==='tipo'?'on':'')+'" data-act="mov-prev-visao" data-v="tipo">por tipo</button></div></div>'
+    + '<div class="row wrap" style="gap:22px;margin-bottom:10px">'
+    + '<div><div class="tiny muted">próximos 6 meses</div><div class="v err">'+fmtBRL(totTipo('parcela') + totTipo('recorrente'))+'</div></div>'
+    + '<div><div class="tiny muted">💳 parcelas (garantido)</div><div class="v">'+fmtBRL(totTipo('parcela'))+'</div></div>'
+    + '<div><div class="tiny muted">🔁 recorrentes (estimado)</div><div class="v">'+fmtBRL(totTipo('recorrente'))+'</div></div></div>'
+    + svgBarrasEmpilhadas(meses, series, { h: 170, rotulo: movMesCurto, fmt: v => fmtNum(v/1000, 1) + 'k' })
+    + '<div class="legend" style="gap:12px;flex-wrap:wrap;margin-top:4px">'
+    + series.map(s => '<span><i class="dot" style="background:'+s.cor+'"></i>'+esc(s.nome)+' <b>'+fmtBRL(sum(Object.values(s.valores)))+'</b></span>').join('') + '</div>'
+    + '<div class="tiny muted" style="margin-top:6px">Mês corrente: parcelas da fatura que ainda não fechou + recorrentes ainda não pagos. Não inclui compras à vista futuras no cartão.</div>';
   if (abertos.length) {
     html += '<div class="row" style="margin-top:12px;cursor:pointer" data-act="mov-parcelas-toggle">'
-      + '<b class="tiny">'+(MOV_UI.parcelasAbertas?'▾':'▸')+' parcelamentos em aberto ('+abertos.length+')</b></div>';
+      + '<b class="tiny">'+(MOV_UI.parcelasAbertas?'▾':'▸')+' 💳 parcelamentos em aberto ('+abertos.length+')</b></div>';
     if (MOV_UI.parcelasAbertas) {
       html += '<div class="list" style="margin-top:6px">' + abertos.map(p => {
-        const badge = p.inconsistente ? ' <span class="badge warn" title="valores de parcela variam demais dentro desta série — revisar manualmente">revisar</span>' : '';
-        return '<div class="item"><span>💳</span><div class="grow"><div class="ttl">'+esc(p.descricao)+badge+'</div>'
-          + '<div class="sub">'+p.parcelas_pagas+'/'+p.total_parcelas+' pagas · até '+(p.vai_pagar_ate ? fmtMes(String(p.vai_pagar_ate).slice(0,7)) : '—')+'</div></div>'
+        const cat = movCatExibicao(p);
+        return '<div class="item"><span class="dot" style="background:'+movCatCor(cat)+'"></span><div class="grow"><div class="ttl">'+esc(p.descricao)+'</div>'
+          + '<div class="sub">'+esc(cat)+' · '+p.parcelas_pagas+'/'+p.total_parcelas+' · faltam '+p.faltam+' · até '+(p.vai_pagar_ate ? fmtMes(String(p.vai_pagar_ate).slice(0,7)) : '—')+'</div></div>'
           + '<b class="err">'+fmtBRL(p.valor_parcela)+'</b></div>';
+      }).join('') + '</div>';
+    }
+  }
+  if (recorrentes.length) {
+    html += '<div class="row" style="margin-top:10px;cursor:pointer" data-act="mov-recorrentes-toggle">'
+      + '<b class="tiny">'+(MOV_UI.recorrentesAbertos?'▾':'▸')+' 🔁 recorrentes detectados ('+recorrentes.length+')</b></div>';
+    if (MOV_UI.recorrentesAbertos) {
+      html += '<div class="list" style="margin-top:6px">' + recorrentes.map(r => {
+        const cat = movCatExibicao(r);
+        return '<div class="item"><span class="dot" style="background:'+movCatCor(cat)+'"></span><div class="grow"><div class="ttl">'+esc(r.descricao)+'</div>'
+          + '<div class="sub">'+esc(cat)+' · '+r.meses_janela+' dos últimos 6 meses'
+          + (Number(r.pago_mes_atual) ? ' · já pago este mês: '+fmtBRL(r.pago_mes_atual) : '')+'</div></div>'
+          + '<b class="err">'+fmtBRL(r.valor_mensal)+'/mês</b></div>';
       }).join('') + '</div>';
     }
   }
   return html + '</div>';
 }
+const agruparSoma = (arr, chave) => { const o = {}; arr.forEach(l => { const k = chave(l); o[k] = (o[k] || 0) + l.v; }); return o; };
+act('mov-prev-visao', el => { MOV_UI.previsaoVisao = el.dataset.v; render({manterScroll:true, semFade:true}); });
+act('mov-recorrentes-toggle', () => { MOV_UI.recorrentesAbertos = !MOV_UI.recorrentesAbertos; render({manterScroll:true, semFade:true}); });
 act('mov-parcelas-toggle', () => { MOV_UI.parcelasAbertas = !MOV_UI.parcelasAbertas; render({manterScroll:true, semFade:true}); });
 act('mov-parcelas-recarregar', async () => {
   movInvalidarParcelas();
