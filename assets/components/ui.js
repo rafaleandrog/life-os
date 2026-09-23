@@ -143,6 +143,84 @@ function svgBarrasEmpilhadas(cats, series, o={}) {
   }).join('');
   return '<div class="chartbox"><svg viewBox="0 0 '+W+' '+H+'">'+corpo+'</svg></div>';
 }
+/* Receita × despesa × lucro por mês, num eixo só (R$): receita sobe a partir do zero,
+   despesa desce, e a linha liga o lucro (receita − despesa) de cada mês. Como o lucro
+   fica sempre entre −despesa e +receita, a linha cabe na mesma escala das barras. */
+function svgFluxoMensal(meses, o={}) { // [{x, receita, despesa, lucro, dica?}]
+  if (!meses.length) return '<div class="empty small">sem dados ainda</div>';
+  const W = o.w||560, H = o.h||230, PT = 14, PB = 22, P = 6;
+  const fmt = o.fmt || (v => fmtNum(v));
+  const top = Math.max(...meses.map(m => m.receita), 1), bot = Math.max(...meses.map(m => m.despesa), 1);
+  const alt = H - PT - PB, y0 = PT + alt * top / (top + bot);
+  const Y = v => y0 - v * alt / (top + bot);
+  const larg = (W - P*2) / meses.length, bw = Math.min(30, larg - 12);
+  const cx = i => P + i*larg + larg/2;
+  const barra = (x, ya, yb, cor, cima) => { // 4px arredondado só na ponta de dado, reto na base
+    const h = Math.abs(yb - ya); if (h < 0.5) return '';
+    const r = Math.min(4, h, bw/2), l = x - bw/2, rr = x + bw/2;
+    const d = cima
+      ? 'M'+l+' '+y0+' V'+(ya+r)+' Q'+l+' '+ya+' '+(l+r)+' '+ya+' H'+(rr-r)+' Q'+rr+' '+ya+' '+rr+' '+(ya+r)+' V'+y0+' Z'
+      : 'M'+l+' '+y0+' V'+(yb-r)+' Q'+l+' '+yb+' '+(l+r)+' '+yb+' H'+(rr-r)+' Q'+rr+' '+yb+' '+rr+' '+(yb-r)+' V'+y0+' Z';
+    return '<path d="'+d+'" fill="'+cor+'"/>';
+  };
+  let corpo = '';
+  meses.forEach((m, i) => {
+    corpo += barra(cx(i), Y(m.receita), y0 + 1, 'var(--ok)', true)
+      + barra(cx(i), y0 - 1, Y(-m.despesa), 'var(--err)', false)
+      + '<text x="'+cx(i)+'" y="'+(H-6)+'" font-size="9.5" fill="#9AA0B0" text-anchor="middle">'+esc(m.x)+'</text>';
+  });
+  corpo += '<line x1="'+P+'" x2="'+(W-P)+'" y1="'+y0+'" y2="'+y0+'" stroke="#9AA0B0" stroke-opacity=".5" stroke-width="1"/>';
+  const path = meses.map((m, i) => (i?'L':'M') + cx(i).toFixed(1) + ' ' + Y(m.lucro).toFixed(1)).join(' ');
+  corpo += '<path d="'+path+'" fill="none" stroke="var(--txt)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  meses.forEach((m, i) => {
+    const y = Y(m.lucro), acima = m.lucro >= 0;
+    corpo += '<circle cx="'+cx(i)+'" cy="'+y.toFixed(1)+'" r="4" fill="'+(acima?'var(--ok)':'var(--err)')+'" stroke="var(--card)" stroke-width="2"/>'
+      + '<text x="'+cx(i)+'" y="'+(y + (acima ? -8 : 15)).toFixed(1)+'" font-size="9" font-weight="700" fill="#F2F3F7" text-anchor="middle"'
+      + ' stroke="#16181F" stroke-width="3" paint-order="stroke">'+esc(fmt(m.lucro))+'</text>';
+  });
+  // alvo de hover por coluna (maior que a marca), com o detalhe do mês
+  corpo += meses.map((m, i) => '<rect x="'+(P+i*larg)+'" y="0" width="'+larg+'" height="'+(H-PB)+'" fill="transparent"><title>'
+    + esc(m.dica || (m.x+'\nreceita '+fmtBRL(m.receita)+'\ndespesa '+fmtBRL(m.despesa)+'\nlucro '+fmtBRL(m.lucro)))+'</title></rect>').join('');
+  return '<div class="chartbox"><svg viewBox="0 0 '+W+' '+H+'">'+corpo+'</svg></div>'
+    + '<div class="legend" style="gap:14px;margin-top:4px"><span><i class="dot" style="background:var(--ok)"></i>receita</span>'
+    + '<span><i class="dot" style="background:var(--err)"></i>despesa</span>'
+    + '<span><i style="display:inline-block;width:14px;height:2px;background:var(--txt);vertical-align:middle;margin-right:4px"></i>lucro do mês</span></div>';
+}
+/* Barras (valor ocorrido) + linha (teto esperado) na mesma escala. Trecho da linha
+   tracejado = teto estimado (sem limite definido naquele mês); contínuo = definido. */
+function svgBarrasLinha(itens, o={}) { // [{x, barra, linha, estimado, dica?}]
+  if (!itens.length) return '<div class="empty small">sem dados ainda</div>';
+  const W = o.w||560, H = o.h||200, PT = 16, PB = 22, P = 6;
+  const fmt = o.fmt || (v => fmtNum(v));
+  const mx = Math.max(...itens.map(i => Math.max(i.barra || 0, i.linha || 0)), 1);
+  const Y = v => H - PB - v * (H - PB - PT) / mx;
+  const larg = (W - P*2) / itens.length, bw = Math.min(30, larg - 12);
+  const cx = i => P + i*larg + larg/2;
+  const cor = o.cor || 'var(--acc)';
+  let corpo = '';
+  itens.forEach((it, i) => {
+    const y = Y(it.barra || 0), h = H - PB - y;
+    if (h > 0.5) corpo += '<rect x="'+(cx(i)-bw/2).toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+h.toFixed(1)+'" rx="3" fill="'+cor+'"/>';
+    corpo += '<text x="'+cx(i)+'" y="'+(H-6)+'" font-size="9.5" fill="#9AA0B0" text-anchor="middle">'+esc(it.x)+'</text>';
+  });
+  for (let i = 1; i < itens.length; i++) {
+    const a = itens[i-1], b = itens[i];
+    if (!(a.linha > 0) || !(b.linha > 0)) continue;
+    corpo += '<line x1="'+cx(i-1)+'" y1="'+Y(a.linha).toFixed(1)+'" x2="'+cx(i)+'" y2="'+Y(b.linha).toFixed(1)+'" stroke="var(--txt)" stroke-width="2"'
+      + (a.estimado || b.estimado ? ' stroke-dasharray="5 4"' : '') + ' stroke-linecap="round"/>';
+  }
+  itens.forEach((it, i) => { if (it.linha > 0) corpo += '<circle cx="'+cx(i)+'" cy="'+Y(it.linha).toFixed(1)+'" r="3.5" fill="var(--txt)" stroke="var(--card)" stroke-width="2"/>'; });
+  // rótulos por cima da linha, com halo da cor do card para não se misturarem a ela
+  itens.forEach((it, i) => {
+    if (!it.barra) return;
+    const estouro = it.linha > 0 && it.barra > it.linha;
+    corpo += '<text x="'+cx(i)+'" y="'+(Y(it.barra)-4).toFixed(1)+'" font-size="8.5" fill="'+(estouro?'#FF5C7A':'#9AA0B0')+'" text-anchor="middle"'
+      + ' stroke="#16181F" stroke-width="3" paint-order="stroke">'+(estouro?'▲':'')+esc(fmt(it.barra))+'</text>';
+  });
+  corpo += itens.map((it, i) => '<rect x="'+(P+i*larg)+'" y="0" width="'+larg+'" height="'+(H-PB)+'" fill="transparent"><title>'
+    + esc(it.dica || (it.x+'\ngasto '+fmtBRL(it.barra)+'\nteto '+fmtBRL(it.linha)))+'</title></rect>').join('');
+  return '<div class="chartbox"><svg viewBox="0 0 '+W+' '+H+'">'+corpo+'</svg></div>';
+}
 function svgPizza(itens, o={}) { // [{label, valor, cor}]
   itens = itens.filter(i => i.valor > 0);
   if (!itens.length) return '<div class="empty small">sem dados ainda</div>';
